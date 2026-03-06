@@ -4,10 +4,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Slider
 
 # ====================================================
-# RIDGE MODE (choose one)
-#   "argmax"        : ridge is the global maximum of Gamma each frame (can jump)
-#   "centroid_top"  : ridge is centroid of top-q% Gamma mass (smooth)
-#   "localmax_track": follow nearest strong local maximum (reduces jumps)
+# RIDGE MODE
 # ====================================================
 RIDGE_MODE = "centroid_top"
 CENTROID_TOP_Q = 0.02
@@ -15,25 +12,15 @@ LOCALMAX_RADIUS = 20
 LOCALMAX_SMOOTH_ALPHA = 0.0
 
 # ====================================================
-# FLOW / ALIGNMENT TEST SETTINGS
-#   - save complex psi frames so we can compute Schr current j
-#   - draw a current/velocity arrow at ridge point
-#   - compute alignment cos(theta) between ridge tangent and velocity direction
+# FLOW / ALIGNMENT SETTINGS
 # ====================================================
 SAVE_COMPLEX_PSI_FRAMES = True
 DRAW_FLOW_ARROW = True
 ARROW_SCALE = 3.0
-ARROW_STRIDE = 1
 
-PRINT_ALIGNMENT_STATS = True
-
-# Robustness knobs
 ALIGN_EPS_RHO = 1e-10
 ALIGN_EPS_SPEED = 1e-12
 
-# ====================================================
-# ARROW STABILIZATION
-# ====================================================
 ARROW_SPATIAL_AVG = True
 ARROW_AVG_RADIUS = 3
 ARROW_AVG_GAUSS_SIGMA = 1.5
@@ -44,19 +31,64 @@ ARROW_SMOOTH_ALPHA = 0.20
 ARROW_HOLD_LAST_WHEN_INVALID = True
 ARROW_HIDE_WHEN_INVALID = False
 
+SHOW_TRAIL = True
+TRAIL_LEN = 40
+
+PRINT_ALIGNMENT_STATS = True
+
 # ====================================================
-# DISPLAY STABILITY
+# DISPLAY SETTINGS
 # ====================================================
 USE_FIXED_DISPLAY_SCALE = True
 DISPLAY_Q = 0.995
 GAMMA = 0.5
 IM_INTERPOLATION = "nearest"
 
-SHOW_TRAIL = True
-TRAIL_LEN = 40
+# ====================================================
+# OPTIONAL EXTRA DIAGNOSTIC
+# ====================================================
+ENABLE_DIVERGENCE_DIAGNOSTIC = True
+PRINT_DIVERGENCE_STATS = True
 
 # ====================================================
-# 0) Alustus: näkyvä alue + padding
+# BOHMIAN TRAJECTORY OVERLAY (heavy -> flagin takana)
+# ====================================================
+ENABLE_BOHMIAN_OVERLAY = True
+
+# init modes:
+#   "born_initial"  : sample from initial |psi|^2 in visible region
+#   "packet_center" : center + optional jitter
+#   "ridge_start"   : start from initial ridge
+#   "custom"        : use BOHMIAN_CUSTOM_POINTS
+BOHMIAN_INIT_MODE = "born_initial"
+BOHMIAN_N_TRAJ = 5
+BOHMIAN_CUSTOM_POINTS = [(-15.0, 0.0)]
+
+BOHMIAN_INIT_JITTER = 0.0
+BOHMIAN_WITH_REPLACEMENT = False
+BOHMIAN_RNG_SEED = 20260306
+
+BOHMIAN_STOP_ON_LOW_RHO = True
+BOHMIAN_MIN_RHO = 1e-8
+BOHMIAN_STOP_OUTSIDE_VISIBLE = True
+
+# RK4 settings
+BOHMIAN_USE_RK4 = True
+
+# drawing
+BOHMIAN_SHOW_HEAD = True
+BOHMIAN_SHOW_TRAIL = True
+BOHMIAN_SHOW_FULL_PATH_EACH_FRAME = True
+BOHMIAN_TRAIL_LEN = 120
+BOHMIAN_COLOR = "cyan"
+BOHMIAN_HEAD_COLOR = "deepskyblue"
+BOHMIAN_LINEWIDTH = 1.6
+BOHMIAN_HEAD_SIZE = 4
+
+PRINT_BOHMIAN_STATS = True
+
+# ====================================================
+# 0) Grid / visible region
 # ====================================================
 VISIBLE_LX   = 40.0
 VISIBLE_LY   = 20.0
@@ -80,7 +112,6 @@ X, Y = np.meshgrid(x, y)
 m_mass = 1.0
 hbar   = 1.0
 
-# Näkyvän ikkunan indeksit (keskelle isoa hilaa)
 cx = Nx // 2
 cy = Ny // 2
 hx = N_VISIBLE_X // 2
@@ -95,11 +126,15 @@ mask_visible[ys, xs] = True
 X_vis = X[ys, xs]
 Y_vis = Y[ys, xs]
 
-# näkyvän ikkunan 1D koordinaatit ridge-markeria varten
 x_vis_1d = x[xs]
 y_vis_1d = y[ys]
 
-# Fourier-hilat
+x_vis_min = float(x_vis_1d[0])
+x_vis_max = float(x_vis_1d[-1] + dx)
+y_vis_min = float(y_vis_1d[0])
+y_vis_max = float(y_vis_1d[-1] + dy)
+
+# Fourier grids
 kx = 2 * np.pi * np.fft.fftfreq(Nx, d=dx)
 ky = 2 * np.pi * np.fft.fftfreq(Ny, d=dy)
 KX, KY = np.meshgrid(kx, ky)
@@ -109,7 +144,7 @@ def kinetic_phase(dt):
     return np.exp(-1j * K2 * dt / (2 * m_mass))
 
 # ====================================================
-# 1) Kaksoisrako: este + kaksi rakoa
+# 1) Double slit barrier
 # ====================================================
 barrier_center_x  = 0.0
 barrier_thickness = 0.4
@@ -139,7 +174,7 @@ else:
     V_real = V_barrier * wall
 
 # ====================================================
-# 2) CAP reunoille + ruutualue
+# 2) CAP + screen
 # ====================================================
 def smooth_cap_edge(X, Y, Lx, Ly, cap_width=8.0, strength=2.0, power=4):
     dist_to_x = (Lx/2) - np.abs(X)
@@ -179,7 +214,7 @@ def potential_phase(V, dt):
     return np.exp(-1j * V * dt / hbar)
 
 # ====================================================
-# 3) Normalisointi ja odotusarvot
+# 3) Helpers
 # ====================================================
 def norm_L2(field):
     return float(np.sqrt(np.sum(np.abs(field)**2) * dx * dy))
@@ -200,7 +235,7 @@ def expval_xy_unitnorm(psi_unit):
     return mx, my
 
 # ====================================================
-# 4) Jatkuva mittaus (SSE)
+# 4) Continuous measurement
 # ====================================================
 USE_CONTINUOUS_MEAS = True
 KAPPA_MEAS = 0.02
@@ -226,12 +261,11 @@ def continuous_measurement_update_preserve_norm(psi, dt, kappa, rng):
 
     psi_u2 = psi_u * np.exp(drift + stoch)
     psi_u2, _ = normalize_unit(psi_u2)
-
     psi_new = psi_u2 * n0
     return psi_new, (dWx, dWy, mx, my)
 
 # ====================================================
-# 5) Alkuarvo ψ
+# 5) Initial packet
 # ====================================================
 def make_packet(x0, y0, sigma0, k0x, k0y):
     XR = X - x0
@@ -250,12 +284,11 @@ psi = make_packet(x0, y0, sigma0, k0x, k0y).astype(np.complex128)
 psi, _ = normalize_unit(psi)
 
 # ====================================================
-# 6) Split-operator askel
+# 6) Split-operator
 # ====================================================
 dt         = 0.003
 n_steps    = 2200
 save_every = 5
-tau_step   = save_every * dt
 
 K_phase_fwd = kinetic_phase(dt)
 K_phase_bwd = kinetic_phase(-dt)
@@ -274,7 +307,7 @@ def step_field(field, K_phase, P_half):
     return field
 
 # ====================================================
-# 7) Forward: ψ(t) + tallenna kompleksinen ψ näkyvältä alueelta
+# 7) Forward frames
 # ====================================================
 frames_psi = []
 times      = []
@@ -300,7 +333,6 @@ for n in range(n_steps + 1):
 
     if n < n_steps:
         psi_cur = step_field(psi_cur, K_phase_fwd, P_half_fwd)
-
         if USE_CONTINUOUS_MEAS:
             psi_cur, _rec = continuous_measurement_update_preserve_norm(
                 psi_cur, dt, KAPPA_MEAS, rng_meas
@@ -311,11 +343,12 @@ times      = np.array(times)
 norms_psi  = np.array(norms_psi)
 psi_vis_frames = np.array(psi_vis_frames) if SAVE_COMPLEX_PSI_FRAMES else None
 Nt         = len(times)
+tau_step   = save_every * dt
 
 print("Forward valmis.")
 
 # ====================================================
-# 8) Detektioajan arvio + Born-otanta klikille
+# 8) Detection time + click
 # ====================================================
 if not np.any(screen_mask_vis):
     raise RuntimeError("screen_mask_vis tyhjä: tarkista ruudun parametrit.")
@@ -340,7 +373,7 @@ iy_vis, ix_vis = np.unravel_index(flat_idx, w.shape)
 iy_click = (cy - hy) + iy_vis
 ix_click = (cx - hx) + ix_vis
 x_click = float(X[iy_click, ix_click])
-y_click = float(Y[iy_click, iy_click]) if False else float(Y[iy_click, ix_click])
+y_click = float(Y[iy_click, ix_click])
 
 print(f"Click: x≈{x_click:.3f}, y≈{y_click:.3f}")
 
@@ -378,7 +411,7 @@ for i in range(Nt):
 print("phi_tau-kirjasto valmis.")
 
 # ====================================================
-# 10) Emix(t; sigmaT) aikasiirrolla
+# 10) Emix with temporal interpolation
 # ====================================================
 def gaussian_weights(Tk, mu, sigma):
     if sigma <= 0:
@@ -390,19 +423,19 @@ def gaussian_weights(Tk, mu, sigma):
     s = w.sum()
     return w / s if s > 0 else w
 
-def build_Emix_from_phi_tau(phi_tau_frames, times, t_det, sigmaT, tau_step, K_JITTER=13):
-    Nt = len(times)
+def build_Emix_from_phi_tau(phi_tau_frames, times, t_det, sigmaT, K_JITTER=13):
+    Nt_ = len(times)
     halfK = K_JITTER // 2
     idx_det2 = int(np.argmin(np.abs(times - t_det)))
 
     k_inds = np.arange(idx_det2 - halfK, idx_det2 + halfK + 1)
-    k_inds = np.clip(k_inds, 0, Nt - 1)
+    k_inds = np.clip(k_inds, 0, Nt_ - 1)
     k_inds = np.unique(k_inds)
 
     Tk = times[k_inds]
     w = gaussian_weights(Tk, t_det, sigmaT)
 
-    Emix = np.zeros((Nt, phi_tau_frames.shape[1], phi_tau_frames.shape[2]), dtype=float)
+    Emix = np.zeros((Nt_, phi_tau_frames.shape[1], phi_tau_frames.shape[2]), dtype=float)
 
     for i, ti in enumerate(times):
         tau = Tk - ti
@@ -411,18 +444,18 @@ def build_Emix_from_phi_tau(phi_tau_frames, times, t_det, sigmaT, tau_step, K_JI
             continue
 
         j_float = tau[valid] / tau_step
-
         j0 = np.floor(j_float).astype(int)
         j1 = j0 + 1
 
-        j0 = np.clip(j0, 0, Nt - 1)
-        j1 = np.clip(j1, 0, Nt - 1)
+        j0 = np.clip(j0, 0, Nt_ - 1)
+        j1 = np.clip(j1, 0, Nt_ - 1)
 
         alpha = (j_float - j0).astype(float)
 
-        phi_interp = (1 - alpha)[:, None, None] * phi_tau_frames[j0] + \
-                     alpha[:, None, None] * phi_tau_frames[j1]
-
+        phi_interp = (
+            (1.0 - alpha)[:, None, None] * phi_tau_frames[j0] +
+            alpha[:, None, None] * phi_tau_frames[j1]
+        )
         Emix[i] = np.sum((w[valid])[:, None, None] * phi_interp, axis=0)
 
     return Emix
@@ -438,8 +471,7 @@ def make_rho(frames_psi, Emix):
     return out
 
 # ====================================================
-# 11) Schr probability current + velocity field
-#   j = (hbar/m) Im(conj(psi) grad psi)
+# 11) Schrödinger current / velocity
 # ====================================================
 def schrodinger_current_visible(psi_vis):
     dpsi_dx = (np.roll(psi_vis, -1, axis=1) - np.roll(psi_vis, 1, axis=1)) / (2.0 * dx)
@@ -458,7 +490,7 @@ def velocity_from_current(jx, jy, rho, eps=ALIGN_EPS_RHO):
     return vx, vy, sp
 
 # ====================================================
-# 12) RIDGE extraction helpers
+# 12) Ridge helpers
 # ====================================================
 def ridge_argmax(Gamma, x_vis_1d, y_vis_1d):
     idx = int(np.argmax(Gamma))
@@ -491,17 +523,17 @@ def ridge_centroid_top(Gamma, x_vis_1d, y_vis_1d, top_q=0.02, eps=1e-30):
 
 def ridge_localmax_track(Gamma, x_vis_1d, y_vis_1d, prev_ix, prev_iy, radius=20):
     H, W_ = Gamma.shape
-    x0 = int(np.clip(prev_ix, 0, W_-1))
-    y0 = int(np.clip(prev_iy, 0, H-1))
-    x1 = max(0, x0 - radius)
-    x2 = min(W_, x0 + radius + 1)
-    y1 = max(0, y0 - radius)
-    y2 = min(H, y0 + radius + 1)
+    x0i = int(np.clip(prev_ix, 0, W_-1))
+    y0i = int(np.clip(prev_iy, 0, H-1))
+    x1 = max(0, x0i - radius)
+    x2 = min(W_, x0i + radius + 1)
+    y1 = max(0, y0i - radius)
+    y2 = min(H, y0i + radius + 1)
 
     sub = Gamma[y1:y2, x1:x2]
     if sub.size == 0:
         xg, yg, sg = ridge_argmax(Gamma, x_vis_1d, y_vis_1d)
-        return xg, yg, sg, x0, y0
+        return xg, yg, sg, x0i, y0i
 
     idx = int(np.argmax(sub))
     sy, sx = np.unravel_index(idx, sub.shape)
@@ -514,18 +546,18 @@ def compute_ridge_xy(frames_psi, Emix, x_vis_1d, y_vis_1d,
                      top_q=0.02,
                      radius=20,
                      alpha_smooth=0.0):
-    Nt = frames_psi.shape[0]
-    ridge_x = np.zeros(Nt, dtype=float)
-    ridge_y = np.zeros(Nt, dtype=float)
-    ridge_s = np.zeros(Nt, dtype=float)
+    Nt_ = frames_psi.shape[0]
+    ridge_x = np.zeros(Nt_, dtype=float)
+    ridge_y = np.zeros(Nt_, dtype=float)
+    ridge_s = np.zeros(Nt_, dtype=float)
 
     Gamma0 = frames_psi[0] * Emix[0]
-    x0, y0, s0 = ridge_argmax(Gamma0, x_vis_1d, y_vis_1d)
-    ridge_x[0], ridge_y[0], ridge_s[0] = x0, y0, s0
-    prev_ix = int(np.argmin(np.abs(x_vis_1d - x0)))
-    prev_iy = int(np.argmin(np.abs(y_vis_1d - y0)))
+    x0r, y0r, s0 = ridge_argmax(Gamma0, x_vis_1d, y_vis_1d)
+    ridge_x[0], ridge_y[0], ridge_s[0] = x0r, y0r, s0
+    prev_ix = int(np.argmin(np.abs(x_vis_1d - x0r)))
+    prev_iy = int(np.argmin(np.abs(y_vis_1d - y0r)))
 
-    for i in range(1, Nt):
+    for i in range(1, Nt_):
         Gamma = frames_psi[i] * Emix[i]
 
         if mode == "argmax":
@@ -552,20 +584,20 @@ def compute_ridge_xy(frames_psi, Emix, x_vis_1d, y_vis_1d,
     return ridge_x, ridge_y, ridge_s
 
 # ====================================================
-# 13) Ridge tangent + robust cos(theta)
+# 13) Ridge tangent + local weighted direction
 # ====================================================
 def ridge_tangent_unit(ridge_x, ridge_y):
-    Nt = len(ridge_x)
-    tx = np.zeros(Nt, dtype=float)
-    ty = np.zeros(Nt, dtype=float)
-    for i in range(1, Nt - 1):
+    Nt_ = len(ridge_x)
+    tx = np.zeros(Nt_, dtype=float)
+    ty = np.zeros(Nt_, dtype=float)
+    for i in range(1, Nt_ - 1):
         dxp = ridge_x[i+1] - ridge_x[i-1]
         dyp = ridge_y[i+1] - ridge_y[i-1]
         n = np.hypot(dxp, dyp)
         if n > 0:
             tx[i] = dxp / n
             ty[i] = dyp / n
-    if Nt >= 2:
+    if Nt_ >= 2:
         tx[0], ty[0] = tx[1], ty[1]
         tx[-1], ty[-1] = tx[-2], ty[-2]
     return tx, ty
@@ -609,22 +641,30 @@ def local_weighted_mean(vx, vy, speed, ix, iy, kernel=_GK):
 
     return vxm / spd, vym / spd, spd
 
-def alignment_series_from_psi(psi_vis_frames, ridge_x, ridge_y, x_vis_1d, y_vis_1d,
-                              eps_rho=ALIGN_EPS_RHO, eps_speed=ALIGN_EPS_SPEED):
-    Nt = len(ridge_x)
-    cos_th = np.full(Nt, np.nan, dtype=float)
-    speed  = np.full(Nt, np.nan, dtype=float)
-    ux     = np.full(Nt, np.nan, dtype=float)
-    uy     = np.full(Nt, np.nan, dtype=float)
+# ====================================================
+# 14) Alignment + divergence
+# ====================================================
+def divergence_of_velocity(vx, vy):
+    dvx_dx = (np.roll(vx, -1, axis=1) - np.roll(vx, 1, axis=1)) / (2.0 * dx)
+    dvy_dy = (np.roll(vy, -1, axis=0) - np.roll(vy, 1, axis=0)) / (2.0 * dy)
+    return dvx_dx + dvy_dy
+
+def alignment_and_diagnostics_from_psi(psi_vis_frames, ridge_x, ridge_y, x_vis_1d, y_vis_1d):
+    Nt_ = len(ridge_x)
+    cos_th = np.full(Nt_, np.nan, dtype=float)
+    speed  = np.full(Nt_, np.nan, dtype=float)
+    ux     = np.full(Nt_, np.nan, dtype=float)
+    uy     = np.full(Nt_, np.nan, dtype=float)
+    div_v_at_ridge = np.full(Nt_, np.nan, dtype=float)
 
     tx, ty = ridge_tangent_unit(ridge_x, ridge_y)
 
-    for i in range(Nt):
+    for i in range(Nt_):
         ix = int(np.argmin(np.abs(x_vis_1d - ridge_x[i])))
         iy = int(np.argmin(np.abs(y_vis_1d - ridge_y[i])))
 
         jx, jy, rho_s = schrodinger_current_visible(psi_vis_frames[i])
-        vx, vy, sp = velocity_from_current(jx, jy, rho_s, eps=eps_rho)
+        vx, vy, sp = velocity_from_current(jx, jy, rho_s, eps=ALIGN_EPS_RHO)
 
         if ARROW_SPATIAL_AVG:
             uxi, uyi, spd = local_weighted_mean(vx, vy, sp, ix, iy)
@@ -636,13 +676,15 @@ def alignment_series_from_psi(psi_vis_frames, ridge_x, ridge_y, x_vis_1d, y_vis_
             else:
                 uxi, uyi = np.nan, np.nan
 
-        if not (np.isfinite(uxi) and np.isfinite(uyi) and np.isfinite(spd) and spd > eps_speed):
-            continue
+        if np.isfinite(uxi) and np.isfinite(uyi) and np.isfinite(spd) and (spd > ALIGN_EPS_SPEED):
+            ux[i] = uxi
+            uy[i] = uyi
+            speed[i] = spd
+            cos_th[i] = float(np.clip(uxi * tx[i] + uyi * ty[i], -1.0, 1.0))
 
-        ux[i] = uxi
-        uy[i] = uyi
-        speed[i] = spd
-        cos_th[i] = float(uxi * tx[i] + uyi * ty[i])
+        if ENABLE_DIVERGENCE_DIAGNOSTIC:
+            div_v = divergence_of_velocity(vx, vy)
+            div_v_at_ridge[i] = float(div_v[iy, ix])
 
     if ARROW_TEMPORAL_SMOOTH:
         a = float(np.clip(ARROW_SMOOTH_ALPHA, 0.0, 1.0))
@@ -653,7 +695,7 @@ def alignment_series_from_psi(psi_vis_frames, ridge_x, ridge_y, x_vis_1d, y_vis_
         last_u = None
         last_v = None
         last_s = None
-        for i in range(Nt):
+        for i in range(Nt_):
             if np.isfinite(ux_f[i]) and np.isfinite(uy_f[i]):
                 if last_u is not None:
                     uu = (1-a) * ux_f[i] + a * last_u
@@ -669,20 +711,227 @@ def alignment_series_from_psi(psi_vis_frames, ridge_x, ridge_y, x_vis_1d, y_vis_
                 last_s = sp_f[i] if np.isfinite(sp_f[i]) else last_s
 
         ux, uy, speed = ux_f, uy_f, sp_f
-        tx, ty = ridge_tangent_unit(ridge_x, ridge_y)
-        for i in range(Nt):
-            if np.isfinite(ux[i]) and np.isfinite(uy[i]):
-                cos_th[i] = float(ux[i] * tx[i] + uy[i] * ty[i])
 
-    cos_th = np.clip(cos_th, -1.0, 1.0)
-    return cos_th, speed, ux, uy
+        tx, ty = ridge_tangent_unit(ridge_x, ridge_y)
+        for i in range(Nt_):
+            if np.isfinite(ux[i]) and np.isfinite(uy[i]):
+                cos_th[i] = float(np.clip(ux[i] * tx[i] + uy[i] * ty[i], -1.0, 1.0))
+
+    return cos_th, speed, ux, uy, div_v_at_ridge
 
 # ====================================================
-# 14) Build rho + ridge + velocity/align test for given sigmaT
+# 15) Bohmian helpers
+# ====================================================
+def bilinear_interpolate_scalar(field, xq, yq, x0_arr, y0_arr, dx_, dy_):
+    nx_ = len(x0_arr)
+    ny_ = len(y0_arr)
+
+    fx = (xq - x0_arr[0]) / dx_
+    fy = (yq - y0_arr[0]) / dy_
+
+    if not (0.0 <= fx < nx_ - 1 and 0.0 <= fy < ny_ - 1):
+        return np.nan
+
+    ix0 = int(np.floor(fx))
+    iy0 = int(np.floor(fy))
+    txi = fx - ix0
+    tyi = fy - iy0
+
+    f00 = field[iy0, ix0]
+    f10 = field[iy0, ix0 + 1]
+    f01 = field[iy0 + 1, ix0]
+    f11 = field[iy0 + 1, ix0 + 1]
+
+    return (
+        (1.0 - txi) * (1.0 - tyi) * f00 +
+        txi * (1.0 - tyi) * f10 +
+        (1.0 - txi) * tyi * f01 +
+        txi * tyi * f11
+    )
+
+def bilinear_interpolate_vector(vx, vy, xq, yq, x0_arr, y0_arr, dx_, dy_):
+    vxq = bilinear_interpolate_scalar(vx, xq, yq, x0_arr, y0_arr, dx_, dy_)
+    vyq = bilinear_interpolate_scalar(vy, xq, yq, x0_arr, y0_arr, dx_, dy_)
+    return vxq, vyq
+
+def is_inside_visible(xp, yp):
+    return (x_vis_min <= xp < x_vis_max) and (y_vis_min <= yp < y_vis_max)
+
+def build_velocity_frames_from_psi(psi_vis_frames):
+    Nt_ = psi_vis_frames.shape[0]
+    vx_frames = np.zeros((Nt_, N_VISIBLE_Y, N_VISIBLE_X), dtype=float)
+    vy_frames = np.zeros((Nt_, N_VISIBLE_Y, N_VISIBLE_X), dtype=float)
+    rho_frames = np.zeros((Nt_, N_VISIBLE_Y, N_VISIBLE_X), dtype=float)
+
+    for i in range(Nt_):
+        jx, jy, rho_s = schrodinger_current_visible(psi_vis_frames[i])
+        vx, vy, _sp = velocity_from_current(jx, jy, rho_s, eps=ALIGN_EPS_RHO)
+        vx_frames[i] = vx
+        vy_frames[i] = vy
+        rho_frames[i] = rho_s
+
+    return vx_frames, vy_frames, rho_frames
+
+def velocity_rho_at_time(vx_frames, vy_frames, rho_frames, t_query):
+    """
+    Linear interpolation in time between saved frames.
+    Returns (vx_t, vy_t, rho_t) full 2D fields on visible grid.
+    """
+    if t_query <= times[0]:
+        return vx_frames[0], vy_frames[0], rho_frames[0]
+    if t_query >= times[-1]:
+        return vx_frames[-1], vy_frames[-1], rho_frames[-1]
+
+    s = (t_query - times[0]) / tau_step
+    i0 = int(np.floor(s))
+    i1 = min(i0 + 1, len(times) - 1)
+    a = float(s - i0)
+
+    vx_t = (1.0 - a) * vx_frames[i0] + a * vx_frames[i1]
+    vy_t = (1.0 - a) * vy_frames[i0] + a * vy_frames[i1]
+    rho_t = (1.0 - a) * rho_frames[i0] + a * rho_frames[i1]
+    return vx_t, vy_t, rho_t
+
+def velocity_sample_time_space(vx_frames, vy_frames, rho_frames, t_query, xq, yq):
+    vx_t, vy_t, rho_t = velocity_rho_at_time(vx_frames, vy_frames, rho_frames, t_query)
+    rho_q = bilinear_interpolate_scalar(rho_t, xq, yq, x_vis_1d, y_vis_1d, dx, dy)
+    vx_q, vy_q = bilinear_interpolate_vector(vx_t, vy_t, xq, yq, x_vis_1d, y_vis_1d, dx, dy)
+    return vx_q, vy_q, rho_q
+
+def sample_born_initial_points_from_visible_psi(psi0_vis, ntraj, rng, with_replacement=False):
+    rho0 = np.abs(psi0_vis)**2
+    w = rho0.ravel().astype(float)
+    s = float(np.sum(w))
+    if s <= 0:
+        return [(x0, y0)]
+    p = w / s
+
+    nsel = min(ntraj, p.size) if not with_replacement else ntraj
+    idxs = rng.choice(p.size, size=nsel, replace=with_replacement, p=p)
+
+    pts = []
+    for idx in np.atleast_1d(idxs):
+        iy0, ix0 = np.unravel_index(int(idx), rho0.shape)
+        pts.append((float(x_vis_1d[ix0]), float(y_vis_1d[iy0])))
+    return pts
+
+def make_bohmian_initial_points(mode, ntraj, custom_points, ridge_x0, ridge_y0,
+                                x0_packet, y0_packet, psi0_vis, jitter=0.0):
+    rng_b = np.random.default_rng(BOHMIAN_RNG_SEED)
+
+    if mode == "born_initial":
+        pts = sample_born_initial_points_from_visible_psi(
+            psi0_vis, ntraj, rng_b, with_replacement=BOHMIAN_WITH_REPLACEMENT
+        )
+        return pts
+
+    if mode == "packet_center":
+        cx0, cy0 = x0_packet, y0_packet
+        if ntraj <= 1:
+            return [(cx0, cy0)]
+        offsets = np.linspace(-(ntraj-1)/2.0, (ntraj-1)/2.0, ntraj) * max(jitter, 0.15)
+        return [(cx0, cy0 + off) for off in offsets]
+
+    if mode == "ridge_start":
+        cx0, cy0 = ridge_x0, ridge_y0
+        if ntraj <= 1:
+            return [(cx0, cy0)]
+        offsets = np.linspace(-(ntraj-1)/2.0, (ntraj-1)/2.0, ntraj) * max(jitter, 0.15)
+        return [(cx0, cy0 + off) for off in offsets]
+
+    if mode == "custom":
+        return list(custom_points[:ntraj])
+
+    raise ValueError(f"Unknown BOHMIAN_INIT_MODE: {mode}")
+
+def bohmian_rhs(vx_frames, vy_frames, rho_frames, t_query, xq, yq):
+    vx_q, vy_q, rho_q = velocity_sample_time_space(vx_frames, vy_frames, rho_frames, t_query, xq, yq)
+
+    if BOHMIAN_STOP_OUTSIDE_VISIBLE and not is_inside_visible(xq, yq):
+        return np.nan, np.nan, np.nan
+
+    if BOHMIAN_STOP_ON_LOW_RHO and (not np.isfinite(rho_q) or rho_q < BOHMIAN_MIN_RHO):
+        return np.nan, np.nan, rho_q
+
+    if not (np.isfinite(vx_q) and np.isfinite(vy_q)):
+        return np.nan, np.nan, rho_q
+
+    return float(vx_q), float(vy_q), float(rho_q)
+
+def rk4_step_bohmian(vx_frames, vy_frames, rho_frames, t0, xcur, ycur, h):
+    k1x, k1y, _ = bohmian_rhs(vx_frames, vy_frames, rho_frames, t0, xcur, ycur)
+    if not (np.isfinite(k1x) and np.isfinite(k1y)):
+        return np.nan, np.nan
+
+    k2x, k2y, _ = bohmian_rhs(vx_frames, vy_frames, rho_frames, t0 + 0.5*h, xcur + 0.5*h*k1x, ycur + 0.5*h*k1y)
+    if not (np.isfinite(k2x) and np.isfinite(k2y)):
+        return np.nan, np.nan
+
+    k3x, k3y, _ = bohmian_rhs(vx_frames, vy_frames, rho_frames, t0 + 0.5*h, xcur + 0.5*h*k2x, ycur + 0.5*h*k2y)
+    if not (np.isfinite(k3x) and np.isfinite(k3y)):
+        return np.nan, np.nan
+
+    k4x, k4y, _ = bohmian_rhs(vx_frames, vy_frames, rho_frames, t0 + h, xcur + h*k3x, ycur + h*k3y)
+    if not (np.isfinite(k4x) and np.isfinite(k4y)):
+        return np.nan, np.nan
+
+    xnext = xcur + (h/6.0) * (k1x + 2.0*k2x + 2.0*k3x + k4x)
+    ynext = ycur + (h/6.0) * (k1y + 2.0*k2y + 2.0*k3y + k4y)
+    return xnext, ynext
+
+def euler_step_bohmian(vx_frames, vy_frames, rho_frames, t0, xcur, ycur, h):
+    vx_q, vy_q, _ = bohmian_rhs(vx_frames, vy_frames, rho_frames, t0, xcur, ycur)
+    if not (np.isfinite(vx_q) and np.isfinite(vy_q)):
+        return np.nan, np.nan
+    return xcur + h * vx_q, ycur + h * vy_q
+
+def integrate_bohmian_trajectories(vx_frames, vy_frames, rho_frames, init_points):
+    Nt_ = len(times)
+    ntraj = len(init_points)
+
+    traj_x = np.full((ntraj, Nt_), np.nan, dtype=float)
+    traj_y = np.full((ntraj, Nt_), np.nan, dtype=float)
+    traj_alive = np.zeros((ntraj, Nt_), dtype=bool)
+
+    stepper = rk4_step_bohmian if BOHMIAN_USE_RK4 else euler_step_bohmian
+
+    for k, (x_init, y_init) in enumerate(init_points):
+        xcur = float(x_init)
+        ycur = float(y_init)
+
+        if is_inside_visible(xcur, ycur):
+            traj_x[k, 0] = xcur
+            traj_y[k, 0] = ycur
+            traj_alive[k, 0] = True
+
+        for i in range(0, Nt_ - 1):
+            if not traj_alive[k, i]:
+                break
+
+            if BOHMIAN_STOP_OUTSIDE_VISIBLE and not is_inside_visible(xcur, ycur):
+                break
+
+            xnext, ynext = stepper(vx_frames, vy_frames, rho_frames, times[i], xcur, ycur, tau_step)
+
+            if not (np.isfinite(xnext) and np.isfinite(ynext)):
+                break
+
+            if BOHMIAN_STOP_OUTSIDE_VISIBLE and not is_inside_visible(xnext, ynext):
+                break
+
+            traj_x[k, i+1] = xnext
+            traj_y[k, i+1] = ynext
+            traj_alive[k, i+1] = True
+
+            xcur, ycur = xnext, ynext
+
+    return traj_x, traj_y, traj_alive
+
+# ====================================================
+# 16) Build rho + diagnostics for sigmaT
 # ====================================================
 def build_all_for_sigma(sigmaT):
-    Emix = build_Emix_from_phi_tau(phi_tau_frames, times, t_det, sigmaT=sigmaT,
-                                   tau_step=tau_step, K_JITTER=13)
+    Emix = build_Emix_from_phi_tau(phi_tau_frames, times, t_det, sigmaT=sigmaT, K_JITTER=13)
     rho  = make_rho(frames_psi, Emix)
 
     rx, ry, rs = compute_ridge_xy(
@@ -693,16 +942,16 @@ def build_all_for_sigma(sigmaT):
         alpha_smooth=LOCALMAX_SMOOTH_ALPHA
     )
 
-    cos_th = speed = ux = uy = None
+    cos_th = speed = ux = uy = div_v = None
     if SAVE_COMPLEX_PSI_FRAMES and (psi_vis_frames is not None):
-        cos_th, speed, ux, uy = alignment_series_from_psi(
+        cos_th, speed, ux, uy, div_v = alignment_and_diagnostics_from_psi(
             psi_vis_frames, rx, ry, x_vis_1d, y_vis_1d
         )
 
-    return rho, Emix, rx, ry, rs, cos_th, speed, ux, uy
+    return rho, Emix, rx, ry, rs, cos_th, speed, ux, uy, div_v
 
 # ====================================================
-# 15) Slider: sigmaT valittavissa reaaliajassa
+# 17) Sigma slider setup
 # ====================================================
 v_est = k0x / m_mass
 L_gap = screen_center_x - barrier_center_x
@@ -712,23 +961,23 @@ SIGMA_MIN  = 0.05 * t_gap
 SIGMA_MAX  = 2.00 * t_gap
 SIGMA_INIT = 0.60 * t_gap
 
-rho_init, Emix_init, ridge_x_init, ridge_y_init, ridge_s_init, cos_th_init, speed_init, ux_init, uy_init = build_all_for_sigma(SIGMA_INIT)
+rho_init, Emix_init, ridge_x_init, ridge_y_init, ridge_s_init, cos_th_init, speed_init, ux_init, uy_init, div_v_init = build_all_for_sigma(SIGMA_INIT)
 
 if USE_FIXED_DISPLAY_SCALE:
-    vref = float(np.quantile(rho_init, DISPLAY_Q) + 1e-30)
+    vref = float(np.quantile(rho_init, DISPLAY_Q))
+    if vref <= 0:
+        vref = 1.0
 else:
     vref = 1.0
 
 def gamma_display(arr, gamma=GAMMA):
     if USE_FIXED_DISPLAY_SCALE:
-        disp = np.clip(arr / vref, 0.0, 1.0)
+        disp = np.clip(arr / (vref + 1e-30), 0.0, 1.0)
         return disp**gamma
-    else:
-        m = np.max(arr)
-        if m <= 0:
-            return arr
-        disp = arr / m
-        return disp**gamma
+    m = np.max(arr)
+    if m <= 0:
+        return arr
+    return (arr / m)**gamma
 
 if speed_init is not None:
     vv = speed_init[np.isfinite(speed_init)]
@@ -737,7 +986,37 @@ else:
     speed_ref = 1.0
 
 # ====================================================
-# 16) Visualisointi: rho + ridge + trail + flow arrow + slider + animaatio
+# 18) Precompute Bohmian trajectories
+# ====================================================
+bohm_traj_x = bohm_traj_y = bohm_traj_alive = None
+bohm_init_points = []
+
+if ENABLE_BOHMIAN_OVERLAY:
+    if not SAVE_COMPLEX_PSI_FRAMES or (psi_vis_frames is None):
+        raise RuntimeError("ENABLE_BOHMIAN_OVERLAY vaatii SAVE_COMPLEX_PSI_FRAMES=True.")
+
+    print("Bohmian overlay: lasketaan velocity frames...")
+    vx_frames, vy_frames, rho_frames = build_velocity_frames_from_psi(psi_vis_frames)
+
+    bohm_init_points = make_bohmian_initial_points(
+        mode=BOHMIAN_INIT_MODE,
+        ntraj=BOHMIAN_N_TRAJ,
+        custom_points=BOHMIAN_CUSTOM_POINTS,
+        ridge_x0=ridge_x_init[0],
+        ridge_y0=ridge_y_init[0],
+        x0_packet=x0,
+        y0_packet=y0,
+        psi0_vis=psi_vis_frames[0],
+        jitter=BOHMIAN_INIT_JITTER
+    )
+
+    print(f"Bohmian overlay: integroidaan {len(bohm_init_points)} trajektoria ({'RK4' if BOHMIAN_USE_RK4 else 'Euler'})...")
+    bohm_traj_x, bohm_traj_y, bohm_traj_alive = integrate_bohmian_trajectories(
+        vx_frames, vy_frames, rho_frames, bohm_init_points
+    )
+
+# ====================================================
+# 19) Visualization
 # ====================================================
 extent = (-VISIBLE_LX/2, VISIBLE_LX/2, -VISIBLE_LY/2, VISIBLE_LY/2)
 
@@ -746,8 +1025,7 @@ ax = fig.add_axes([0.07, 0.18, 0.86, 0.78])
 
 im = ax.imshow(
     gamma_display(rho_init[0]),
-    extent=extent,
-    origin='lower',
+    extent=extent, origin='lower',
     vmin=0.0, vmax=1.0,
     cmap='magma',
     interpolation=IM_INTERPOLATION
@@ -759,7 +1037,7 @@ ax.set_xlabel("x")
 ax.set_ylabel("y")
 
 title = ax.set_title(
-    rf"Schrödinger: ρ(t), σT={SIGMA_INIT:.3f}, t={times[0]:.3f} | ridge={RIDGE_MODE}"
+    rf"ρ(t): σT={SIGMA_INIT:.3f}, t={times[0]:.3f}, ridge={RIDGE_MODE}"
 )
 
 ridge_marker, = ax.plot(
@@ -778,6 +1056,23 @@ if DRAW_FLOW_ARROW and SAVE_COMPLEX_PSI_FRAMES and (ux_init is not None):
         angles='xy', scale_units='xy', scale=1.0,
         color='cyan', alpha=0.9, width=0.006
     )
+
+bohm_lines = []
+bohm_heads = []
+
+if ENABLE_BOHMIAN_OVERLAY and (bohm_traj_x is not None):
+    for k in range(bohm_traj_x.shape[0]):
+        line_k, = ax.plot([], [], linestyle='-', linewidth=BOHMIAN_LINEWIDTH,
+                          color=BOHMIAN_COLOR, alpha=0.85,
+                          label="Bohmian traj" if k == 0 else None)
+        bohm_lines.append(line_k)
+
+        if BOHMIAN_SHOW_HEAD:
+            head_k, = ax.plot([], [], marker='o', markersize=BOHMIAN_HEAD_SIZE,
+                              linestyle='None', color=BOHMIAN_HEAD_COLOR, alpha=0.95)
+        else:
+            head_k = None
+        bohm_heads.append(head_k)
 
 ax.legend(loc="upper right", framealpha=0.35)
 
@@ -799,17 +1094,15 @@ cos_th = [cos_th_init]
 speed = [speed_init]
 ux = [ux_init]
 uy = [uy_init]
+div_v_ridge = [div_v_init]
 
 arrow_state = {"ux": np.nan, "uy": np.nan, "spd": np.nan}
 
 def recompute_for_sigma(new_sigma):
-    rho, Emix, rx, ry, rs, cth, spd, uxx, uyy = build_all_for_sigma(new_sigma)
-    return rho, rx, ry, rs, cth, spd, uxx, uyy
+    return build_all_for_sigma(new_sigma)
 
 def update_flow_arrow(i):
     if flow_quiver is None or ux[0] is None or speed[0] is None:
-        return
-    if (i % ARROW_STRIDE) != 0:
         return
 
     uxi = ux[0][i]
@@ -847,15 +1140,66 @@ def update_flow_arrow(i):
     arrow_state["spd"] = spd
 
     flow_quiver.set_offsets([[ridge_x[0][i], ridge_y[0][i]]])
-
     L = ARROW_SCALE * float(np.clip(spd / (speed_ref + 1e-30), 0.0, 2.5))
     flow_quiver.set_UVC([L * uxi], [L * uyi])
+
+def update_bohmian_overlay(i):
+    if not ENABLE_BOHMIAN_OVERLAY or (bohm_traj_x is None):
+        return
+
+    for k in range(bohm_traj_x.shape[0]):
+        alive = bohm_traj_alive[k]
+
+        if not np.any(alive[:i+1]):
+            bohm_lines[k].set_data([], [])
+            if bohm_heads[k] is not None:
+                bohm_heads[k].set_data([], [])
+            continue
+
+        if BOHMIAN_SHOW_FULL_PATH_EACH_FRAME:
+            j0 = 0
+        else:
+            j0 = max(0, i - BOHMIAN_TRAIL_LEN + 1)
+
+        mask = alive[j0:i+1]
+        xs_seg = bohm_traj_x[k, j0:i+1][mask]
+        ys_seg = bohm_traj_y[k, j0:i+1][mask]
+        bohm_lines[k].set_data(xs_seg, ys_seg)
+
+        if BOHMIAN_SHOW_HEAD and bohm_heads[k] is not None:
+            alive_idx = np.where(alive[:i+1])[0]
+            if alive_idx.size > 0:
+                ilast = int(alive_idx[-1])
+                bohm_heads[k].set_data([bohm_traj_x[k, ilast]], [bohm_traj_y[k, ilast]])
+            else:
+                bohm_heads[k].set_data([], [])
+
+def make_title(i):
+    parts = [
+        rf"ρ(t): σT={sigma_current[0]:.3f}",
+        rf"t={times[i]:.3f}",
+        rf"ridge={RIDGE_MODE}",
+        rf"norm≈{norms_psi[i]:.4f}",
+        rf"Γ≈{ridge_s[0][i]:.3e}",
+    ]
+
+    if cos_th[0] is not None and np.isfinite(cos_th[0][i]):
+        parts.append(rf"cosθ≈{cos_th[0][i]:.3f}")
+
+    if ENABLE_DIVERGENCE_DIAGNOSTIC and div_v_ridge[0] is not None and np.isfinite(div_v_ridge[0][i]):
+        parts.append(rf"div v≈{div_v_ridge[0][i]:.3e}")
+
+    if ENABLE_BOHMIAN_OVERLAY:
+        parts.append("Bohm=RK4" if BOHMIAN_USE_RK4 else "Bohm=Euler")
+
+    return " | ".join(parts)
 
 def on_sigma_change(_val):
     new_sigma = float(sigma_slider.val)
     sigma_current[0] = new_sigma
 
-    rho_new, rx, ry, rs, cth, spd, uxx, uyy = recompute_for_sigma(new_sigma)
+    rho_new, _Emix, rx, ry, rs, cth, spd, uxx, uyy, divv = recompute_for_sigma(new_sigma)
+
     rho_current[0] = rho_new
     ridge_x[0] = rx
     ridge_y[0] = ry
@@ -864,6 +1208,7 @@ def on_sigma_change(_val):
     speed[0] = spd
     ux[0] = uxx
     uy[0] = uyy
+    div_v_ridge[0] = divv
 
     i = getattr(on_sigma_change, "last_i", 0)
 
@@ -875,16 +1220,9 @@ def on_sigma_change(_val):
         ridge_trail.set_data(ridge_x[0][j0:i+1], ridge_y[0][j0:i+1])
 
     update_flow_arrow(i)
+    update_bohmian_overlay(i)
 
-    cth_txt = ""
-    if cos_th[0] is not None and np.isfinite(cos_th[0][i]):
-        cth_txt = rf" | cosθ≈{cos_th[0][i]:.3f}"
-
-    title.set_text(
-        rf"Schrödinger: ρ(t), σT={sigma_current[0]:.3f}, t={times[i]:.3f} | "
-        rf"ridge={RIDGE_MODE} | norm≈{norms_psi[i]:.4f} | Γ≈{ridge_s[0][i]:.3e}"
-        + cth_txt
-    )
+    title.set_text(make_title(i))
     fig.canvas.draw_idle()
 
 sigma_slider.on_changed(on_sigma_change)
@@ -900,22 +1238,20 @@ def update(i):
         ridge_trail.set_data(ridge_x[0][j0:i+1], ridge_y[0][j0:i+1])
 
     update_flow_arrow(i)
+    update_bohmian_overlay(i)
+    title.set_text(make_title(i))
 
-    cth_txt = ""
-    if cos_th[0] is not None and np.isfinite(cos_th[0][i]):
-        cth_txt = rf" | cosθ≈{cos_th[0][i]:.3f}"
-
-    title.set_text(
-        rf"Schrödinger: ρ(t), σT={sigma_current[0]:.3f}, t={times[i]:.3f} | "
-        rf"ridge={RIDGE_MODE} | norm≈{norms_psi[i]:.4f} | Γ≈{ridge_s[0][i]:.3e}"
-        + cth_txt
-    )
-    return (im, ridge_marker, ridge_trail)
+    artists = [im, ridge_marker, ridge_trail]
+    if flow_quiver is not None:
+        artists.append(flow_quiver)
+    artists.extend([obj for obj in bohm_lines if obj is not None])
+    artists.extend([obj for obj in bohm_heads if obj is not None])
+    return tuple(artists)
 
 ani = FuncAnimation(fig, update, frames=Nt, interval=40, blit=False)
 
 # ====================================================
-# 17) Alignment stats print
+# 20) Summary stats
 # ====================================================
 if PRINT_ALIGNMENT_STATS and SAVE_COMPLEX_PSI_FRAMES and (cos_th_init is not None):
     valid = np.isfinite(cos_th_init)
@@ -924,11 +1260,39 @@ if PRINT_ALIGNMENT_STATS and SAVE_COMPLEX_PSI_FRAMES and (cos_th_init is not Non
         med_c  = float(np.median(cos_th_init[valid]))
         frac_pos = float(np.mean(cos_th_init[valid] > 0.0))
         frac_hi  = float(np.mean(cos_th_init[valid] > 0.7))
-        print(f"[ALIGN] ridge vs velocity: mean cosθ≈{mean_c:.3f}, median≈{med_c:.3f}, "
-              f"frac(cosθ>0)≈{frac_pos:.3f}, frac(cosθ>0.7)≈{frac_hi:.3f}")
+        print(
+            f"[ALIGN] ridge vs velocity: mean cosθ≈{mean_c:.3f}, "
+            f"median≈{med_c:.3f}, frac(cosθ>0)≈{frac_pos:.3f}, frac(cosθ>0.7)≈{frac_hi:.3f}"
+        )
     else:
-        print("[ALIGN] no valid cosθ (velocity too small / rho too small at ridge points).")
+        print("[ALIGN] no valid cosθ.")
 
-ani.save("schrodinger_ridge_flow_sigmaT.mp4", writer="ffmpeg", fps=25, dpi=150)
+if ENABLE_DIVERGENCE_DIAGNOSTIC and PRINT_DIVERGENCE_STATS and (div_v_init is not None):
+    valid = np.isfinite(div_v_init)
+    if np.any(valid):
+        mean_div = float(np.mean(div_v_init[valid]))
+        med_div  = float(np.median(div_v_init[valid]))
+        frac_neg = float(np.mean(div_v_init[valid] < 0.0))
+        frac_pos = float(np.mean(div_v_init[valid] > 0.0))
+        print(
+            f"[DIV] at ridge: mean div(v)≈{mean_div:.3e}, "
+            f"median≈{med_div:.3e}, frac(<0)≈{frac_neg:.3f}, frac(>0)≈{frac_pos:.3f}"
+        )
+    else:
+        print("[DIV] no valid div(v) values.")
 
+if ENABLE_BOHMIAN_OVERLAY and PRINT_BOHMIAN_STATS and (bohm_traj_alive is not None):
+    alive_counts = np.sum(bohm_traj_alive, axis=1)
+    for k in range(bohm_traj_alive.shape[0]):
+        if alive_counts[k] > 0:
+            i_last = int(alive_counts[k] - 1)
+            print(
+                f"[BOHM] traj {k}: steps={alive_counts[k]}, "
+                f"start=({bohm_traj_x[k,0]:.3f},{bohm_traj_y[k,0]:.3f}), "
+                f"end=({bohm_traj_x[k,i_last]:.3f},{bohm_traj_y[k,i_last]:.3f})"
+            )
+        else:
+            print(f"[BOHM] traj {k}: no valid steps")
+
+ani.save("schrodinger_ridge_bohmian_rk4_born5.mp4", writer="ffmpeg", fps=25, dpi=150)
 plt.show()
