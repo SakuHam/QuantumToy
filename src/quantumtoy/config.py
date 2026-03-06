@@ -8,7 +8,7 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "schrodinger_measurement"
+    THEORY_NAME: str = "thick_front_optimized"
 
     # ============================================================
     # Ridge

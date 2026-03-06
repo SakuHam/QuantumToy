@@ -3,7 +3,7 @@ from __future__ import annotations
 from theories.schrodinger import SchrodingerTheory
 from theories.schrodinger_measurement import SchrodingerMeasurementTheory
 from theories.thick_front import ThickFrontTheory
-from theories.thick_front import ThickFrontOptimizedTheory
+from theories.thick_front_optimized import ThickFrontOptimizedTheory
 
 def build_theory(cfg, grid, potential):
     if cfg.THEORY_NAME == 'schrodinger':

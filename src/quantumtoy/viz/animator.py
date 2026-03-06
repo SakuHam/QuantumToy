@@ -241,9 +241,9 @@ class SimulationAnimator:
             if not np.any(alive[: i + 1]):
                 continue
 
-            xs = self.bohm_traj_x[k, : i + 1]
-            ys = self.bohm_traj_y[k, : i + 1]
-
+            mask = alive[: i + 1]
+            xs = self.bohm_traj_x[k, : i + 1][mask]
+            ys = self.bohm_traj_y[k, : i + 1][mask]
             self.bohm_lines[k].set_data(xs, ys)
 
             if self.bohm_heads[k] is not None:
