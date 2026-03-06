@@ -5,7 +5,6 @@ import numpy as np
 
 from theories.base import TheoryStepResult
 from theories.dirac import DiracTheory
-from core.utils import normalize_unit
 
 
 @dataclass
@@ -94,7 +93,6 @@ class DiracThickFrontTheory(DiracTheory):
         u1_local = u1_nei / np.maximum(np.abs(u1_nei), self.front_eps)
         u2_local = u2_nei / np.maximum(np.abs(u2_nei), self.front_eps)
 
-        # Shared spinor alignment score
         align_1 = np.real(np.conjugate(u1) * u1_local)
         align_2 = np.real(np.conjugate(u2) * u2_local)
 
@@ -200,17 +198,17 @@ class DiracThickFrontTheory(DiracTheory):
         psi1, psi2 = state
         return (np.abs(psi1) ** 2 + np.abs(psi2) ** 2).astype(float)
 
-def current(self, state_vis):
-    """
-    Relativistically correct 2D Dirac probability current.
-    """
-    psi1, psi2 = state_vis
+    def current(self, state_vis):
+        """
+        Relativistically correct 2D Dirac probability current.
+        """
+        psi1, psi2 = state_vis
 
-    rho = (np.abs(psi1) ** 2 + np.abs(psi2) ** 2).astype(float)
+        rho = (np.abs(psi1) ** 2 + np.abs(psi2) ** 2).astype(float)
 
-    overlap = np.conjugate(psi1) * psi2
+        overlap = np.conjugate(psi1) * psi2
 
-    jx = (2.0 * self.c_light * np.real(overlap)).astype(float)
-    jy = (2.0 * self.c_light * np.imag(overlap)).astype(float)
+        jx = (2.0 * self.c_light * np.real(overlap)).astype(float)
+        jy = (2.0 * self.c_light * np.imag(overlap)).astype(float)
 
-    return jx, jy, rho
+        return jx, jy, rho

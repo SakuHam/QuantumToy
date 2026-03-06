@@ -59,67 +59,6 @@ o mp4 video export
 ## Example simulation
 
 Typical experiment simulated by the code:
-# QuantumToy
-
-QuantumToy is a modular Python simulation environment for exploring quantum dynamics and alternative quantum interpretations.
-
-The project implements several wave equation models and allows experimentation with different theoretical extensions such as:
-
-o Schrodinger dynamics  
-o Continuous measurement models  
-o Dirac equation  
-o Thick reality front models  
-o Hybrid Dirac plus Thick Front theories  
-
-The simulator includes tools for:
-
-o wavefunction propagation  
-o double slit experiments  
-o Bohmian trajectory overlays  
-o ridge tracking of probability flow  
-o retrodictive weighting (Emix)  
-o animated visualization  
-
-The goal is to provide a playground for quantum dynamics experiments and theoretical exploration.
-
----
-
-## Features
-
-The simulator supports:
-
-### Wave dynamics
-
-o Schrodinger equation using FFT split operator  
-o Dirac equation using a two spinor relativistic model  
-
-### Experimental models
-
-o double slit barriers  
-o absorbing boundaries  
-o detection screens  
-
-### Analysis tools
-
-o ridge tracking of probability flow  
-o velocity field visualization  
-o Bohmian trajectory integration  
-o divergence diagnostics  
-o retrodictive weighting (Emix)  
-
-### Visualization
-
-o animated density maps  
-o ridge trajectory overlay  
-o Bohmian paths  
-o flow arrows  
-o mp4 video export  
-
----
-
-## Example simulation
-
-Typical experiment simulated by the code:
 wave packet -> double slit -> interference -> detection screen
 
 The simulation computes:

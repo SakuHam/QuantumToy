@@ -103,13 +103,13 @@ class DiracTheory(TheoryModel):
         return np.stack([psi1_new, psi2_new], axis=0)
 
     # -----------------------------------------------------
-    # stepping
+    # stepping helpers
     # -----------------------------------------------------
 
-    def step_forward(self, state, dt):
+    def _step_with_potential(self, state, dt, V_half):
         psi1, psi2 = state
 
-        P_half = np.exp(-1j * self.V_fwd * dt / (2.0 * self.hbar))
+        P_half = np.exp(-1j * V_half * dt / (2.0 * self.hbar))
 
         psi1 = psi1 * P_half
         psi2 = psi2 * P_half
@@ -121,13 +121,32 @@ class DiracTheory(TheoryModel):
         psi1 = psi1 * P_half
         psi2 = psi2 * P_half
 
+        return np.stack([psi1, psi2], axis=0)
+
+    # -----------------------------------------------------
+    # stepping
+    # -----------------------------------------------------
+
+    def step_forward(self, state, dt):
+        psi = self._step_with_potential(state, dt, self.V_fwd)
         return TheoryStepResult(
-            state=np.stack([psi1, psi2], axis=0),
+            state=psi,
             aux=None,
         )
 
     def step_backward_adjoint(self, state, dt):
-        return self.step_forward(state, -dt)
+        """
+        Proper adjoint-like backward evolution.
+
+        Uses:
+            - reversed time step in kinetic Dirac propagator
+            - conjugated complex potential V_adj
+        """
+        psi = self._step_with_potential(state, -dt, self.V_adj)
+        return TheoryStepResult(
+            state=psi,
+            aux=None,
+        )
 
     # -----------------------------------------------------
     # observables
@@ -141,9 +160,9 @@ class DiracTheory(TheoryModel):
         """
         Relativistically correct 2D Dirac probability current:
 
-            rho = psi^\dagger psi
-            jx  = c * psi^\dagger sigma_x psi = 2 c Re(conj(psi1) * psi2)
-            jy  = c * psi^\dagger sigma_y psi = 2 c Im(conj(psi1) * psi2)
+            rho = psi^dagger psi
+            jx  = c * psi^dagger sigma_x psi = 2 c Re(conj(psi1) * psi2)
+            jy  = c * psi^dagger sigma_y psi = 2 c Im(conj(psi1) * psi2)
         """
         psi1, psi2 = state_vis
 
@@ -155,7 +174,7 @@ class DiracTheory(TheoryModel):
         jy = (2.0 * self.c_light * np.imag(overlap)).astype(float)
 
         return jx, jy, rho
-    
+
     def velocity(self, state_vis, eps_rho: float = 1e-10):
         """
         Relativistically constrained velocity from Dirac current.
@@ -175,10 +194,10 @@ class DiracTheory(TheoryModel):
 
         sp = np.hypot(vx, vy)
 
-        # Numerical safety: clamp speeds slightly exceeding c due to tiny rho / discretization
         mask = sp > self.c_light
         if np.any(mask):
             scale = self.c_light / np.maximum(sp[mask], eps_rho)
+
             vx = vx.copy()
             vy = vy.copy()
             sp = sp.copy()
