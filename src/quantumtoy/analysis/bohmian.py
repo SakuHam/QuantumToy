@@ -90,12 +90,17 @@ def build_velocity_frames_from_state(
     """
     Build visible-grid velocity and density frames from theory.current(...).
 
+    Supports both:
+        scalar state frames: (Nt, H, W)
+        spinor state frames: (Nt, C, H, W)
+
     Returns:
         vx_frames, vy_frames, rho_frames
     """
     Nt_ = state_vis_frames.shape[0]
-    H = state_vis_frames.shape[1]
-    W = state_vis_frames.shape[2]
+
+    rho0 = theory.density(state_vis_frames[0])
+    H, W = rho0.shape
 
     vx_frames = np.zeros((Nt_, H, W), dtype=float)
     vy_frames = np.zeros((Nt_, H, W), dtype=float)
@@ -198,8 +203,18 @@ def sample_born_initial_points_from_visible_psi(
 ):
     """
     Sample initial Bohmian points from Born density on visible grid.
+
+    Supports:
+        scalar wavefunction: (H, W)
+        spinor wavefunction: (C, H, W)
     """
-    rho0 = np.abs(psi0_vis) ** 2
+    if psi0_vis.ndim == 2:
+        rho0 = np.abs(psi0_vis) ** 2
+    elif psi0_vis.ndim == 3:
+        rho0 = np.sum(np.abs(psi0_vis) ** 2, axis=0)
+    else:
+        raise ValueError(f"Unsupported psi0_vis ndim={psi0_vis.ndim}")
+
     w = rho0.ravel().astype(float)
     s = float(np.sum(w))
 

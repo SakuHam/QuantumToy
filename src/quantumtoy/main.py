@@ -102,7 +102,16 @@ def main():
             norms.append(norm_now)
 
             if cfg.SAVE_COMPLEX_STATE_FRAMES:
-                state_vis_frames.append(state[grid.ys, grid.xs].copy())
+                if state.ndim == 2:
+                    # Schrödinger-like scalar field
+                    state_vis = state[grid.ys, grid.xs].copy()
+                elif state.ndim == 3:
+                    # Dirac-like spinor field: keep spinor axis, crop y/x
+                    state_vis = state[:, grid.ys, grid.xs].copy()
+                else:
+                    raise ValueError(f"Unsupported state ndim={state.ndim}")
+
+                state_vis_frames.append(state_vis)
 
             if (len(frames_density) % 20) == 0:
                 print(

@@ -4,6 +4,8 @@ from theories.schrodinger import SchrodingerTheory
 from theories.schrodinger_measurement import SchrodingerMeasurementTheory
 from theories.thick_front import ThickFrontTheory
 from theories.thick_front_optimized import ThickFrontOptimizedTheory
+from theories.dirac import DiracTheory
+from theories.dirac_thick_front import DiracThickFrontTheory
 
 def build_theory(cfg, grid, potential):
     if cfg.THEORY_NAME == 'schrodinger':
@@ -44,5 +46,27 @@ def build_theory(cfg, grid, potential):
             front_density_weighted=getattr(cfg, "THICK_FRONT_DENSITY_WEIGHTED", True),
             front_phase_relax_strength=getattr(cfg, "THICK_FRONT_PHASE_RELAX_STRENGTH", 0.0),
         )
-    
+
+    if cfg.THEORY_NAME == "dirac":
+        return DiracTheory(
+            grid=grid,
+            potential=potential,
+            m_mass=cfg.m_mass,
+            hbar=cfg.hbar,
+        ) 
+   
+    if cfg.THEORY_NAME == "dirac_thick_front":
+        return DiracThickFrontTheory(
+            grid=grid,
+            potential=potential,
+            m_mass=cfg.m_mass,
+            hbar=cfg.hbar,
+            c_light=getattr(cfg, "DIRAC_C_LIGHT", 1.0),
+            front_strength=getattr(cfg, "THICK_FRONT_STRENGTH", 0.03),
+            front_misaligned_damp=getattr(cfg, "THICK_FRONT_MISALIGNED_DAMP", 0.01),
+            front_diag_weight=getattr(cfg, "THICK_FRONT_DIAG_WEIGHT", 0.5),
+            front_density_weighted=getattr(cfg, "THICK_FRONT_DENSITY_WEIGHTED", True),
+            front_phase_relax_strength=getattr(cfg, "THICK_FRONT_PHASE_RELAX_STRENGTH", 0.0),
+        )
+
     raise ValueError(f'Unknown theory: {cfg.THEORY_NAME}')

@@ -1,0 +1,327 @@
+\documentclass[aps,prl,reprint]{revtex4-2}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{bm}
+\usepackage{fancyhdr}
+
+\usepackage{fancyhdr}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{\small Preprint -- Work in Progress}
+\fancyfoot[R]{\small QuantumToy TRF preprint v0.1}
+\renewcommand{\headrulewidth}{0pt}
+
+\usepackage{draftwatermark}
+
+\SetWatermarkText{PREPRINT}
+\SetWatermarkScale{2}
+\SetWatermarkLightness{0.9}
+
+\begin{document}
+\title{Thick Reality Front – exploratory numerical framework}
+
+\author{Saku H\"am\"al\"ainen}
+
+\date{\today}
+
+\begin{abstract}
+
+We introduce a computational framework for exploring a
+``thick reality front'' description of quantum dynamics.
+Instead of associating physical reality with an instantaneous
+wavefunction at a single time, the model assumes that observable
+structure emerges from a finite temporal region surrounding the
+present. The framework combines forward quantum evolution with
+backward propagation conditioned on detection events, producing
+an effective density field that depends on both preparation and
+measurement. Numerical simulations of a double-slit configuration
+demonstrate the emergence of coherent ridge trajectories in the
+probability density evolution. The approach is compatible with
+standard quantum predictions while offering a geometric
+interpretation of probability flow in spacetime.
+
+\end{abstract}
+
+\maketitle
+\thispagestyle{fancy}
+
+\section{Introduction}
+
+Quantum mechanics describes the evolution of a system through the
+Schr\"odinger equation
+
+\begin{equation}
+i\hbar \partial_t \psi = H\psi .
+\end{equation}
+
+While the equation predicts the evolution of the wavefunction,
+measurement outcomes appear to select definite results that are
+not described by unitary evolution alone.
+
+Several interpretations address this issue, including collapse
+models, Bohmian mechanics, and time-symmetric formulations of
+quantum mechanics. In this work we explore a computational
+framework inspired by time-symmetric ideas but formulated as a
+numerical simulation method.
+
+The key concept is that observable structure may not correspond
+to a single time slice of the wavefunction. Instead, the effective
+``reality'' may emerge from a finite temporal region surrounding
+the present. We refer to this region as a \textit{thick reality
+front}.
+
+\section{Thick Reality Front Formalism}
+
+\subsection{Forward evolution}
+
+Consider a system prepared at time $t_0$ with initial state
+$\psi_0$. Forward evolution is given by
+
+\begin{equation}
+\psi_f(t) = U(t,t_0)\psi_0 .
+\end{equation}
+
+For Schr\"odinger dynamics the wavefunction satisfies
+
+\begin{equation}
+i\hbar \partial_t \psi_f(x,t) = H\psi_f(x,t).
+\end{equation}
+
+The forward probability density is
+
+\begin{equation}
+\rho_f(x,t) = |\psi_f(x,t)|^2 .
+\end{equation}
+
+\subsection{Backward propagation}
+
+Suppose a detection occurs at position $x_d$ and time $t_d$.
+We define a localized detection state
+
+\begin{equation}
+\phi(x,t_d) =
+\exp\left(
+-\frac{(x-x_d)^2}{2\sigma_c^2}
+\right).
+\end{equation}
+
+Backward propagation is defined through
+
+\begin{equation}
+\phi(t) = U^\dagger(t_d,t)\phi(t_d).
+\end{equation}
+
+\subsection{Temporal thickness}
+
+Instead of associating reality with a single detection time,
+we consider a temporal window around $t_d$. Let $t_k$ denote
+candidate detection times within a region of width $\sigma_T$.
+
+The temporal weights are
+
+\begin{equation}
+w_k =
+\frac{
+\exp[-(t_k-t_d)^2/(2\sigma_T^2)]
+}{
+\sum_j
+\exp[-(t_j-t_d)^2/(2\sigma_T^2)]
+}.
+\end{equation}
+
+\subsection{Retrodictive field}
+
+Backward states generate a retrodictive weighting field
+
+\begin{equation}
+E_{\mathrm{mix}}(x,t)
+=
+\sum_k
+w_k
+|\phi_k(x,t)|^2 .
+\end{equation}
+
+\subsection{Thick reality front density}
+
+Observable structure emerges from the product of forward
+probability and retrodictive weighting.
+
+\begin{equation}
+\Gamma(x,t) =
+\rho_f(x,t) E_{\mathrm{mix}}(x,t).
+\end{equation}
+
+To obtain a normalized distribution we define
+
+\begin{equation}
+\rho_{\mathrm{TRF}}(x,t)
+=
+\frac{
+\rho_f(x,t) E_{\mathrm{mix}}(x,t)
+}{
+\int dx \,
+\rho_f(x,t) E_{\mathrm{mix}}(x,t)
+}.
+\end{equation}
+
+In two dimensions
+
+\begin{equation}
+\rho_{\mathrm{TRF}}(x,y,t)
+=
+\frac{
+|\psi_f(x,y,t)|^2
+E_{\mathrm{mix}}(x,y,t)
+}{
+\iint dx\,dy\,
+|\psi_f(x,y,t)|^2
+E_{\mathrm{mix}}(x,y,t)
+}.
+\end{equation}
+
+\section{Ridge Trajectories}
+
+The density $\rho_{\mathrm{TRF}}$ often develops narrow
+high-probability structures. These can be tracked through
+ridge trajectories defined by
+
+\begin{equation}
+\mathbf{r}_R(t)
+=
+\operatorname*{arg\,max}_{\mathbf{r}}
+\rho_{\mathrm{TRF}}(\mathbf{r},t).
+\end{equation}
+
+These curves provide a geometric description of probability
+flow through the thick reality front.
+
+\section{Velocity Fields and Bohmian Comparison}
+
+The quantum probability current is
+
+\begin{equation}
+\mathbf{j} =
+\frac{\hbar}{m}
+\mathrm{Im}
+(\psi^* \nabla \psi).
+\end{equation}
+
+This defines a velocity field
+
+\begin{equation}
+\mathbf{v} = \frac{\mathbf{j}}{\rho_f}.
+\end{equation}
+
+In Bohmian mechanics these velocities define particle
+trajectories. In the present framework we compare these
+trajectories with ridge trajectories extracted from
+$\rho_{\mathrm{TRF}}$.
+
+\section{Connection to the Born Rule}
+
+The thick reality front formalism does not modify the
+underlying quantum dynamics. Forward evolution remains
+governed by the Schr\"odinger equation.
+
+Detection probabilities are determined by the forward
+density
+
+\begin{equation}
+P(x_d,t_d) \propto |\psi_f(x_d,t_d)|^2 ,
+\end{equation}
+
+which is precisely the Born rule.
+
+Backward propagation only redistributes weight inside the
+thick reality front but does not change the detection
+probability itself.
+
+Integrating the thick-front density over intermediate
+times yields
+
+\begin{equation}
+\int \rho_{\mathrm{TRF}}(x,t) \, dx
+=
+1 ,
+\end{equation}
+
+and the marginal detection distribution remains
+
+\begin{equation}
+P(x_d) =
+|\psi_f(x_d,t_d)|^2 .
+\end{equation}
+
+Thus the framework is consistent with the standard Born
+probability rule.
+
+\section{Numerical Experiment}
+
+We simulate a two-dimensional double-slit experiment using
+a split-operator Fourier method. A Gaussian wave packet
+propagates toward a barrier containing two narrow slits.
+
+The evolution sequence is
+
+\begin{verbatim}
+wave packet -> double slit -> interference -> screen
+\end{verbatim}
+
+Forward evolution produces the interference pattern while
+backward propagation generates the retrodictive field.
+
+\begin{figure}
+\includegraphics[width=0.9\linewidth]{density_evolution.png}
+\caption{Example density evolution in a double-slit configuration.}
+\end{figure}
+
+\begin{figure}
+\includegraphics[width=0.9\linewidth]{ridge_vs_bohmian.png}
+\caption{Comparison of ridge trajectories and Bohmian trajectories.}
+\end{figure}
+
+\section{Relativistic Extension}
+
+The framework can be extended to relativistic dynamics.
+For the Dirac equation
+
+\begin{equation}
+i\hbar \partial_t \psi =
+(c\bm{\alpha}\cdot\mathbf{p}
++ \beta mc^2)\psi ,
+\end{equation}
+
+the conserved current is
+
+\begin{equation}
+j^\mu = \bar{\psi}\gamma^\mu\psi .
+\end{equation}
+
+The velocity field becomes
+
+\begin{equation}
+\mathbf{v} =
+\frac{\mathbf{j}}{j^0}.
+\end{equation}
+
+The thick reality front construction can therefore be
+applied to relativistic wave dynamics.
+
+\section{Conclusion}
+
+We introduced a computational framework for exploring
+thick reality front models of quantum dynamics.
+
+By combining forward evolution with backward propagation
+from detection events, the method produces structured
+probability flows that can be analyzed geometrically
+through ridge trajectories.
+
+The framework reproduces standard quantum predictions
+while providing a new spacetime interpretation of
+probability flow and measurement.
+
+\end{document}
