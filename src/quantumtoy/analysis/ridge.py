@@ -1,0 +1,83 @@
+from __future__ import annotations
+import numpy as np
+
+
+def ridge_argmax(Gamma, x_vis_1d, y_vis_1d):
+    idx = int(np.argmax(Gamma))
+    iy, ix = np.unravel_index(idx, Gamma.shape)
+    return float(x_vis_1d[ix]), float(y_vis_1d[iy]), float(Gamma[iy, ix])
+
+
+def ridge_centroid_top(Gamma, x_vis_1d, y_vis_1d, top_q=0.02, eps=1e-30):
+    g = Gamma.astype(float)
+    gmax = float(np.max(g))
+    if gmax <= 0:
+        return ridge_argmax(g, x_vis_1d, y_vis_1d)
+
+    thr = np.quantile(g.ravel(), 1.0 - top_q)
+    mask = g >= thr
+    w = g[mask] + eps
+    if w.size == 0 or float(np.sum(w)) <= 0:
+        return ridge_argmax(g, x_vis_1d, y_vis_1d)
+
+    iy_idx, ix_idx = np.where(mask)
+    xs_ = x_vis_1d[ix_idx]
+    ys_ = y_vis_1d[iy_idx]
+    wsum = float(np.sum(w))
+    xc = float(np.sum(xs_ * w) / wsum)
+    yc = float(np.sum(ys_ * w) / wsum)
+
+    ixn = int(np.argmin(np.abs(x_vis_1d - xc)))
+    iyn = int(np.argmin(np.abs(y_vis_1d - yc)))
+    score = float(g[iyn, ixn])
+    return xc, yc, score
+
+
+def ridge_localmax_track(Gamma, x_vis_1d, y_vis_1d, prev_ix, prev_iy, radius=20):
+    H, W_ = Gamma.shape
+    x0i = int(np.clip(prev_ix, 0, W_ - 1))
+    y0i = int(np.clip(prev_iy, 0, H - 1))
+    x1 = max(0, x0i - radius)
+    x2 = min(W_, x0i + radius + 1)
+    y1 = max(0, y0i - radius)
+    y2 = min(H, y0i + radius + 1)
+
+    sub = Gamma[y1:y2, x1:x2]
+    if sub.size == 0:
+        xg, yg, sg = ridge_argmax(Gamma, x_vis_1d, y_vis_1d)
+        return xg, yg, sg, x0i, y0i
+
+    idx = int(np.argmax(sub))
+    sy, sx = np.unravel_index(idx, sub.shape)
+    iy = y1 + sy
+    ix = x1 + sx
+    return float(x_vis_1d[ix]), float(y_vis_1d[iy]), float(Gamma[iy, ix]), ix, iy
+
+
+def compute_ridge_xy(frames_psi, Emix, x_vis_1d, y_vis_1d, mode='argmax', top_q=0.02, radius=20, alpha_smooth=0.0):
+    Nt_ = frames_psi.shape[0]
+    ridge_x = np.zeros(Nt_, dtype=float)
+    ridge_y = np.zeros(Nt_, dtype=float)
+    ridge_s = np.zeros(Nt_, dtype=float)
+
+    Gamma0 = frames_psi[0] * Emix[0]
+    x0r, y0r, s0 = ridge_argmax(Gamma0, x_vis_1d, y_vis_1d)
+    ridge_x[0], ridge_y[0], ridge_s[0] = x0r, y0r, s0
+    prev_ix = int(np.argmin(np.abs(x_vis_1d - x0r)))
+    prev_iy = int(np.argmin(np.abs(y_vis_1d - y0r)))
+
+    for i in range(1, Nt_):
+        Gamma = frames_psi[i] * Emix[i]
+        if mode == 'argmax':
+            xi, yi, si = ridge_argmax(Gamma, x_vis_1d, y_vis_1d)
+        elif mode == 'centroid_top':
+            xi, yi, si = ridge_centroid_top(Gamma, x_vis_1d, y_vis_1d, top_q=top_q)
+        elif mode == 'localmax_track':
+            xi, yi, si, prev_ix, prev_iy = ridge_localmax_track(Gamma, x_vis_1d, y_vis_1d, prev_ix, prev_iy, radius=radius)
+        else:
+            raise ValueError(f'Unknown RIDGE_MODE: {mode}')
+
+        if alpha_smooth and alpha_smooth > 0.0:
+            xi = (1.0 - alpha_smooth) * xi + alpha_smooth * ridge_x[i - 1]
+            yi = (1.0 - alpha_smooth) * yi + alpha_smooth * ridge_y[i - 1]
+    return ridge_x, ridge_y, ridge_s
