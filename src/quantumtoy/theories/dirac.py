@@ -23,54 +23,66 @@ class DiracTheory(TheoryModel):
     debug_tol_velocity: float = 1e-9
     debug_tol_norm_growth: float = 1e-9
 
+    # Optional richer debug
+    debug_packet_stats: bool = True
+
+    # -----------------------------------------------------
+    # init
+    # -----------------------------------------------------
+
     def __post_init__(self):
-        # -----------------------------
-        # Basic parameter checks
-        # -----------------------------
         self.m_mass = float(self.m_mass)
         self.hbar = float(self.hbar)
         self.c_light = float(self.c_light)
 
-        if self.grid.dx <= 0.0 or self.grid.dy <= 0.0:
-            raise ValueError("grid.dx and grid.dy must be positive")
-        if self.grid.Nx <= 0 or self.grid.Ny <= 0:
-            raise ValueError("grid.Nx and grid.Ny must be positive")
-        if self.hbar <= 0.0:
-            raise ValueError("hbar must be positive")
-        if self.c_light <= 0.0:
-            raise ValueError("c_light must be positive")
-        if self.m_mass < 0.0:
-            raise ValueError("m_mass must be non-negative")
+        self._assert(hasattr(self.grid, "dx"), "grid missing dx")
+        self._assert(hasattr(self.grid, "dy"), "grid missing dy")
+        self._assert(hasattr(self.grid, "Nx"), "grid missing Nx")
+        self._assert(hasattr(self.grid, "Ny"), "grid missing Ny")
+        self._assert(hasattr(self.grid, "X"), "grid missing X")
+        self._assert(hasattr(self.grid, "Y"), "grid missing Y")
 
-        # -----------------------------
-        # FFT-compatible k-grid
-        # X, Y are assumed shape (Ny, Nx)
-        # so KX, KY must also be (Ny, Nx).
-        # -----------------------------
+        self._assert(self.grid.dx > 0.0, "grid.dx must be positive")
+        self._assert(self.grid.dy > 0.0, "grid.dy must be positive")
+        self._assert(self.grid.Nx > 0, "grid.Nx must be positive")
+        self._assert(self.grid.Ny > 0, "grid.Ny must be positive")
+        self._assert(self.hbar > 0.0, "hbar must be positive")
+        self._assert(self.c_light > 0.0, "c_light must be positive")
+        self._assert(self.m_mass >= 0.0, "m_mass must be non-negative")
+
+        self.grid.X = np.asarray(self.grid.X)
+        self.grid.Y = np.asarray(self.grid.Y)
+
+        self._assert(
+            self.grid.X.shape == (self.grid.Ny, self.grid.Nx),
+            f"grid.X shape {self.grid.X.shape} != {(self.grid.Ny, self.grid.Nx)}",
+        )
+        self._assert(
+            self.grid.Y.shape == (self.grid.Ny, self.grid.Nx),
+            f"grid.Y shape {self.grid.Y.shape} != {(self.grid.Ny, self.grid.Nx)}",
+        )
+
         self.kx = 2.0 * np.pi * np.fft.fftfreq(self.grid.Nx, d=self.grid.dx)
         self.ky = 2.0 * np.pi * np.fft.fftfreq(self.grid.Ny, d=self.grid.dy)
         self.KX, self.KY = np.meshgrid(self.kx, self.ky, indexing="xy")
 
-        if self.KX.shape != (self.grid.Ny, self.grid.Nx):
-            raise ValueError("KX shape mismatch")
-        if self.KY.shape != (self.grid.Ny, self.grid.Nx):
-            raise ValueError("KY shape mismatch")
+        self._assert(self.KX.shape == (self.grid.Ny, self.grid.Nx), "KX shape mismatch")
+        self._assert(self.KY.shape == (self.grid.Ny, self.grid.Nx), "KY shape mismatch")
 
-        # -----------------------------
-        # Complex scalar potential
-        # Forward uses V_real - i W  => absorption for W > 0
-        # Adjoint uses conjugate potential.
-        # -----------------------------
         self.V_fwd = np.asarray(
             self.potential.V_real - 1j * self.potential.W,
             dtype=np.complex128,
         )
         self.V_adj = np.conjugate(self.V_fwd)
 
-        if self.V_fwd.shape != (self.grid.Ny, self.grid.Nx):
-            raise ValueError("Potential shape mismatch: expected (Ny, Nx)")
-        if self.V_adj.shape != (self.grid.Ny, self.grid.Nx):
-            raise ValueError("Adjoint potential shape mismatch: expected (Ny, Nx)")
+        self._assert(
+            self.V_fwd.shape == (self.grid.Ny, self.grid.Nx),
+            "Potential shape mismatch: expected (Ny, Nx)",
+        )
+        self._assert(
+            self.V_adj.shape == (self.grid.Ny, self.grid.Nx),
+            "Adjoint potential shape mismatch: expected (Ny, Nx)",
+        )
 
         if self.debug_checks:
             self._debug_assert_finite_array("grid.X", self.grid.X)
@@ -83,12 +95,20 @@ class DiracTheory(TheoryModel):
             self._debug_check_k_operator_once()
 
     # -----------------------------------------------------
-    # debug helpers
+    # generic asserts / debug
     # -----------------------------------------------------
+
+    def _assert(self, cond: bool, msg: str):
+        if not cond:
+            raise AssertionError(msg)
 
     def _debug_warn(self, msg: str):
         if self.debug_checks:
             print(f"[DiracTheory DEBUG] {msg}")
+
+    def _debug_info(self, msg: str):
+        if self.debug_checks:
+            print(f"[DiracTheory INFO] {msg}")
 
     def _debug_assert_finite_array(self, name: str, arr: np.ndarray):
         if not self.debug_checks:
@@ -98,7 +118,7 @@ class DiracTheory(TheoryModel):
             bad = np.size(arr) - np.count_nonzero(np.isfinite(arr))
             raise RuntimeError(f"{name} contains non-finite values ({bad} bad entries)")
 
-    def _debug_assert_spinor_shape(self, name: str, psi: np.ndarray):
+    def _debug_assert_spinor_shape_full(self, name: str, psi: np.ndarray):
         if not self.debug_checks:
             return
         if psi.shape != (2, self.grid.Ny, self.grid.Nx):
@@ -106,15 +126,26 @@ class DiracTheory(TheoryModel):
                 f"{name} has shape {psi.shape}, expected (2, {self.grid.Ny}, {self.grid.Nx})"
             )
 
+    def _assert_spinor_has_two_components(self, name: str, psi: np.ndarray):
+        psi = np.asarray(psi)
+        if psi.ndim != 3 or psi.shape[0] != 2:
+            raise RuntimeError(
+                f"{name} must have shape (2, H, W), got {psi.shape}"
+            )
+
+    def _assert_same_spatial_shape(self, name: str, a: np.ndarray, b: np.ndarray):
+        if a.shape != b.shape:
+            raise RuntimeError(f"{name}: shape mismatch {a.shape} != {b.shape}")
+
     def _debug_spinor_norm(self, psi1: np.ndarray, psi2: np.ndarray) -> float:
         rho = np.abs(psi1) ** 2 + np.abs(psi2) ** 2
         return float(np.sum(rho) * self.grid.dx * self.grid.dy)
 
-    def _debug_check_spinor(self, name: str, psi: np.ndarray):
+    def _debug_check_spinor_full(self, name: str, psi: np.ndarray):
         if not self.debug_checks:
             return
         psi = np.asarray(psi)
-        self._debug_assert_spinor_shape(name, psi)
+        self._debug_assert_spinor_shape_full(name, psi)
         self._debug_assert_finite_array(f"{name}[0]", psi[0])
         self._debug_assert_finite_array(f"{name}[1]", psi[1])
 
@@ -124,10 +155,17 @@ class DiracTheory(TheoryModel):
         if n < 0.0:
             raise RuntimeError(f"{name} norm is negative ({n})")
 
+    def _debug_check_spinor_any(self, name: str, psi: np.ndarray):
+        if not self.debug_checks:
+            return
+        psi = np.asarray(psi)
+        self._assert_spinor_has_two_components(name, psi)
+        self._debug_assert_finite_array(f"{name}[0]", psi[0])
+        self._debug_assert_finite_array(f"{name}[1]", psi[1])
+
     def _debug_check_projector_once(self):
         P11, P12, P21, P22 = self._positive_energy_projector()
 
-        # Test idempotency on a few representative points.
         sample_points = [
             (0, 0),
             (0, self.grid.Nx // 2),
@@ -156,7 +194,6 @@ class DiracTheory(TheoryModel):
                 )
 
     def _debug_check_k_operator_once(self):
-        # Check near-unitarity of free k-step at a small reference dt.
         dt = 0.123456789
         U11, U12, U21, U22 = self._dirac_k_operator(dt)
 
@@ -183,6 +220,114 @@ class DiracTheory(TheoryModel):
                 )
 
     # -----------------------------------------------------
+    # packet diagnostics
+    # -----------------------------------------------------
+
+    def expected_group_velocity(self, k0x: float, k0y: float = 0.0) -> tuple[float, float, float]:
+        """
+        Free-space Dirac group velocity estimate for momentum p = hbar * k.
+
+        Returns:
+            vx_est, vy_est, speed_est
+        """
+        px = self.hbar * float(k0x)
+        py = self.hbar * float(k0y)
+        p2 = px * px + py * py
+        mc2 = self.m_mass * self.c_light**2
+        E = float(np.sqrt((self.c_light**2) * p2 + mc2**2))
+
+        vx = float((self.c_light**2) * px / (E + 1e-30))
+        vy = float((self.c_light**2) * py / (E + 1e-30))
+        sp = float(np.hypot(vx, vy))
+        return vx, vy, sp
+
+    def packet_summary(
+        self,
+        state_like: np.ndarray,
+        X_like: np.ndarray | None = None,
+        Y_like: np.ndarray | None = None,
+    ) -> dict:
+        """
+        Summarize a full-grid or cropped Dirac spinor packet.
+
+        Accepts:
+            state_like shape (2, H, W)
+            X_like, Y_like shape (H, W); defaults to full grid if omitted
+        """
+        psi = np.asarray(state_like, dtype=np.complex128)
+        self._assert_spinor_has_two_components("state_like", psi)
+
+        _, H, W = psi.shape
+
+        if X_like is None or Y_like is None:
+            self._assert(
+                (H, W) == (self.grid.Ny, self.grid.Nx),
+                "X_like/Y_like omitted but state_like is not full-grid sized",
+            )
+            X = self.grid.X
+            Y = self.grid.Y
+        else:
+            X = np.asarray(X_like, dtype=float)
+            Y = np.asarray(Y_like, dtype=float)
+            self._assert(X.shape == (H, W), f"X_like shape {X.shape} != {(H, W)}")
+            self._assert(Y.shape == (H, W), f"Y_like shape {Y.shape} != {(H, W)}")
+
+        psi1, psi2 = psi
+        rho = self._spinor_density(psi1, psi2).astype(float)
+
+        mass = float(np.sum(rho) * self.grid.dx * self.grid.dy)
+        if mass > 0.0:
+            x_mean = float(np.sum(rho * X) * self.grid.dx * self.grid.dy / mass)
+            y_mean = float(np.sum(rho * Y) * self.grid.dx * self.grid.dy / mass)
+        else:
+            x_mean = np.nan
+            y_mean = np.nan
+
+        iy, ix = np.unravel_index(int(np.argmax(rho)), rho.shape)
+        x_peak = float(X[iy, ix])
+        y_peak = float(Y[iy, ix])
+        rho_max = float(np.max(rho))
+
+        jx, jy, _ = self.current(psi)
+        if mass > 0.0:
+            jx_mean = float(np.sum(jx) * self.grid.dx * self.grid.dy / mass)
+            jy_mean = float(np.sum(jy) * self.grid.dx * self.grid.dy / mass)
+        else:
+            jx_mean = np.nan
+            jy_mean = np.nan
+
+        return {
+            "mass": mass,
+            "x_mean": x_mean,
+            "y_mean": y_mean,
+            "x_peak": x_peak,
+            "y_peak": y_peak,
+            "rho_max": rho_max,
+            "jx_mean": jx_mean,
+            "jy_mean": jy_mean,
+            "peak_index": (iy, ix),
+        }
+
+    def debug_packet_summary(
+        self,
+        label: str,
+        state_like: np.ndarray,
+        X_like: np.ndarray | None = None,
+        Y_like: np.ndarray | None = None,
+    ):
+        if not self.debug_checks or not self.debug_packet_stats:
+            return
+        s = self.packet_summary(state_like, X_like=X_like, Y_like=Y_like)
+        self._debug_info(
+            f"{label}: "
+            f"mass={s['mass']:.6e}, "
+            f"x_mean={s['x_mean']:.4f}, y_mean={s['y_mean']:.4f}, "
+            f"x_peak={s['x_peak']:.4f}, y_peak={s['y_peak']:.4f}, "
+            f"rho_max={s['rho_max']:.6e}, "
+            f"jx_mean={s['jx_mean']:.6e}, jy_mean={s['jy_mean']:.6e}"
+        )
+
+    # -----------------------------------------------------
     # small helpers
     # -----------------------------------------------------
 
@@ -198,6 +343,7 @@ class DiracTheory(TheoryModel):
         return dt
 
     def _spinor_density(self, psi1: np.ndarray, psi2: np.ndarray) -> np.ndarray:
+        self._assert_same_spatial_shape("_spinor_density", psi1, psi2)
         return np.abs(psi1) ** 2 + np.abs(psi2) ** 2
 
     def _normalize_spinor(self, psi1: np.ndarray, psi2: np.ndarray):
@@ -207,6 +353,7 @@ class DiracTheory(TheoryModel):
             if self.debug_checks:
                 self._debug_warn(f"_normalize_spinor got non-positive or non-finite norm^2: {n2}")
             return psi1.copy(), psi2.copy()
+
         n = np.sqrt(n2)
         psi1_n = psi1 / n
         psi2_n = psi2 / n
@@ -218,12 +365,13 @@ class DiracTheory(TheoryModel):
 
         return psi1_n, psi2_n
 
+    # -----------------------------------------------------
+    # free Dirac Hamiltonian in k-space
+    # -----------------------------------------------------
+
     def _dirac_hamiltonian_k(self):
         """
-        Returns momentum-space Dirac Hamiltonian pieces for
-
-            H = c (sigma_x px + sigma_y py) + m c^2 sigma_z
-
+        H = c (sigma_x px + sigma_y py) + m c^2 sigma_z
         with px = hbar * KX, py = hbar * KY.
         """
         px = self.hbar * self.KX
@@ -248,11 +396,7 @@ class DiracTheory(TheoryModel):
 
     def _positive_energy_eigenspinor(self):
         """
-        Pointwise normalized positive-energy eigenspinor u_+(k) for
-
-            H = c (sigma_x px + sigma_y py) + m c^2 sigma_z
-
-        A convenient choice:
+        Pointwise normalized positive-energy eigenspinor u_+(k):
             u_+ ~ [E + mc^2, c(px + i py)]^T
         """
         _, _, _, _, E, px, py = self._dirac_hamiltonian_k()
@@ -284,17 +428,17 @@ class DiracTheory(TheoryModel):
         Robust default Dirac initialization:
         project a scalar seed packet onto the positive-energy branch.
         """
-        return self.initialize_projected_positive_energy_from_scalar(state0)
+        psi = self.initialize_projected_positive_energy_from_scalar(state0)
+
+        if self.debug_checks:
+            self._debug_check_spinor_full("initialize_state", psi)
+            self.debug_packet_summary("initialize_state summary", psi)
+
+        return psi
 
     def initialize_click_state(self, x_click, y_click, sigma_click):
         """
-        Build a localized positive-energy Dirac click-state.
-
-        The click is created from a localized scalar Gaussian envelope in x-space,
-        optionally mild-low-pass filtered in k-space, then spinorized using the
-        positive-energy eigenspinor of the free 2D Dirac Hamiltonian.
-
-        This is a much more physical seed than raw [phi, 0].
+        Localized positive-energy Dirac click-state.
         """
         self._validate_positive_sigma(sigma_click)
 
@@ -336,7 +480,7 @@ class DiracTheory(TheoryModel):
         psi = np.stack([psi1, psi2], axis=0)
 
         if self.debug_checks:
-            self._debug_check_spinor("initialize_click_state", psi)
+            self._debug_check_spinor_full("initialize_click_state", psi)
 
         return psi
 
@@ -359,8 +503,8 @@ class DiracTheory(TheoryModel):
 
         A = np.exp(
             -(
-                ((self.KX - k0x) ** 2) / (2.0 * float(sigma_x_k)**2)
-                + ((self.KY - k0y) ** 2) / (2.0 * float(sigma_y_k)**2)
+                ((self.KX - k0x) ** 2) / (2.0 * float(sigma_x_k) ** 2)
+                + ((self.KY - k0y) ** 2) / (2.0 * float(sigma_y_k) ** 2)
             )
             - 1j * (self.KX * x0 + self.KY * y0)
         ).astype(np.complex128)
@@ -384,16 +528,12 @@ class DiracTheory(TheoryModel):
         psi = np.stack([psi1, psi2], axis=0)
 
         if self.debug_checks:
-            self._debug_check_spinor("initialize_positive_energy_packet", psi)
+            self._debug_check_spinor_full("initialize_positive_energy_packet", psi)
 
         return psi
 
     def _positive_energy_projector(self):
         """
-        Momentum-space positive-energy projector for
-
-            H = c (sigma_x px + sigma_y py) + m c^2 sigma_z
-
         P_plus = (1/2) * (I + H/E)
         """
         H11, H12, H21, H22, E, _, _ = self._dirac_hamiltonian_k()
@@ -424,8 +564,8 @@ class DiracTheory(TheoryModel):
         spinor_down_weight: complex = 0.0 + 0.0j,
     ):
         """
-        Build a real-space Gaussian wave packet and project it onto the
-        positive-energy branch of the Dirac Hamiltonian.
+        Build a real-space Gaussian wave packet and project it onto
+        the positive-energy branch.
         """
         self._validate_positive_sigma(sigma_x, sigma_y)
 
@@ -433,8 +573,8 @@ class DiracTheory(TheoryModel):
         Yc = self.grid.Y - y0
 
         env = np.exp(
-            -(Xc**2) / (2.0 * float(sigma_x)**2)
-            -(Yc**2) / (2.0 * float(sigma_y)**2)
+            -(Xc**2) / (2.0 * float(sigma_x) ** 2)
+            -(Yc**2) / (2.0 * float(sigma_y) ** 2)
         ).astype(np.complex128)
 
         phase = np.exp(
@@ -461,7 +601,7 @@ class DiracTheory(TheoryModel):
         psi = np.stack([psi1_proj, psi2_proj], axis=0)
 
         if self.debug_checks:
-            self._debug_check_spinor("initialize_projected_positive_energy_packet", psi)
+            self._debug_check_spinor_full("initialize_projected_positive_energy_packet", psi)
 
         return psi
 
@@ -501,7 +641,7 @@ class DiracTheory(TheoryModel):
         psi = np.stack([psi1_proj, psi2_proj], axis=0)
 
         if self.debug_checks:
-            self._debug_check_spinor("initialize_projected_positive_energy_from_scalar", psi)
+            self._debug_check_spinor_full("initialize_projected_positive_energy_from_scalar", psi)
 
         return psi
 
@@ -511,13 +651,8 @@ class DiracTheory(TheoryModel):
 
     def _dirac_k_operator(self, dt: float):
         """
-        Exact 2x2 momentum-space propagator for one time step dt:
-
+        Exact 2x2 momentum-space propagator:
             U = exp(-i H dt / hbar)
-
-        where
-
-            H = c (sigma_x px + sigma_y py) + m c^2 sigma_z
         """
         dt = self._validate_finite_dt(dt)
 
@@ -547,7 +682,7 @@ class DiracTheory(TheoryModel):
             raise ValueError("psi must have shape (2, Ny, Nx)")
 
         if self.debug_checks:
-            self._debug_check_spinor("_apply_dirac_k input", psi)
+            self._debug_check_spinor_full("_apply_dirac_k input", psi)
             n_before = self._debug_spinor_norm(psi[0], psi[1])
 
         psi1_k = np.fft.fft2(psi[0])
@@ -564,7 +699,7 @@ class DiracTheory(TheoryModel):
         psi_new = np.stack([psi1_new, psi2_new], axis=0)
 
         if self.debug_checks:
-            self._debug_check_spinor("_apply_dirac_k output", psi_new)
+            self._debug_check_spinor_full("_apply_dirac_k output", psi_new)
             n_after = self._debug_spinor_norm(psi1_new, psi2_new)
             err = abs(n_after - n_before)
             if err > self.debug_tol_unitarity:
@@ -582,13 +717,7 @@ class DiracTheory(TheoryModel):
     def _step_with_potential(self, state, dt: float, V_full):
         """
         Strang splitting:
-
             exp(-i V dt/2hbar) exp(-i T dt/hbar) exp(-i V dt/2hbar)
-
-        Here V may be complex:
-            V = V_real - i W
-
-        so forward evolution is generally non-unitary when W != 0.
         """
         dt = self._validate_finite_dt(dt)
 
@@ -601,7 +730,7 @@ class DiracTheory(TheoryModel):
             raise ValueError("V_full must have shape (Ny, Nx)")
 
         if self.debug_checks:
-            self._debug_check_spinor("_step_with_potential input", state)
+            self._debug_check_spinor_full("_step_with_potential input", state)
             self._debug_assert_finite_array("V_full", V_full)
             n_before = self._debug_spinor_norm(state[0], state[1])
 
@@ -625,15 +754,8 @@ class DiracTheory(TheoryModel):
         psi_out = np.stack([psi1, psi2], axis=0)
 
         if self.debug_checks:
-            self._debug_check_spinor("_step_with_potential output", psi_out)
+            self._debug_check_spinor_full("_step_with_potential output", psi_out)
             n_after = self._debug_spinor_norm(psi_out[0], psi_out[1])
-
-            # If this is a forward absorptive step, norm should not grow much
-            # when W >= 0 everywhere.
-            if np.all(np.real(-1j * V_full) <= 1e-14):
-                # This condition is conservative and not especially informative,
-                # so keep only a mild warning.
-                pass
 
             W_est = -np.imag(V_full)
             if dt > 0.0 and np.min(W_est) >= -1e-14:
@@ -651,27 +773,16 @@ class DiracTheory(TheoryModel):
 
     def step_forward(self, state, dt: float):
         psi = self._step_with_potential(state, dt, self.V_fwd)
-        return TheoryStepResult(
-            state=psi,
-            aux=None,
-        )
+        return TheoryStepResult(state=psi, aux=None)
 
     def step_backward_adjoint(self, state, dt: float):
         """
-        Adjoint-like backward evolution.
-
-        This is not a stable physical time-reversal when absorptive regions exist.
-        It applies:
-          - reversed dt in the kinetic part
+        Adjoint-like backward evolution:
+          - reversed dt in kinetic part
           - conjugated complex potential
-
-        For W > 0, this typically amplifies where forward evolution absorbed.
         """
         psi = self._step_with_potential(state, -dt, self.V_adj)
-        return TheoryStepResult(
-            state=psi,
-            aux=None,
-        )
+        return TheoryStepResult(state=psi, aux=None)
 
     # -----------------------------------------------------
     # observables
@@ -681,6 +792,7 @@ class DiracTheory(TheoryModel):
         state = np.asarray(state, dtype=np.complex128)
         if state.shape != (2, self.grid.Ny, self.grid.Nx):
             raise ValueError("state must have shape (2, Ny, Nx)")
+
         psi1, psi2 = state
         rho = self._spinor_density(psi1, psi2).astype(float)
 
@@ -701,15 +813,16 @@ class DiracTheory(TheoryModel):
 
         jx = c * psi^dagger sigma_x psi = 2 c Re(conj(psi1) * psi2)
         jy = c * psi^dagger sigma_y psi = 2 c Im(conj(psi1) * psi2)
+
+        Accepts both:
+            - full-grid state: shape (2, Ny, Nx)
+            - visible crop:    shape (2, H, W)
         """
         state_vis = np.asarray(state_vis, dtype=np.complex128)
-        expected = (2, self.grid.Ny, self.grid.Nx)
-        if state_vis.shape != expected:
-            raise ValueError(
-                f"state_vis must have shape {expected}, got {state_vis.shape}"
-            )
+        self._assert_spinor_has_two_components("state_vis", state_vis)
 
         psi1, psi2 = state_vis
+        self._assert_same_spatial_shape("current spatial", psi1, psi2)
 
         rho = self._spinor_density(psi1, psi2).astype(float)
         overlap = np.conjugate(psi1) * psi2
@@ -722,14 +835,22 @@ class DiracTheory(TheoryModel):
             self._debug_assert_finite_array("jy", jy)
             self._debug_assert_finite_array("rho(current)", rho)
 
+            sp_local = np.zeros_like(rho, dtype=float)
+            mask = rho > 1e-12
+            sp_local[mask] = np.hypot(jx[mask] / rho[mask], jy[mask] / rho[mask])
+            if np.any(mask):
+                vmax = float(np.max(sp_local[mask]))
+                if vmax > self.c_light + self.debug_tol_velocity:
+                    self._debug_warn(
+                        f"local |j/rho| exceeded c in current(): vmax={vmax:.12f}, c={self.c_light:.12f}"
+                    )
+
         return jx, jy, rho
 
     def velocity(self, state_vis, eps_rho: float = 1e-10):
         """
         Relativistically constrained velocity from Dirac current:
-
             v = j / rho
-
         with numerical enforcement:
             |v| <= c_light
         """

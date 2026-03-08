@@ -418,6 +418,9 @@ def main():
     norms = []
 
     print(f"Forward simulation starts... theory={cfg.THEORY_NAME}")
+    if cfg.THEORY_NAME == "dirac":
+        vx_est, vy_est, sp_est = theory.expected_group_velocity(cfg.k0x, cfg.k0y)
+        print(f"[DIRAC V_EST] vx≈{vx_est:.6f}, vy≈{vy_est:.6f}, |v|≈{sp_est:.6f}")
 
     for n in range(cfg.n_steps + 1):
         rho = theory.density(state)
@@ -494,6 +497,15 @@ def main():
             f"max={np.max(fi):.6e} "
             f"peak=({x_peak:.4f},{y_peak:.4f})"
         )
+
+    if cfg.THEORY_NAME == "dirac":
+        if state_vis_frames is not None:
+            theory.debug_packet_summary(
+                f"vis frame {i}",
+                state_vis_frames[i],
+                X_like=grid.X_vis,
+                Y_like=grid.Y_vis,
+            )
     # --------------------------------------------------------
     # Continuity equation debug
     # --------------------------------------------------------
@@ -564,7 +576,7 @@ def main():
         f"argmax_i={idx_det} t_det={t_det:.6f} "
         f"first={screen_int[0]:.6e} last={screen_int[-1]:.6e}"
     )
-    
+
     # --------------------------------------------------------
     # 5) Backward library
     # --------------------------------------------------------
