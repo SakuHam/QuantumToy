@@ -29,6 +29,7 @@ from core.simulation_types import PotentialSpec
 from analysis.emix import make_emix_density
 from analysis.emix import build_Emix_density_from_phi_tau
 
+
 # ============================================================
 # Display helper
 # ============================================================
@@ -64,9 +65,6 @@ def estimate_group_velocity(cfg, theory) -> float:
     For scalar / Schrödinger-like theories, fall back to:
         v ~ k0x / m
     """
-    # Heuristic: Dirac-like theories in this codebase expose current() that
-    # works on spinors and typically produce spinor states, but here the most
-    # reliable cheap check is theory name / class name.
     theory_name = getattr(cfg, "THEORY_NAME", "").lower()
     class_name = theory.__class__.__name__.lower()
 
@@ -80,6 +78,281 @@ def estimate_group_velocity(cfg, theory) -> float:
         return v_est
 
     return float(cfg.k0x / (cfg.m_mass + 1e-30))
+
+
+# ============================================================
+# Diagnostic reference helpers
+# ============================================================
+
+def _forward_density_from_state_vis_frames(state_vis_frames: np.ndarray) -> np.ndarray:
+    if state_vis_frames.ndim == 3:
+        return (np.abs(state_vis_frames) ** 2).astype(float)
+    if state_vis_frames.ndim == 4:
+        return np.sum(np.abs(state_vis_frames) ** 2, axis=1).astype(float)
+    raise ValueError(f"Unsupported state_vis_frames ndim={state_vis_frames.ndim}")
+
+
+def build_Emix_density_reference(
+    phi_tau_frames: np.ndarray,
+    times: np.ndarray,
+    t_det: float,
+    sigmaT: float,
+    tau_step: float,
+    K_JITTER: int = 13,
+) -> np.ndarray:
+    """
+    Reference builder matching the old working logic:
+      - gaussian weights normalized once globally
+      - valid subset NOT re-normalized
+      - nearest saved backward frame via round()
+    """
+    Nt_ = len(times)
+    halfK = K_JITTER // 2
+    idx_det2 = int(np.argmin(np.abs(times - t_det)))
+
+    k_inds = np.arange(idx_det2 - halfK, idx_det2 + halfK + 1)
+    k_inds = np.clip(k_inds, 0, Nt_ - 1)
+    k_inds = np.unique(k_inds)
+
+    Tk = times[k_inds]
+
+    if sigmaT <= 0:
+        w = np.zeros_like(Tk, dtype=float)
+        w[int(np.argmin(np.abs(Tk - t_det)))] = 1.0
+    else:
+        w = np.exp(-0.5 * ((Tk - t_det) / sigmaT) ** 2)
+        s = np.sum(w)
+        if s > 0:
+            w = w / s
+
+    if phi_tau_frames.ndim == 3:
+        phi_tau_density = (np.abs(phi_tau_frames) ** 2).astype(float)
+    elif phi_tau_frames.ndim == 4:
+        phi_tau_density = np.sum(np.abs(phi_tau_frames) ** 2, axis=1).astype(float)
+    else:
+        raise ValueError(f"Unsupported phi_tau_frames ndim={phi_tau_frames.ndim}")
+
+    out = np.zeros_like(phi_tau_density, dtype=float)
+
+    for i, ti in enumerate(times):
+        tau = Tk - ti
+        valid = tau >= 0.0
+        if not np.any(valid):
+            continue
+
+        j = np.rint(tau[valid] / tau_step).astype(int)
+        j = np.clip(j, 0, Nt_ - 1)
+
+        out[i] = np.sum(w[valid][:, None, None] * phi_tau_density[j], axis=0)
+
+    return out
+
+
+def make_rho_density_product_oldstyle_reference(
+    state_vis_frames: np.ndarray,
+    Emix_density: np.ndarray,
+    dx: float,
+    dy: float,
+) -> np.ndarray:
+    rho_fwd = _forward_density_from_state_vis_frames(state_vis_frames)
+    out = np.zeros_like(rho_fwd, dtype=float)
+
+    for i in range(rho_fwd.shape[0]):
+        rr = rho_fwd[i] * Emix_density[i]
+        s = float(np.sum(rr) * dx * dy)
+        if s > 0:
+            rr = rr / s
+        out[i] = rr
+
+    return out
+
+
+def run_diagnostics(
+    cfg,
+    grid,
+    theory,
+    potential,
+    frames_density: np.ndarray,
+    state_vis_frames: np.ndarray | None,
+    times: np.ndarray,
+    tau_step: float,
+    idx_det: int,
+    t_det: float,
+    x_click: float,
+    y_click: float,
+    screen_int: np.ndarray,
+    phi_tau_frames: np.ndarray,
+    sigma_diag: float,
+):
+    print("\n================ DIAGNOSTIC BLOCK START ================\n")
+
+    Nt = len(times)
+
+    # --------------------------------------------------------
+    # D1) screen_int reference check
+    # --------------------------------------------------------
+    screen_int_ref = np.array(
+        [np.sum(frames_density[i][potential.screen_mask_vis]) * grid.dx * grid.dy for i in range(Nt)],
+        dtype=float,
+    )
+
+    screen_diff = float(np.max(np.abs(screen_int - screen_int_ref)))
+    print(f"[DIAG D1] screen_int max abs diff = {screen_diff:.6e}")
+    assert np.allclose(screen_int, screen_int_ref, rtol=1e-12, atol=1e-12), \
+        f"screen_int mismatch: max abs diff = {screen_diff}"
+
+    # --------------------------------------------------------
+    # D2) click sanity
+    # --------------------------------------------------------
+    assert potential.screen_mask_vis.shape == frames_density[idx_det].shape, \
+        "screen_mask_vis shape mismatch at detection frame"
+
+    click_mask = (
+        (np.abs(grid.X_vis - x_click) < 0.5 * grid.dx + 1e-12) &
+        (np.abs(grid.Y_vis - y_click) < 0.5 * grid.dy + 1e-12)
+    )
+    n_click_cells = int(np.count_nonzero(click_mask))
+    print(f"[DIAG D2] click cell matches on visible grid = {n_click_cells}")
+    assert np.any(click_mask), "Click does not land on any visible-grid cell"
+
+    click_on_screen = bool(np.any(click_mask & potential.screen_mask_vis))
+    print(f"[DIAG D2] click lies on detector mask = {click_on_screen}")
+    assert click_on_screen, "Click is not on the detector mask"
+
+    dx_screen = abs(x_click - cfg.screen_center_x)
+    print(f"[DIAG D2] |x_click - screen_center_x| = {dx_screen:.6e}")
+    assert dx_screen < (cfg.screen_eval_width + grid.dx), \
+        f"x_click={x_click} seems too far from detector screen center {cfg.screen_center_x}"
+
+    # --------------------------------------------------------
+    # D3) backward frame 0 must match initialized click state cropped
+    # --------------------------------------------------------
+    phi0_full = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
+    if phi0_full.ndim == 2:
+        phi0_vis_ref = phi0_full[grid.ys, grid.xs]
+    elif phi0_full.ndim == 3:
+        phi0_vis_ref = phi0_full[:, grid.ys, grid.xs]
+    else:
+        raise ValueError(f"Unsupported phi0_full ndim={phi0_full.ndim}")
+
+    phi0_diff = float(np.max(np.abs(phi_tau_frames[0] - phi0_vis_ref)))
+    print(f"[DIAG D3] phi_tau_frames[0] max abs diff vs click-state crop = {phi0_diff:.6e}")
+    assert np.allclose(phi_tau_frames[0], phi0_vis_ref, rtol=1e-12, atol=1e-12), \
+        f"phi_tau_frames[0] mismatch: max abs diff = {phi0_diff}"
+
+    # --------------------------------------------------------
+    # D4) backward library first few steps must match direct replay
+    # --------------------------------------------------------
+    ncheck = min(5, Nt - 1)
+    for i in range(ncheck):
+        phi_test = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
+        for _ in range((i + 1) * cfg.save_every):
+            phi_test = theory.step_backward_adjoint(phi_test, cfg.dt).state
+
+        if phi_test.ndim == 2:
+            phi_test_vis = phi_test[grid.ys, grid.xs]
+        elif phi_test.ndim == 3:
+            phi_test_vis = phi_test[:, grid.ys, grid.xs]
+        else:
+            raise ValueError(f"Unsupported phi_test ndim={phi_test.ndim}")
+
+        step_diff = float(np.max(np.abs(phi_tau_frames[i + 1] - phi_test_vis)))
+        print(f"[DIAG D4] backward replay frame {i+1} max abs diff = {step_diff:.6e}")
+        assert np.allclose(phi_tau_frames[i + 1], phi_test_vis, rtol=1e-9, atol=1e-9), \
+            f"Backward library mismatch at frame {i+1}: max abs diff = {step_diff}"
+
+    # --------------------------------------------------------
+    # D5) Emix density reference check
+    # --------------------------------------------------------
+    Emix_density_ref = build_Emix_density_reference(
+        phi_tau_frames=phi_tau_frames,
+        times=times,
+        t_det=t_det,
+        sigmaT=sigma_diag,
+        tau_step=tau_step,
+        K_JITTER=cfg.K_JITTER,
+    )
+
+    Emix_density_new = build_Emix_density_from_phi_tau(
+        phi_tau_frames=phi_tau_frames,
+        times=times,
+        t_det=t_det,
+        sigmaT=sigma_diag,
+        tau_step=tau_step,
+        K_JITTER=cfg.K_JITTER,
+    )
+
+    emix_density_diff = float(np.max(np.abs(Emix_density_new - Emix_density_ref)))
+    print(f"[DIAG D5] Emix_density max abs diff vs reference = {emix_density_diff:.6e}")
+    assert np.allclose(Emix_density_new, Emix_density_ref, rtol=1e-10, atol=1e-10), \
+        f"Emix_density mismatch: max abs diff = {emix_density_diff}"
+
+    # --------------------------------------------------------
+    # D6) oldstyle rho reference check
+    # --------------------------------------------------------
+    if state_vis_frames is not None:
+        rho_old_ref = make_rho_density_product_oldstyle_reference(
+            state_vis_frames=state_vis_frames,
+            Emix_density=Emix_density_ref,
+            dx=grid.dx,
+            dy=grid.dy,
+        )
+
+        rho_old_new = make_rho(
+            frames_psi=state_vis_frames,
+            Emix=None,
+            Emix_density=Emix_density_new,
+            dx=grid.dx,
+            dy=grid.dy,
+            mode="density_product_oldstyle",
+        )
+
+        rho_old_diff = float(np.max(np.abs(rho_old_new - rho_old_ref)))
+        print(f"[DIAG D6] rho_oldstyle max abs diff vs reference = {rho_old_diff:.6e}")
+        assert np.allclose(rho_old_new, rho_old_ref, rtol=1e-10, atol=1e-10), \
+            f"rho_oldstyle mismatch: max abs diff = {rho_old_diff}"
+
+    # --------------------------------------------------------
+    # D7) checkpoint summaries
+    # --------------------------------------------------------
+    check_ids = sorted(set([0, Nt // 2, Nt - 1]))
+    for i in check_ids:
+        fi = frames_density[i]
+        assert np.all(np.isfinite(fi)), f"frames_density[{i}] non-finite"
+        assert np.max(fi) > 0.0, f"frames_density[{i}] is all zeros"
+
+        argmax_ij = np.unravel_index(np.argmax(fi), fi.shape)
+        print(
+            f"[DIAG D7/FWD] i={i:4d} t={times[i]:7.3f} "
+            f"sum={np.sum(fi)*grid.dx*grid.dy:.6e} "
+            f"max={np.max(fi):.6e} "
+            f"argmax={argmax_ij}"
+        )
+
+    for i in check_ids:
+        e_ref = Emix_density_ref[i]
+        print(
+            f"[DIAG D7/EMIX_DENS_REF] i={i:4d} t={times[i]:7.3f} "
+            f"sum={np.sum(e_ref)*grid.dx*grid.dy:.6e} "
+            f"max={np.max(e_ref):.6e}"
+        )
+
+    if state_vis_frames is not None:
+        rho_old_ref = make_rho_density_product_oldstyle_reference(
+            state_vis_frames=state_vis_frames,
+            Emix_density=Emix_density_ref,
+            dx=grid.dx,
+            dy=grid.dy,
+        )
+        for i in check_ids:
+            rr = rho_old_ref[i]
+            print(
+                f"[DIAG D7/RHO_OLD_REF] i={i:4d} t={times[i]:7.3f} "
+                f"sum={np.sum(rr)*grid.dx*grid.dy:.6e} "
+                f"max={np.max(rr):.6e}"
+            )
+
+    print("\n================ DIAGNOSTIC BLOCK END ==================\n")
 
 
 # ============================================================
@@ -157,10 +430,8 @@ def main():
 
             if cfg.SAVE_COMPLEX_STATE_FRAMES:
                 if state.ndim == 2:
-                    # Schrödinger-like scalar field
                     state_vis = state[grid.ys, grid.xs].copy()
                 elif state.ndim == 3:
-                    # Dirac-like spinor field: keep spinor axis, crop y/x
                     state_vis = state[:, grid.ys, grid.xs].copy()
                 else:
                     raise ValueError(f"Unsupported state ndim={state.ndim}")
@@ -192,6 +463,37 @@ def main():
 
     print("Forward done.")
 
+    # --------------------------------------------------------
+    # Forward debug checks
+    # --------------------------------------------------------
+    t_final = cfg.n_steps * cfg.dt
+    print(f"[TIMECHK] dt={cfg.dt}")
+    print(f"[TIMECHK] n_steps={cfg.n_steps}")
+    print(f"[TIMECHK] save_every={cfg.save_every}")
+    print(f"[TIMECHK] t_final={t_final:.6f}")
+
+    v_est_dbg = estimate_group_velocity(cfg, theory)
+    x_travel_est = abs(v_est_dbg) * t_final
+    dist_to_screen_est = abs(cfg.screen_center_x - cfg.x0)
+
+    print(f"[TIMECHK] v_est≈{v_est_dbg:.6f}")
+    print(f"[TIMECHK] estimated travel≈{x_travel_est:.6f}")
+    print(f"[TIMECHK] distance x0->screen≈{dist_to_screen_est:.6f}")
+    print(f"[TIMECHK] travel/distance≈{x_travel_est/(dist_to_screen_est+1e-30):.6f}")
+
+    check_ids = sorted(set([0, Nt // 4, Nt // 2, 3 * Nt // 4, Nt - 1]))
+    for i in check_ids:
+        fi = frames_density[i]
+        iy, ix = np.unravel_index(np.argmax(fi), fi.shape)
+        x_peak = grid.X_vis[iy, ix]
+        y_peak = grid.Y_vis[iy, ix]
+        mass_vis = np.sum(fi) * grid.dx * grid.dy
+        print(
+            f"[FWDCHK] i={i:4d} t={times[i]:8.4f} "
+            f"mass_vis={mass_vis:.6e} "
+            f"max={np.max(fi):.6e} "
+            f"peak=({x_peak:.4f},{y_peak:.4f})"
+        )
     # --------------------------------------------------------
     # Continuity equation debug
     # --------------------------------------------------------
@@ -241,6 +543,7 @@ def main():
 #            plt.ylabel("y")
 #            plt.show()
 #            return
+
     # --------------------------------------------------------
     # 4) Detection time + click
     # --------------------------------------------------------
@@ -256,7 +559,12 @@ def main():
     )
 
     print(f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f})")
-
+    print(
+        f"[SCREEN] max={np.max(screen_int):.6e} "
+        f"argmax_i={idx_det} t_det={t_det:.6f} "
+        f"first={screen_int[0]:.6e} last={screen_int[-1]:.6e}"
+    )
+    
     # --------------------------------------------------------
     # 5) Backward library
     # --------------------------------------------------------
@@ -273,6 +581,32 @@ def main():
         print_every_frames=20,
     )
     print("Backward library done.")
+
+    # --------------------------------------------------------
+    # 5.5) Diagnostic block
+    # --------------------------------------------------------
+    v_est_diag = estimate_group_velocity(cfg, theory)
+    L_gap_diag = cfg.screen_center_x - cfg.barrier_center_x
+    t_gap_diag = L_gap_diag / (abs(v_est_diag) + 1e-12)
+    sigma_diag = 0.60 * t_gap_diag
+
+    run_diagnostics(
+        cfg=cfg,
+        grid=grid,
+        theory=theory,
+        potential=potential,
+        frames_density=frames_density,
+        state_vis_frames=state_vis_frames,
+        times=times,
+        tau_step=tau_step,
+        idx_det=idx_det,
+        t_det=t_det,
+        x_click=x_click,
+        y_click=y_click,
+        screen_int=screen_int,
+        phi_tau_frames=phi_tau_frames,
+        sigma_diag=sigma_diag,
+    )
 
     # --------------------------------------------------------
     # 6) Builder for sigmaT-dependent objects
