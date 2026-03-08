@@ -8,9 +8,9 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "dirac_thick_front"
+    THEORY_NAME: str = "schrodinger_measurement"
 
-    RHO_MODE: str = "density_product"
+    RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
 
     # ============================================================
@@ -165,6 +165,7 @@ class AppConfig:
     # ============================================================
     # Display
     # ============================================================
+    USE_LOG_OUTPUT = False
     USE_FIXED_DISPLAY_SCALE: bool = True
     DISPLAY_Q: float = 0.995
     GAMMA: float = 0.5
@@ -173,4 +174,4 @@ class AppConfig:
     # ============================================================
     # Output
     # ============================================================
-    OUTPUT_MP4: str = "schrodinger_modular_api.mp4"
+    OUTPUT_MP4: str = "output.mp4"

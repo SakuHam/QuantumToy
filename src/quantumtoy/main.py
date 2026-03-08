@@ -540,16 +540,28 @@ def main():
             if not np.any(potential.screen_mask_vis):
                 print("[DEBUG] screen_mask_vis empty -> skipping click/backward/Emix analysis.")
                 plt.figure(figsize=(8, 5))
-                plt.imshow(
-                    frames_density[-1],
-                    extent=(
-                        grid.x_vis_min, grid.x_vis_max,
-                        grid.y_vis_min, grid.y_vis_max,
-                    ),
-                    origin="lower",
-                    cmap="magma",
-                    aspect="auto",
-                )
+                if cfg.USE_LOG_OUTPUT:
+                    plt.imshow(
+                        np.log10(frames_density[-1] + 1e-20), 
+                        extent=(
+                            grid.x_vis_min, grid.x_vis_max,
+                            grid.y_vis_min, grid.y_vis_max,
+                        ),
+                        origin="lower",
+                        cmap="magma",
+                        aspect="auto",
+                    )
+                else:
+                    plt.imshow(
+                        frames_density[-1],
+                        extent=(
+                            grid.x_vis_min, grid.x_vis_max,
+                            grid.y_vis_min, grid.y_vis_max,
+                        ),
+                        origin="lower",
+                        cmap="magma",
+                        aspect="auto",
+                    )
                 plt.colorbar(label="rho")
                 plt.title(f"Forward density only (debug free case), t={times[-1]:.3f}")
                 plt.xlabel("x")
