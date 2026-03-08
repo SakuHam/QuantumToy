@@ -8,12 +8,15 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "dirac"
+    THEORY_NAME: str = "dirac_thick_front"
+
+    RHO_MODE: str = "density_product"
+    RHO_BLEND_ALPHA: float = 0.5
 
     # ============================================================
     # Ridge
     # ============================================================
-    RIDGE_MODE: str = "centroid_top"
+    RIDGE_MODE: str = "centroid_top_snap_localmax"
     CENTROID_TOP_Q: float = 0.02
     LOCALMAX_RADIUS: int = 20
     LOCALMAX_SMOOTH_ALPHA: float = 0.0
@@ -72,7 +75,7 @@ class AppConfig:
     BOHMIAN_RNG_SEED: int = 20260306
 
     BOHMIAN_STOP_ON_LOW_RHO: bool = True
-    BOHMIAN_MIN_RHO: float = 1e-8
+    BOHMIAN_MIN_RHO: float = 1e-12
     BOHMIAN_STOP_OUTSIDE_VISIBLE: bool = True
 
     BOHMIAN_USE_RK4: bool = True

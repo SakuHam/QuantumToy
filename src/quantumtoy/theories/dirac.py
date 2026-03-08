@@ -790,10 +790,11 @@ class DiracTheory(TheoryModel):
 
     def density(self, state):
         state = np.asarray(state, dtype=np.complex128)
-        if state.shape != (2, self.grid.Ny, self.grid.Nx):
-            raise ValueError("state must have shape (2, Ny, Nx)")
+        self._assert_spinor_has_two_components("state", state)
 
         psi1, psi2 = state
+        self._assert_same_spatial_shape("density spatial", psi1, psi2)
+
         rho = self._spinor_density(psi1, psi2).astype(float)
 
         if self.debug_checks:
