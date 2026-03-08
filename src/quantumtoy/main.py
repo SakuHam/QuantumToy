@@ -24,7 +24,10 @@ from analysis.bohmian import (
     make_bohmian_initial_points,
     integrate_bohmian_trajectories,
 )
-
+from analysis.debug_continuity import continuity_residual_from_state_frames
+from core.simulation_types import PotentialSpec
+from analysis.emix import make_emix_density
+from analysis.emix import build_Emix_density_from_phi_tau
 
 # ============================================================
 # Display helper
@@ -47,6 +50,39 @@ def gamma_display(
 
 
 # ============================================================
+# Helpers
+# ============================================================
+
+def estimate_group_velocity(cfg, theory) -> float:
+    """
+    Estimate packet group velocity for sigmaT initialization.
+
+    For Dirac-like theories (spinor state), use relativistic estimate:
+        v = c^2 p / E,   p = hbar * k0x
+        E = sqrt((c p)^2 + (m c^2)^2)
+
+    For scalar / Schrödinger-like theories, fall back to:
+        v ~ k0x / m
+    """
+    # Heuristic: Dirac-like theories in this codebase expose current() that
+    # works on spinors and typically produce spinor states, but here the most
+    # reliable cheap check is theory name / class name.
+    theory_name = getattr(cfg, "THEORY_NAME", "").lower()
+    class_name = theory.__class__.__name__.lower()
+
+    is_dirac_like = ("dirac" in theory_name) or ("dirac" in class_name)
+
+    if is_dirac_like:
+        p0 = float(theory.hbar * cfg.k0x)
+        mc2 = float(theory.m_mass * theory.c_light**2)
+        E0 = float(np.sqrt((theory.c_light * p0) ** 2 + mc2**2))
+        v_est = float((theory.c_light**2 * p0) / (E0 + 1e-30))
+        return v_est
+
+    return float(cfg.k0x / (cfg.m_mass + 1e-30))
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -64,7 +100,25 @@ def main():
         pad_factor=cfg.PAD_FACTOR,
     )
 
-    potential = build_double_slit_and_caps(grid, cfg)
+    DEBUG_FREE_CASE = False
+
+    if DEBUG_FREE_CASE:
+        zeros = np.zeros_like(grid.X, dtype=float)
+        false_mask = np.zeros_like(grid.X, dtype=bool)
+        false_mask_vis = np.zeros((grid.n_visible_y, grid.n_visible_x), dtype=bool)
+
+        potential = PotentialSpec(
+            V_real=zeros.copy(),
+            W=zeros.copy(),
+            screen_mask_full=false_mask.copy(),
+            screen_mask_vis=false_mask_vis.copy(),
+            barrier_core=false_mask.copy(),
+            slit1_mask=false_mask.copy(),
+            slit2_mask=false_mask.copy(),
+        )
+    else:
+        potential = build_double_slit_and_caps(grid, cfg)
+
     theory = build_theory(cfg, grid, potential)
 
     # --------------------------------------------------------
@@ -139,6 +193,55 @@ def main():
     print("Forward done.")
 
     # --------------------------------------------------------
+    # Continuity equation debug
+    # --------------------------------------------------------
+#    if cfg.SAVE_COMPLEX_STATE_FRAMES and state_vis_frames is not None:
+#
+#        rms_mean, rms_max, abs_max = continuity_residual_from_state_frames(
+#            theory=theory,
+#            state_vis_frames=state_vis_frames,
+#            dx=grid.dx,
+#            dy=grid.dy,
+#            dt=cfg.save_every * cfg.dt,
+#        )
+#
+#        print(
+#            "[CONTINUITY] "
+#            f"RMS_mean≈{rms_mean:.3e}, "
+#            f"RMS_max≈{rms_max:.3e}, "
+#            f"ABS_max≈{abs_max:.3e}"
+#        )
+#
+#        x_mean = float(np.sum(rho * grid.X) * grid.dx * grid.dy)
+#        jx, jy, _ = theory.current(state)
+#        jx_tot = float(np.sum(jx) * grid.dx * grid.dy)
+#        jy_tot = float(np.sum(jy) * grid.dx * grid.dy)
+#
+#        print(
+#            f"[FREEDBG] step={n:5d} t={n*cfg.dt:7.3f} "
+#            f"x_mean={x_mean: .4f} jx_tot={jx_tot: .4e} jy_tot={jy_tot: .4e}"
+#        )
+#
+#        if not np.any(potential.screen_mask_vis):
+#            print("[DEBUG] screen_mask_vis empty -> skipping click/backward/Emix analysis.")
+#            plt.figure(figsize=(8, 5))
+#            plt.imshow(
+#                frames_density[-1],
+#                extent=(
+#                    grid.x_vis_min, grid.x_vis_max,
+#                    grid.y_vis_min, grid.y_vis_max,
+#                ),
+#                origin="lower",
+#                cmap="magma",
+#                aspect="auto",
+#            )
+#            plt.colorbar(label="rho")
+#            plt.title(f"Forward density only (debug free case), t={times[-1]:.3f}")
+#            plt.xlabel("x")
+#            plt.ylabel("y")
+#            plt.show()
+#            return
+    # --------------------------------------------------------
     # 4) Detection time + click
     # --------------------------------------------------------
     idx_det, t_det, x_click, y_click, screen_int = detect_click_from_screen(
@@ -184,15 +287,31 @@ def main():
             K_JITTER=cfg.K_JITTER,
         )
 
+        Emix_density_old = build_Emix_density_from_phi_tau(
+            phi_tau_frames=phi_tau_frames,
+            times=times,
+            t_det=t_det,
+            sigmaT=sigmaT,
+            tau_step=tau_step,
+            K_JITTER=cfg.K_JITTER,
+        )
+
+        if not cfg.SAVE_COMPLEX_STATE_FRAMES or state_vis_frames is None:
+            raise RuntimeError(
+                "Amplitude-level Emix/ridge analysis requires SAVE_COMPLEX_STATE_FRAMES=True"
+            )
+
         rho = make_rho(
-            frames_psi=frames_density,
+            frames_psi=state_vis_frames,
             Emix=Emix,
+            Emix_density=Emix_density_old,
             dx=grid.dx,
             dy=grid.dy,
+            mode="density_product_oldstyle",
         )
 
         rx, ry, rs = compute_ridge_xy(
-            frames_psi=frames_density,
+            frames_psi=state_vis_frames,
             Emix=Emix,
             x_vis_1d=grid.x_vis_1d,
             y_vis_1d=grid.y_vis_1d,
@@ -204,7 +323,7 @@ def main():
 
         cos_th = speed = ux = uy = div_v = None
 
-        if cfg.SAVE_COMPLEX_STATE_FRAMES and state_vis_frames is not None:
+        if state_vis_frames is not None:
             cos_th, speed, ux, uy, div_v = alignment_and_diagnostics_from_state_frames(
                 theory=theory,
                 state_vis_frames=state_vis_frames,
@@ -229,9 +348,9 @@ def main():
     # --------------------------------------------------------
     # 7) sigmaT setup
     # --------------------------------------------------------
-    v_est = cfg.k0x / cfg.m_mass
+    v_est = estimate_group_velocity(cfg, theory)
     L_gap = cfg.screen_center_x - cfg.barrier_center_x
-    t_gap = L_gap / (v_est + 1e-12)
+    t_gap = L_gap / (abs(v_est) + 1e-12)
 
     sigma_min = 0.05 * t_gap
     sigma_max = 2.00 * t_gap
@@ -715,6 +834,9 @@ def main():
     # --------------------------------------------------------
     ani.save(cfg.OUTPUT_MP4, writer="ffmpeg", fps=25, dpi=150)
     plt.show()
+    print("frame0 rho max:", np.max(frames_density[0]))
+    print("frame0 Emix density max:", np.max(make_emix_density(Emix_init)[0]))
+    print("frame0 overlap rho max:", np.max(rho_init[0]))
 
 
 if __name__ == "__main__":

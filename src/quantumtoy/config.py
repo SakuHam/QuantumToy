@@ -148,8 +148,8 @@ class AppConfig:
     # Time stepping
     # ============================================================
     dt: float = 0.003
-    n_steps: int = 2200
-    save_every: int = 5
+    n_steps: int = 20 #2200
+    save_every: int = 1 #5
 
     # ============================================================
     # Click / backward / Emix

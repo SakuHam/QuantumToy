@@ -1,5 +1,44 @@
 from __future__ import annotations
+
 import numpy as np
+
+
+def local_gamma_field(frame_psi, frame_emix):
+    """
+    Build positive scalar ridge field Gamma from local amplitude overlap.
+
+    Supported inputs
+    ----------------
+    Schrödinger:
+        frame_psi  shape (Ny, Nx), complex
+        frame_emix shape (Ny, Nx), complex
+
+        A = conj(emix) * psi
+        Gamma = |A|^2
+
+    Dirac:
+        frame_psi  shape (2, Ny, Nx), complex
+        frame_emix shape (2, Ny, Nx), complex
+
+        A = sum_a conj(emix_a) * psi_a
+        Gamma = |A|^2
+
+    Returns
+    -------
+    Gamma : np.ndarray, shape (Ny, Nx), float
+    """
+    if frame_psi.ndim == 2 and frame_emix.ndim == 2:
+        A = np.conjugate(frame_emix) * frame_psi
+        return (np.abs(A) ** 2).astype(float)
+
+    if frame_psi.ndim == 3 and frame_emix.ndim == 3:
+        A = np.sum(np.conjugate(frame_emix) * frame_psi, axis=0)
+        return (np.abs(A) ** 2).astype(float)
+
+    raise ValueError(
+        f"Incompatible frame shapes: frame_psi.ndim={frame_psi.ndim}, "
+        f"frame_emix.ndim={frame_emix.ndim}"
+    )
 
 
 def ridge_argmax(Gamma, x_vis_1d, y_vis_1d):
@@ -72,13 +111,33 @@ def compute_ridge_xy(
     radius=20,
     alpha_smooth=0.0,
 ):
+    """
+    Compute ridge trajectory from amplitude-level forward/backward overlap.
+
+    Parameters
+    ----------
+    frames_psi:
+        Schrödinger: shape (Nt, Ny, Nx), complex
+        Dirac:       shape (Nt, 2, Ny, Nx), complex
+
+    Emix:
+        Same time-grid and visible-grid shape as frames_psi.
+
+    Returns
+    -------
+    ridge_x, ridge_y, ridge_s
+        where ridge_s is the local Gamma = |A|^2 score at the chosen ridge.
+    """
+    if frames_psi.shape[0] != Emix.shape[0]:
+        raise ValueError("frames_psi and Emix must have same number of time frames")
+
     Nt_ = frames_psi.shape[0]
 
     ridge_x = np.zeros(Nt_, dtype=float)
     ridge_y = np.zeros(Nt_, dtype=float)
     ridge_s = np.zeros(Nt_, dtype=float)
 
-    Gamma0 = frames_psi[0] * Emix[0]
+    Gamma0 = local_gamma_field(frames_psi[0], Emix[0])
     x0r, y0r, s0 = ridge_argmax(Gamma0, x_vis_1d, y_vis_1d)
 
     ridge_x[0], ridge_y[0], ridge_s[0] = x0r, y0r, s0
@@ -87,7 +146,7 @@ def compute_ridge_xy(
     prev_iy = int(np.argmin(np.abs(y_vis_1d - y0r)))
 
     for i in range(1, Nt_):
-        Gamma = frames_psi[i] * Emix[i]
+        Gamma = local_gamma_field(frames_psi[i], Emix[i])
 
         if mode == "argmax":
             xi, yi, si = ridge_argmax(Gamma, x_vis_1d, y_vis_1d)

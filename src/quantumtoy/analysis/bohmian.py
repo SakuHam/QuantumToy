@@ -79,6 +79,157 @@ def is_inside_visible(
 
 
 # ============================================================
+# Shape helpers
+# ============================================================
+
+def _center_crop_slices_from_shapes(
+    full_hw: tuple[int, int],
+    vis_hw: tuple[int, int],
+):
+    """
+    Return centered crop slices that map a full-grid field to the visible grid.
+    """
+    full_h, full_w = int(full_hw[0]), int(full_hw[1])
+    vis_h, vis_w = int(vis_hw[0]), int(vis_hw[1])
+
+    if vis_h > full_h or vis_w > full_w:
+        raise ValueError(
+            f"Visible shape {vis_hw} cannot be larger than full shape {full_hw}"
+        )
+
+    y0 = (full_h - vis_h) // 2
+    x0 = (full_w - vis_w) // 2
+    y1 = y0 + vis_h
+    x1 = x0 + vis_w
+
+    return slice(y0, y1), slice(x0, x1)
+
+
+# ============================================================
+# Local Dirac rho/current/velocity from spinor
+# ============================================================
+
+def _dirac_rho_v_from_spinor_frame(
+    theory,
+    frame: np.ndarray,
+    eps_rho: float = 1e-10,
+):
+    """
+    Compute rho, vx, vy directly from a local/cropped Dirac spinor frame.
+
+    Uses:
+        rho = |psi1|^2 + |psi2|^2
+        jx  = 2 c Re(conj(psi1) * psi2)
+        jy  = 2 c Im(conj(psi1) * psi2)
+        v   = j / rho, clamped to |v| <= c
+    """
+    frame = np.asarray(frame, dtype=np.complex128)
+
+    if frame.ndim != 3 or frame.shape[0] != 2:
+        raise ValueError(
+            f"Expected Dirac spinor frame shape (2, H, W), got {frame.shape}"
+        )
+
+    psi1 = frame[0]
+    psi2 = frame[1]
+
+    rho = (np.abs(psi1) ** 2 + np.abs(psi2) ** 2).astype(float)
+    overlap = np.conjugate(psi1) * psi2
+
+    c = float(theory.c_light)
+
+    jx = (2.0 * c * np.real(overlap)).astype(float)
+    jy = (2.0 * c * np.imag(overlap)).astype(float)
+
+    denom = np.maximum(rho, float(eps_rho))
+    vx = jx / denom
+    vy = jy / denom
+
+    sp = np.hypot(vx, vy)
+    mask = sp > c
+    if np.any(mask):
+        scale = c / np.maximum(sp[mask], float(eps_rho))
+        vx = vx.copy()
+        vy = vy.copy()
+        sp = sp.copy()
+        vx[mask] *= scale
+        vy[mask] *= scale
+        sp[mask] = c
+
+    return vx.astype(float), vy.astype(float), rho.astype(float)
+
+
+def _rho_v_from_frame(
+    theory,
+    frame: np.ndarray,
+    eps_rho: float = 1e-10,
+    visible_hw: tuple[int, int] | None = None,
+):
+    """
+    Unified rho/vx/vy extraction from one frame.
+
+    Supported:
+      - scalar visible/full frame: (H, W)
+      - Dirac visible/full frame:  (2, H, W)
+
+    Rules:
+      - full Dirac frame matching theory.grid -> use theory.velocity/theory.density
+      - cropped Dirac frame -> compute locally from spinor
+      - full scalar frame -> theory.velocity/theory.density, optionally center-crop
+      - visible scalar frame -> theory.velocity/theory.density directly
+    """
+    frame = np.asarray(frame)
+
+    expected_full = None
+    if hasattr(theory, "grid") and hasattr(theory.grid, "Ny") and hasattr(theory.grid, "Nx"):
+        expected_full = (int(theory.grid.Ny), int(theory.grid.Nx))
+
+    # --------------------------------------------------------
+    # Dirac / spinor frame
+    # --------------------------------------------------------
+    if frame.ndim == 3 and frame.shape[0] == 2:
+        h, w = frame.shape[1], frame.shape[2]
+
+        # Full Dirac frame
+        if expected_full is not None and (h, w) == expected_full:
+            rho_full = theory.density(frame)
+            vx_full, vy_full, _ = theory.velocity(frame, eps_rho=eps_rho)
+
+            if visible_hw is None or visible_hw == (h, w):
+                return vx_full, vy_full, rho_full
+
+            sy, sx = _center_crop_slices_from_shapes((h, w), visible_hw)
+            return vx_full[sy, sx], vy_full[sy, sx], rho_full[sy, sx]
+
+        # Visible/cropped Dirac frame
+        return _dirac_rho_v_from_spinor_frame(
+            theory=theory,
+            frame=frame,
+            eps_rho=eps_rho,
+        )
+
+    # --------------------------------------------------------
+    # Scalar frame
+    # --------------------------------------------------------
+    if frame.ndim == 2:
+        h, w = frame.shape
+
+        rho = theory.density(frame)
+        vx, vy, _ = theory.velocity(frame, eps_rho=eps_rho)
+
+        if visible_hw is None or (h, w) == visible_hw:
+            return vx, vy, rho
+
+        if expected_full is not None and (h, w) == expected_full:
+            sy, sx = _center_crop_slices_from_shapes((h, w), visible_hw)
+            return vx[sy, sx], vy[sy, sx], rho[sy, sx]
+
+        return vx, vy, rho
+
+    raise ValueError(f"Unsupported frame shape: {frame.shape}")
+
+
+# ============================================================
 # Velocity frame construction
 # ============================================================
 
@@ -88,31 +239,73 @@ def build_velocity_frames_from_state(
     eps_rho: float = 1e-10,
 ):
     """
-    Build visible-grid velocity and density frames from theory.current(...).
+    Build visible-grid velocity and density frames.
 
-    Supports both:
+    Supports:
         scalar state frames: (Nt, H, W)
         spinor state frames: (Nt, C, H, W)
+
+    For Dirac/spinor frames:
+      - full-grid spinors are handled via theory.velocity/theory.density
+      - cropped visible spinors are handled directly from local spinor formulas
 
     Returns:
         vx_frames, vy_frames, rho_frames
     """
+    state_vis_frames = np.asarray(state_vis_frames)
+
+    if state_vis_frames.ndim not in (3, 4):
+        raise ValueError(
+            f"Unsupported state_vis_frames ndim={state_vis_frames.ndim}, "
+            f"shape={state_vis_frames.shape}"
+        )
+
     Nt_ = state_vis_frames.shape[0]
 
-    rho0 = theory.density(state_vis_frames[0])
+    # Determine visible output shape from first frame.
+    frame0 = np.asarray(state_vis_frames[0])
+
+    if frame0.ndim == 2:
+        visible_hw = frame0.shape
+    elif frame0.ndim == 3 and frame0.shape[0] == 2:
+        visible_hw = (frame0.shape[1], frame0.shape[2])
+    else:
+        raise ValueError(f"Unsupported first frame shape: {frame0.shape}")
+
+    vx0, vy0, rho0 = _rho_v_from_frame(
+        theory=theory,
+        frame=frame0,
+        eps_rho=eps_rho,
+        visible_hw=visible_hw,
+    )
+
     H, W = rho0.shape
 
     vx_frames = np.zeros((Nt_, H, W), dtype=float)
     vy_frames = np.zeros((Nt_, H, W), dtype=float)
     rho_frames = np.zeros((Nt_, H, W), dtype=float)
 
-    for i in range(Nt_):
-        jx, jy, rho = theory.current(state_vis_frames[i])
-        denom = np.maximum(rho, eps_rho)
+    vx_frames[0] = vx0
+    vy_frames[0] = vy0
+    rho_frames[0] = rho0
 
-        vx_frames[i] = jx / denom
-        vy_frames[i] = jy / denom
-        rho_frames[i] = rho
+    for i in range(1, Nt_):
+        vxi, vyi, rhoi = _rho_v_from_frame(
+            theory=theory,
+            frame=state_vis_frames[i],
+            eps_rho=eps_rho,
+            visible_hw=visible_hw,
+        )
+
+        if vxi.shape != (H, W) or vyi.shape != (H, W) or rhoi.shape != (H, W):
+            raise ValueError(
+                f"Frame {i} produced inconsistent shapes: "
+                f"vx={vxi.shape}, vy={vyi.shape}, rho={rhoi.shape}, expected {(H, W)}"
+            )
+
+        vx_frames[i] = vxi
+        vy_frames[i] = vyi
+        rho_frames[i] = rhoi
 
     return vx_frames, vy_frames, rho_frames
 
