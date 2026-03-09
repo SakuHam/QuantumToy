@@ -581,9 +581,15 @@ def main():
         X_vis=grid.X_vis,
         Y_vis=grid.Y_vis,
         rng_seed=cfg.CLICK_RNG_SEED,
+        click_mode=cfg.CLICK_MODE,
+        force_click_x=cfg.FORCE_CLICK_X,
+        force_click_y=cfg.FORCE_CLICK_Y,
     )
 
-    print(f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f})")
+    print(
+        f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f}), "
+        f"click_mode={cfg.CLICK_MODE}"
+    )
     print(
         f"[SCREEN] max={np.max(screen_int):.6e} "
         f"argmax_i={idx_det} t_det={t_det:.6f} "

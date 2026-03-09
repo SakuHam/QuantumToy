@@ -8,7 +8,7 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "schrodinger_measurement"
+    THEORY_NAME: str = "thick_front_optimized"
 
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
@@ -158,14 +158,54 @@ class AppConfig:
     # ============================================================
     # Click / backward / Emix
     # ============================================================
+    CLICK_MODE: str = "forced_point"          # "born", "forced_point"
+    FORCE_CLICK_X: float = 10.0
+    FORCE_CLICK_Y: float = 2.0
+
+    CLICK_Y_MIN: float | None = None
+    CLICK_Y_MAX: float | None = None
+
     sigma_click: float = 0.4
     K_JITTER: int = 13
     CLICK_RNG_SEED: int = 123456
 
     # ============================================================
+    # Thick-front optimized / branch competition
+    # ============================================================
+
+    # Original thick-front sharpening
+    THICK_FRONT_STRENGTH: float = 0.03
+    THICK_FRONT_MISALIGNED_DAMP: float = 0.01
+    THICK_FRONT_DIAG_WEIGHT: float = 0.5
+    THICK_FRONT_DENSITY_WEIGHTED: bool = True
+    THICK_FRONT_PHASE_RELAX_STRENGTH: float = 0.0
+
+    # New branch competition / lateral inhibition term
+    # Set > 0 to activate suppression of nearby weaker jets.
+    THICK_FRONT_BRANCH_COMPETITION_STRENGTH: float = 0.02 #0.0
+    THICK_FRONT_BRANCH_COMPETITION_POWER: float = 1.5
+    THICK_FRONT_BRANCH_GATE_POWER: float = 1.0
+
+    # Anisotropic neighborhood weights for branch competition.
+    # Larger Y weight tends to suppress side-by-side vertical jet competition more strongly.
+    THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT: float = 0.25 #0.35
+    THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT: float = 1.00
+    THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT: float = 0.25 #0.35
+
+    # gamma_like ~ rho^a * align_pos^b
+    THICK_FRONT_BRANCH_DENSITY_POWER: float = 1.0
+    THICK_FRONT_BRANCH_ALIGN_POWER: float = 1.0
+
+    # Optional small threshold before competition damping starts
+    THICK_FRONT_BRANCH_COMPETITION_THRESHOLD: float = 0.0
+
+    # If True, gamma_like is normalized by frame max before competition
+    THICK_FRONT_BRANCH_NORMALIZE_GAMMA: bool = True
+
+    # ============================================================
     # Display
     # ============================================================
-    USE_LOG_OUTPUT = False
+    USE_LOG_OUTPUT: bool = False
     USE_FIXED_DISPLAY_SCALE: bool = True
     DISPLAY_Q: float = 0.995
     GAMMA: float = 0.5
