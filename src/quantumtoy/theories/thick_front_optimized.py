@@ -94,7 +94,7 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
 
     # Optional Gaussian blur on gain before exponentiation
     # Helps suppress grid-shaped artifacts and over-sharpening.
-    front_gain_blur_sigma: float = 0.0
+    front_gain_blur_sigma: float = 1.0
 
     # --------------------------------------------------------
     # Branch competition / lateral inhibition parameters
@@ -118,7 +118,7 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
 
     # Exponent for gamma_like = rho^a * align_pos^b
     front_branch_density_power: float = 1.0
-    front_branch_align_power: float = 1.0
+    front_branch_align_power: float = 2.0 #1.0
 
     # Optional threshold before damping starts
     front_branch_competition_threshold: float = 0.00
@@ -137,11 +137,11 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
     # nearby competitor.
     # margin > 1 also suppresses self-competition even if center is included
     # in the maximum filter.
-    front_branch_competition_margin: float = 1.01
+    front_branch_competition_margin: float = 1.00
 
     # Optional Gaussian blur on competition_raw before comp_dt
     # Helps expand extremely sparse competition and reduce blocky/square artifacts.
-    front_branch_competition_blur_sigma: float = 0.0
+    front_branch_competition_blur_sigma: float = 0.5
 
     # --------------------------------------------------------
     # Debug / safety parameters
