@@ -182,14 +182,14 @@ class AppConfig:
 
     # New branch competition / lateral inhibition term
     # Set > 0 to activate suppression of nearby weaker jets.
-    THICK_FRONT_BRANCH_COMPETITION_STRENGTH: float = 0.02 #0.0
-    THICK_FRONT_BRANCH_COMPETITION_POWER: float = 1.5
-    THICK_FRONT_BRANCH_GATE_POWER: float = 1.0
+    THICK_FRONT_BRANCH_COMPETITION_STRENGTH: float = 5.00 #0.0
+    THICK_FRONT_BRANCH_COMPETITION_POWER: float = 2.0
+    THICK_FRONT_BRANCH_GATE_POWER: float = 0.0
 
     # Anisotropic neighborhood weights for branch competition.
     # Larger Y weight tends to suppress side-by-side vertical jet competition more strongly.
     THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT: float = 0.25 #0.35
-    THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT: float = 1.00
+    THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT: float = 2.00
     THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT: float = 0.25 #0.35
 
     # gamma_like ~ rho^a * align_pos^b
@@ -200,7 +200,7 @@ class AppConfig:
     THICK_FRONT_BRANCH_COMPETITION_THRESHOLD: float = 0.0
 
     # If True, gamma_like is normalized by frame max before competition
-    THICK_FRONT_BRANCH_NORMALIZE_GAMMA: bool = True
+    THICK_FRONT_BRANCH_NORMALIZE_GAMMA: bool = False
 
     # ============================================================
     # Display

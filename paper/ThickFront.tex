@@ -4,24 +4,18 @@
 \usepackage{amssymb}
 \usepackage{graphicx}
 \usepackage{bm}
+\usepackage{hyperref}
 \usepackage{fancyhdr}
 
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[C]{\small Preprint -- Work in Progress}
-\fancyfoot[R]{\small QuantumToy TRF preprint v0.1}
+\fancyfoot[R]{\small QuantumToy TRF preprint v0.2}
 \renewcommand{\headrulewidth}{0pt}
 
-\usepackage{draftwatermark}
-
-\SetWatermarkText{PREPRINT}
-\SetWatermarkScale{2}
-\SetWatermarkLightness{0.9}
-
-\usepackage{hyperref}
-
 \begin{document}
-\title{Thick Reality Front – exploratory numerical framework}
+
+\title{Thick Reality Front: a numerical framework for spacetime structure in quantum evolution}
 
 \author{Saku H\"am\"al\"ainen}
 
@@ -30,31 +24,34 @@
 \begin{abstract}
 
 We introduce a computational framework for exploring a
-``thick reality front'' description of quantum dynamics.
-Instead of associating physical reality with an instantaneous
-wavefunction at a single time, the model assumes that observable
-structure emerges from a finite temporal region surrounding the
-present. The framework combines forward quantum evolution with
-backward propagation conditioned on detection events, producing
-an effective density field that depends on both preparation and
-measurement. Numerical simulations of a double-slit configuration
-demonstrate the emergence of coherent ridge trajectories in the
-probability density evolution. The approach is compatible with
-standard quantum predictions while offering a geometric
-interpretation of probability flow in spacetime.
+``thick reality front'' (TRF) description of quantum dynamics.
+Instead of associating physical structure with a single
+instantaneous wavefunction, the framework assumes that observable
+patterns may emerge from a finite temporal region surrounding
+the present.
+
+Forward quantum evolution from preparation is combined with
+backward propagation conditioned on detection events.
+Their local amplitude overlap produces a spacetime field that
+highlights regions simultaneously compatible with preparation
+and measurement.
+
+Numerical simulations of a double-slit experiment demonstrate
+that this overlap field often develops coherent ridge structures
+that trace narrow probability flow channels through spacetime.
+
+Baseline simulations without the thick-front operator are also
+presented for comparison, allowing the influence of the TRF
+framework on branch structure and ridge stability to be examined.
+
+The framework reproduces standard quantum predictions while
+providing a geometric visualization of probability flow between
+preparation and measurement.
 
 \end{abstract}
 
 \maketitle
-\thispagestyle{fancy}
 
-\begin{widetext}
-\begin{center}
-\small
-\textbf{Code and simulation framework:}\\
-\href{https://github.com/SakuHam/QuantumToy}{github.com/SakuHam/QuantumToy}
-\end{center}
-\end{widetext}
 
 \section{Introduction}
 
@@ -65,70 +62,140 @@ Schr\"odinger equation
 i\hbar \partial_t \psi = H\psi .
 \end{equation}
 
-While the equation predicts the evolution of the wavefunction,
-measurement outcomes appear to select definite results that are
-not described by unitary evolution alone.
+While the equation determines the unitary evolution of the
+wavefunction, measurement outcomes appear to select definite
+results from a superposition of possibilities.
 
-Several interpretations address this issue, including collapse
-models, Bohmian mechanics, and time-symmetric formulations of
-quantum mechanics. In this work we explore a computational
-framework inspired by time-symmetric ideas but formulated as a
-numerical simulation method.
+Several approaches attempt to address this issue, including
+collapse models, Bohmian mechanics, and time-symmetric
+formulations of quantum theory. Time-symmetric approaches
+suggest that both preparation and measurement conditions may
+play roles in shaping the structure of quantum processes.
 
-The key concept is that observable structure may not correspond
-to a single time slice of the wavefunction. Instead, the effective
-``reality'' may emerge from a finite temporal region surrounding
+In this work we explore a computational framework inspired by
+this idea. Rather than associating physical structure with a
+single time slice of the wavefunction, we assume that observable
+structure may emerge from a finite temporal region surrounding
 the present. We refer to this region as a \textit{thick reality
 front}.
 
-\section{Thick Reality Front Formalism}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{trf_concept_clean_v02.png}
+\caption{
+Conceptual illustration of the thick reality front (TRF).
+Forward evolution from the preparation event produces a
+spreading wavefunction $\psi_f$.
+Backward propagation from a selected detection event produces
+a retrodictive wave $\phi$.
+Their local amplitude overlap
+$\Gamma = |\phi^*\psi_f|^2$ highlights spacetime regions
+supported simultaneously by both conditions.
+}
+\end{figure}
 
-\subsection{Forward evolution}
+The purpose of this work is not to propose a new fundamental
+dynamical law but to develop a numerical framework for analyzing
+forward–backward amplitude structures and the spacetime patterns
+that emerge from them.
 
-Consider a system prepared at time $t_0$ with initial state
-$\psi_0$. Forward evolution is given by
+
+
+\section{Baseline quantum evolution}
+
+Before introducing the TRF framework it is useful to examine the
+baseline quantum dynamics.
+
+Forward evolution from an initial state $\psi_0$ is given by
 
 \begin{equation}
 \psi_f(t) = U(t,t_0)\psi_0 .
 \end{equation}
 
-For Schr\"odinger dynamics the wavefunction satisfies
-
-\begin{equation}
-i\hbar \partial_t \psi_f(x,t) = H\psi_f(x,t).
-\end{equation}
-
-The forward probability density is
+The corresponding probability density is
 
 \begin{equation}
 \rho_f(x,t) = |\psi_f(x,t)|^2 .
 \end{equation}
 
-\subsection{Backward propagation}
+In numerical simulations of a double-slit geometry this
+forward evolution produces the familiar interference pattern
+on a downstream detection screen.
+
+The baseline dynamics may already exhibit structured probability
+flow patterns upstream of the detection screen.
+Understanding these structures provides an important reference
+for evaluating the additional effects introduced by the
+thick-front framework.
+
+
+
+\section{Forward and backward evolution}
 
 Suppose a detection occurs at position $x_d$ and time $t_d$.
-We define a localized detection state
+
+We construct a localized detection state
 
 \begin{equation}
 \phi(x,t_d) =
-\exp\left(
+\exp\!\left(
 -\frac{(x-x_d)^2}{2\sigma_c^2}
 \right).
 \end{equation}
 
-Backward propagation is defined through
+Backward propagation is defined through the adjoint evolution
 
 \begin{equation}
 \phi(t) = U^\dagger(t_d,t)\phi(t_d).
 \end{equation}
 
-\subsection{Temporal thickness}
+The forward and backward states can therefore be defined at
+every intermediate spacetime point.
 
-Instead of associating reality with a single detection time,
-we consider a temporal window around $t_d$. Let $t_k$ denote
-candidate detection times within a region of width $\sigma_T$.
 
-The temporal weights are
+
+\section{Amplitude overlap field}
+
+The central quantity in the TRF framework is the local amplitude
+overlap
+
+\begin{equation}
+A(x,t) = \phi^*(x,t)\psi_f(x,t).
+\end{equation}
+
+The ridge intensity field is then defined as
+
+\begin{equation}
+\Gamma(x,t) = |A(x,t)|^2 .
+\end{equation}
+
+Large values of $\Gamma$ identify spacetime regions that are
+simultaneously compatible with both preparation and measurement
+conditions.
+
+In numerical experiments this field frequently develops narrow
+high-intensity structures forming continuous paths through
+spacetime.
+
+
+
+\section{Temporal thickness}
+
+Instead of using a single detection time we allow a temporal
+distribution of possible detection times within a window of
+width $\sigma_T$.
+
+Backward states are therefore averaged as
+
+\begin{equation}
+E_{\mathrm{mix}}(x,t)
+=
+\sum_k
+w_k
+|\phi_k(x,t)|^2 ,
+\end{equation}
+
+with Gaussian weights
 
 \begin{equation}
 w_k =
@@ -140,196 +207,182 @@ w_k =
 }.
 \end{equation}
 
-\subsection{Retrodictive field}
+This produces a temporally extended retrodictive weighting
+representing the finite thickness of the reality front.
 
-Backward states generate a retrodictive weighting field
+
+
+\section{Ridge extraction}
+
+The overlap field $\Gamma(x,t)$ often develops narrow
+high-intensity structures.
+
+The simplest ridge trajectory is defined by
 
 \begin{equation}
-E_{\mathrm{mix}}(x,t)
+\mathbf r_R(t)
 =
-\sum_k
-w_k
-|\phi_k(x,t)|^2 .
+\operatorname*{arg\,max}_{\mathbf r}
+\Gamma(\mathbf r,t).
 \end{equation}
 
-\subsection{Thick reality front density}
+More stable ridge definitions include centroid estimation
+within the top intensity fraction, snapping to nearby local
+maxima, and local maximum tracking across frames.
 
-Observable structure emerges from the product of forward
-probability and retrodictive weighting.
+These methods improve temporal continuity when multiple
+competing maxima are present.
 
-\begin{equation}
-\Gamma(x,t) =
-\rho_f(x,t) E_{\mathrm{mix}}(x,t).
-\end{equation}
 
-To obtain a normalized distribution we define
 
-\begin{equation}
-\rho_{\mathrm{TRF}}(x,t)
-=
-\frac{
-\rho_f(x,t) E_{\mathrm{mix}}(x,t)
-}{
-\int dx \,
-\rho_f(x,t) E_{\mathrm{mix}}(x,t)
-}.
-\end{equation}
-
-In two dimensions
-
-\begin{equation}
-\rho_{\mathrm{TRF}}(x,y,t)
-=
-\frac{
-|\psi_f(x,y,t)|^2
-E_{\mathrm{mix}}(x,y,t)
-}{
-\iint dx\,dy\,
-|\psi_f(x,y,t)|^2
-E_{\mathrm{mix}}(x,y,t)
-}.
-\end{equation}
-
-\section{Ridge Trajectories}
-
-The density $\rho_{\mathrm{TRF}}$ often develops narrow
-high-probability structures. These can be tracked through
-ridge trajectories defined by
-
-\begin{equation}
-\mathbf{r}_R(t)
-=
-\operatorname*{arg\,max}_{\mathbf{r}}
-\rho_{\mathrm{TRF}}(\mathbf{r},t).
-\end{equation}
-
-These curves provide a geometric description of probability
-flow through the thick reality front.
-
-\section{Velocity Fields and Bohmian Comparison}
+\section{Velocity field comparison}
 
 The quantum probability current is
 
 \begin{equation}
-\mathbf{j} =
+\mathbf j =
 \frac{\hbar}{m}
 \mathrm{Im}
 (\psi^* \nabla \psi).
 \end{equation}
 
-This defines a velocity field
+This defines the velocity field
 
 \begin{equation}
-\mathbf{v} = \frac{\mathbf{j}}{\rho_f}.
+\mathbf v = \frac{\mathbf j}{\rho_f}.
 \end{equation}
 
-In Bohmian mechanics these velocities define particle
-trajectories. In the present framework we compare these
-trajectories with ridge trajectories extracted from
-$\rho_{\mathrm{TRF}}$.
+Bohmian trajectories constructed from this velocity field
+provide a useful comparison with ridge trajectories extracted
+from the overlap field.
 
-\section{Connection to the Born Rule}
 
-The thick reality front formalism does not modify the
-underlying quantum dynamics. Forward evolution remains
-governed by the Schr\"odinger equation.
 
-Detection probabilities are determined by the forward
-density
+\section{Thick-front operator}
 
-\begin{equation}
-P(x_d,t_d) \propto |\psi_f(x_d,t_d)|^2 ,
-\end{equation}
+The numerical framework can optionally include a
+\textit{thick-front operator} that modifies the forward evolution
+according to local coherence structure.
 
-which is precisely the Born rule.
+The purpose of this operator is not to replace the Schr\"odinger
+dynamics but to explore how a finite spacetime thickness of
+physical structure might influence branch competition and
+ridge formation.
 
-Backward propagation only redistributes weight inside the
-thick reality front but does not change the detection
-probability itself.
+The specific numerical form used in the present simulations
+includes
 
-Integrating the thick-front density over intermediate
-times yields
+\begin{itemize}
 
-\begin{equation}
-\int \rho_{\mathrm{TRF}}(x,t) \, dx
-=
-1 ,
-\end{equation}
+\item local coherence sharpening
 
-and the marginal detection distribution remains
+\item optional branch competition between nearby maxima
 
-\begin{equation}
-P(x_d) =
-|\psi_f(x_d,t_d)|^2 .
-\end{equation}
+\item normalization preserving overall probability
 
-Thus the framework is consistent with the standard Born
-probability rule.
+\end{itemize}
 
-\section{Numerical Experiment}
+The precise functional form used in the present experiments is
+given in Ref.~[placeholder] or the accompanying code repository
+\cite{quantumtoy}.
 
-We simulate a two-dimensional double-slit experiment using
-a split-operator Fourier method. A Gaussian wave packet
-propagates toward a barrier containing two narrow slits.
 
-The evolution sequence is
 
-\begin{verbatim}
-wave packet -> double slit -> interference -> screen
-\end{verbatim}
+\section{Numerical experiment}
 
-Forward evolution produces the interference pattern while
-backward propagation generates the retrodictive field.
+We simulate a two-dimensional double-slit experiment using the
+split-operator method.
 
-\begin{figure}
-\includegraphics[width=0.9\linewidth]{density_evolution.png}
-\caption{Example density evolution in a double-slit configuration.}
-\end{figure}
+A Gaussian wave packet propagates toward a barrier containing
+two narrow slits and forms an interference pattern on a
+downstream screen.
 
-\begin{figure}
-\includegraphics[width=0.9\linewidth]{ridge_vs_bohmian.png}
-\caption{Comparison of ridge trajectories and Bohmian trajectories.}
-\end{figure}
+Forward evolution generates the interference pattern while
+backward propagation from a selected click state produces a
+retrodictive field.
 
-\section{Relativistic Extension}
+The overlap field $\Gamma$ then highlights spacetime channels
+connecting the preparation region with the selected detection
+event.
 
-The framework can be extended to relativistic dynamics.
-For the Dirac equation
 
-\begin{equation}
-i\hbar \partial_t \psi =
-(c\bm{\alpha}\cdot\mathbf{p}
-+ \beta mc^2)\psi ,
-\end{equation}
 
-the conserved current is
+\section{Baseline versus TRF comparison}
 
-\begin{equation}
-j^\mu = \bar{\psi}\gamma^\mu\psi .
-\end{equation}
+To evaluate the influence of the thick-front operator we perform
+simulations both with and without this modification.
 
-The velocity field becomes
+Baseline simulations reproduce standard Schr\"odinger dynamics.
+The TRF simulations introduce the additional coherence-based
+operator described above.
 
-\begin{equation}
-\mathbf{v} =
-\frac{\mathbf{j}}{j^0}.
-\end{equation}
+Qualitative comparisons focus on
 
-The thick reality front construction can therefore be
-applied to relativistic wave dynamics.
+\begin{itemize}
+
+\item ridge sharpness
+
+\item stability of ridge trajectories
+
+\item suppression or enhancement of nearby competing branches
+
+\item agreement with Bohmian trajectory structures
+
+\end{itemize}
+
+Representative results are shown in
+Fig.~[placeholder].
+
+In preliminary experiments the TRF framework tends to emphasize
+narrow ridge-like probability channels while suppressing some
+nearby competing structures.
+
+
+
+\section{Limitations}
+
+The present framework is exploratory and several limitations
+should be noted.
+
+\begin{itemize}
+
+\item numerical results depend on grid resolution
+
+\item competition operators may introduce discretization artifacts
+
+\item the framework does not yet include a full detector model
+
+\item the thick-front operator is currently phenomenological
+
+\end{itemize}
+
+Future work will investigate more physically motivated
+implementations and improved numerical stability.
+
+
 
 \section{Conclusion}
 
-We introduced a computational framework for exploring
-thick reality front models of quantum dynamics.
+We introduced a computational framework for exploring thick
+reality front descriptions of quantum dynamics.
 
-By combining forward evolution with backward propagation
-from detection events, the method produces structured
-probability flows that can be analyzed geometrically
-through ridge trajectories.
+By combining forward evolution with backward propagation from
+detection events the method produces structured spacetime
+overlap fields.
 
-The framework reproduces standard quantum predictions
-while providing a new spacetime interpretation of
-probability flow and measurement.
+These fields frequently reveal coherent ridge structures that
+trace probability flow between preparation and measurement.
+
+Baseline simulations demonstrate that similar structures may
+already exist in the underlying quantum dynamics, while the
+TRF framework modifies their prominence and stability.
+
+The framework provides a geometric visualization of spacetime
+probability structure and may offer a useful tool for exploring
+time-symmetric aspects of quantum evolution.
+
+
+
+\bibliography{trf_refs}
 
 \end{document}
