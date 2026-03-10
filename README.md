@@ -4,20 +4,20 @@ QuantumToy is a modular Python simulation environment for exploring quantum dyna
 
 The project implements several wave equation models and allows experimentation with different theoretical extensions such as:
 
-o Schrodinger dynamics  
-o Continuous measurement models  
-o Dirac equation  
-o Thick reality front models  
-o Hybrid Dirac plus Thick Front theories  
+* Schrodinger dynamics  
+* Continuous measurement models  
+* Dirac equation  
+* Thick reality front models  
+* Hybrid Dirac plus Thick Front theories  
 
 The simulator includes tools for:
 
-o wavefunction propagation  
-o double slit experiments  
-o Bohmian trajectory overlays  
-o ridge tracking of probability flow  
-o retrodictive weighting (Emix)  
-o animated visualization  
+* wavefunction propagation  
+* double slit experiments  
+* Bohmian trajectory overlays  
+* ridge tracking of probability flow  
+* retrodictive weighting (Emix)  
+* animated visualization  
 
 The goal is to provide a playground for quantum dynamics experiments and theoretical exploration.
 
@@ -29,30 +29,51 @@ The simulator supports:
 
 ### Wave dynamics
 
-o Schrodinger equation using FFT split operator  
-o Dirac equation using a two spinor relativistic model  
+* Schrodinger equation using FFT split operator  
+* Dirac equation using a two spinor relativistic model  
 
 ### Experimental models
 
-o double slit barriers  
-o absorbing boundaries  
-o detection screens  
+* double slit barriers  
+* absorbing boundaries  
+* detection screens  
 
 ### Analysis tools
 
-o ridge tracking of probability flow  
-o velocity field visualization  
-o Bohmian trajectory integration  
-o divergence diagnostics  
-o retrodictive weighting (Emix)  
+* ridge tracking of probability flow  
+* velocity field visualization  
+* Bohmian trajectory integration  
+* divergence diagnostics  
+* retrodictive weighting (Emix)  
 
 ### Visualization
 
-o animated density maps  
-o ridge trajectory overlay  
-o Bohmian paths  
-o flow arrows  
-o mp4 video export  
+* animated density maps  
+* ridge trajectory overlay  
+* Bohmian paths  
+* flow arrows  
+* mp4 video export  
+
+---
+
+### Legacy experiments
+
+The repository also contains an experimental/ directory.
+
+This folder includes earlier standalone research scripts that were used during the development of the project.
+Some of these scripts reproduce the originally demonstrated animations and visual experiments.
+
+These legacy experiments often use a slightly different workflow compared to the newer modular theory classes:
+
+* forward wave evolution is computed first
+
+* a retrodictive weighting field (Emix) is constructed from detector-conditioned backward propagation
+
+* the visible ridge structure is then derived from the overlap of forward density and the backward effect field
+
+The newer theory modules in src/quantumtoy/theories attempt to internalize similar ideas directly into the dynamical models (for example Thick Front and worldline-style extensions).
+
+The experimental scripts are kept in the repository because they reproduce the original research visualizations and may still be useful for comparison or further exploration.
 
 ---
 
@@ -63,10 +84,10 @@ wave packet -> double slit -> interference -> detection screen
 
 The simulation computes:
 
-o forward wave evolution  
-o backward click conditioned propagation  
-o ridge trajectory through the probability landscape  
-o optional Bohmian trajectories  
+* forward wave evolution  
+* backward click conditioned propagation  
+* ridge trajectory through the probability landscape  
+* optional Bohmian trajectories  
 
 ---
 
@@ -148,7 +169,7 @@ Saku Hamalainen
 
 The simulator builds on standard numerical methods used in quantum simulation, including:
 
-o split operator FFT methods  
-o Dirac spinor propagation  
-o Bohmian trajectory integration  
-o retrodictive weighting methods
+* split operator FFT methods  
+* Dirac spinor propagation  
+* Bohmian trajectory integration  
+* retrodictive weighting methods

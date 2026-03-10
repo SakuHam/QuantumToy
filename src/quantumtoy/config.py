@@ -8,7 +8,7 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "thick_front_optimized"
+    THEORY_NAME: str = "thick_front_measured_guided"
 
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
@@ -194,7 +194,7 @@ class AppConfig:
 
     # gamma_like ~ rho^a * align_pos^b
     THICK_FRONT_BRANCH_DENSITY_POWER: float = 1.0
-    THICK_FRONT_BRANCH_ALIGN_POWER: float = 1.0
+    THICK_FRONT_BRANCH_ALIGN_POWER: float = 2.0
 
     # Optional small threshold before competition damping starts
     THICK_FRONT_BRANCH_COMPETITION_THRESHOLD: float = 0.0

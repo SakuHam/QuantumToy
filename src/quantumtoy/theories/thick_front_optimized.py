@@ -65,6 +65,7 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         2) competition uses full-resolution scipy maximum_filter
         3) optional Gaussian smoothing is applied to gain and competition fields
            to reduce grid anisotropy / square artifacts
+        4) competition can be boosted near the detector / screen region
     """
 
     # --------------------------------------------------------
@@ -118,7 +119,7 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
 
     # Exponent for gamma_like = rho^a * align_pos^b
     front_branch_density_power: float = 1.0
-    front_branch_align_power: float = 2.0 #1.0
+    front_branch_align_power: float = 2.0
 
     # Optional threshold before damping starts
     front_branch_competition_threshold: float = 0.00
@@ -135,13 +136,34 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
 
     # Local branch is safe if it is within this factor of the strongest
     # nearby competitor.
-    # margin > 1 also suppresses self-competition even if center is included
+    # margin > 1 suppresses self-competition even if center is included
     # in the maximum filter.
     front_branch_competition_margin: float = 1.00
 
     # Optional Gaussian blur on competition_raw before comp_dt
     # Helps expand extremely sparse competition and reduce blocky/square artifacts.
     front_branch_competition_blur_sigma: float = 0.5
+
+    # --------------------------------------------------------
+    # Detector / screen-local competition boost
+    # --------------------------------------------------------
+
+    # If enabled, competition becomes stronger near a chosen x-location
+    # (typically the screen / detector region).
+    front_branch_detector_gate_enabled: bool = True
+
+    # Center x-position of the detector competition boost
+    front_branch_detector_gate_center_x: float = 10.0
+
+    # Width (sigma) of the detector competition boost
+    front_branch_detector_gate_width: float = 2.0
+
+    # Multiplicative boost factor:
+    # local_strength = base_strength * (1 + boost * gate)
+    #
+    # Example:
+    # boost = 2 means 3x strength at gate maximum
+    front_branch_detector_gate_boost: float = 10.0 #2.0
 
     # --------------------------------------------------------
     # Debug / safety parameters
@@ -200,6 +222,11 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         _assert(self.front_branch_competition_blur_sigma >= 0.0,
                 "front_branch_competition_blur_sigma must be >= 0")
 
+        _assert(self.front_branch_detector_gate_width > 0.0,
+                "front_branch_detector_gate_width must be > 0")
+        _assert(self.front_branch_detector_gate_boost >= 0.0,
+                "front_branch_detector_gate_boost must be >= 0")
+
     # --------------------------------------------------------
     # Basic utilities
     # --------------------------------------------------------
@@ -240,6 +267,21 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         out = (w_axis * axis_sum + w_diag * diag_sum) / max(denom, self.front_eps)
         _assert_complex_array_2d(out, "_neighbor_average_complex(out)")
         return out
+
+    def _detector_competition_gate(self) -> np.ndarray:
+        """
+        Spatial gate that boosts competition near the detector / screen.
+
+        Uses a Gaussian in x centered at front_branch_detector_gate_center_x.
+        """
+        X = self.grid.X
+        xc = float(self.front_branch_detector_gate_center_x)
+        sigma = float(self.front_branch_detector_gate_width)
+
+        gate = np.exp(-((X - xc) ** 2) / (2.0 * sigma ** 2)).astype(float)
+        _assert_real_array_2d(gate, "detector_gate")
+        _assert(np.all(gate >= -1e-14), "detector_gate contains significantly negative values")
+        return gate
 
     # --------------------------------------------------------
     # Coherence / competition fields
@@ -385,8 +427,9 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         5) recompute coherence from psi_tmp
         6) compute competition from psi_tmp-derived fields
         7) optionally smooth competition
-        8) apply competition damping
-        9) optional phase relaxation
+        8) optionally boost competition near detector
+        9) apply competition damping
+        10) optional phase relaxation
         """
         _assert_complex_array_2d(psi, "psi")
         _assert_finite_scalar(dt, "dt")
@@ -443,6 +486,8 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         gamma_like = None
         neighbor_max = None
         comp_dt = None
+        detector_gate = None
+        local_strength = None
 
         # --------------------------------------------
         # Second stage: competition from psi_tmp
@@ -453,8 +498,23 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
                 align_real=align_real_tmp,
             )
 
+            # Optional detector/screen-local boost
+            if self.front_branch_detector_gate_enabled:
+                detector_gate = self._detector_competition_gate()
+                local_strength = float(self.front_branch_competition_strength) * (
+                    1.0 + float(self.front_branch_detector_gate_boost) * detector_gate
+                )
+            else:
+                local_strength = np.full_like(
+                    competition_raw,
+                    float(self.front_branch_competition_strength),
+                    dtype=float,
+                )
+
+            _assert_real_array_2d(local_strength, "local_strength")
+
             comp_dt = np.clip(
-                float(self.front_branch_competition_strength) * competition_raw * dt,
+                local_strength * competition_raw * dt,
                 0.0,
                 self.front_clip,
             )
@@ -527,6 +587,12 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
             aux_front["branch_gate_max"] = float(np.max(competition_gate))
             aux_front["branch_comp_dt_mean"] = float(np.mean(comp_dt))
             aux_front["branch_comp_dt_max"] = float(np.max(comp_dt))
+            aux_front["branch_local_strength_mean"] = float(np.mean(local_strength))
+            aux_front["branch_local_strength_max"] = float(np.max(local_strength))
+
+            if detector_gate is not None:
+                aux_front["branch_detector_gate_mean"] = float(np.mean(detector_gate))
+                aux_front["branch_detector_gate_max"] = float(np.max(detector_gate))
 
         return psi_new.astype(np.complex128), aux_front
 
@@ -595,6 +661,11 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
             "front_branch_competition_radius": int(self.front_branch_competition_radius),
             "front_branch_competition_margin": float(self.front_branch_competition_margin),
             "front_branch_competition_blur_sigma": float(self.front_branch_competition_blur_sigma),
+
+            "front_branch_detector_gate_enabled": bool(self.front_branch_detector_gate_enabled),
+            "front_branch_detector_gate_center_x": float(self.front_branch_detector_gate_center_x),
+            "front_branch_detector_gate_width": float(self.front_branch_detector_gate_width),
+            "front_branch_detector_gate_boost": float(self.front_branch_detector_gate_boost),
 
             "prob_after_base": float(prob_after_base),
             "prob_before_norm": float(prob_before_norm),
