@@ -8,6 +8,8 @@ from theories.thick_front import ThickFrontTheory
 from theories.thick_front_optimized import ThickFrontOptimizedTheory
 from theories.dirac import DiracTheory
 from theories.dirac_thick_front import DiracThickFrontTheory
+from theories.thick_front_world_line import ThickFrontWorldLineTheory
+from theories.thick_front_measurement_guided import ThickFrontMeasurementGuidedTheory
 
 
 # ============================================================
@@ -147,6 +149,85 @@ def build_theory(cfg, grid, potential):
             "cfg.THICK_FRONT_PHASE_RELAX_STRENGTH",
         )
 
+        front_branch_competition_strength = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_STRENGTH", 0.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_STRENGTH",
+        )
+        _assert(
+            front_branch_competition_strength >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_STRENGTH must be >= 0, got {front_branch_competition_strength}",
+        )
+
+        front_branch_competition_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_POWER",
+        )
+
+        front_branch_gate_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_GATE_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_GATE_POWER",
+        )
+
+        front_branch_competition_x_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT", 0.35),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT",
+        )
+        _assert(
+            front_branch_competition_x_weight >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT must be >= 0, got {front_branch_competition_x_weight}",
+        )
+
+        front_branch_competition_y_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT", 1.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT",
+        )
+        _assert(
+            front_branch_competition_y_weight >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT must be >= 0, got {front_branch_competition_y_weight}",
+        )
+
+        front_branch_competition_diag_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT", 0.35),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT",
+        )
+        _assert(
+            front_branch_competition_diag_weight >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT must be >= 0, got {front_branch_competition_diag_weight}",
+        )
+
+        front_branch_density_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_DENSITY_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_DENSITY_POWER",
+        )
+        _assert(
+            front_branch_density_power >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_DENSITY_POWER must be >= 0, got {front_branch_density_power}",
+        )
+
+        front_branch_align_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_ALIGN_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_ALIGN_POWER",
+        )
+        _assert(
+            front_branch_align_power >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_ALIGN_POWER must be >= 0, got {front_branch_align_power}",
+        )
+
+        front_branch_competition_threshold = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_THRESHOLD", 0.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_THRESHOLD",
+        )
+        _assert(
+            front_branch_competition_threshold >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_THRESHOLD must be >= 0, got {front_branch_competition_threshold}",
+        )
+
+        front_branch_normalize_gamma = getattr(cfg, "THICK_FRONT_BRANCH_NORMALIZE_GAMMA", True)
+        _assert(
+            isinstance(front_branch_normalize_gamma, bool),
+            f"cfg.THICK_FRONT_BRANCH_NORMALIZE_GAMMA must be bool, got {type(front_branch_normalize_gamma)}",
+        )
+
         theory = ThickFrontOptimizedTheory(
             grid=grid,
             potential=potential,
@@ -157,6 +238,264 @@ def build_theory(cfg, grid, potential):
             front_diag_weight=front_diag_weight,
             front_density_weighted=front_density_weighted,
             front_phase_relax_strength=front_phase_relax_strength,
+            front_branch_competition_strength=front_branch_competition_strength,
+            front_branch_competition_power=front_branch_competition_power,
+            front_branch_gate_power=front_branch_gate_power,
+            front_branch_competition_x_weight=front_branch_competition_x_weight,
+            front_branch_competition_y_weight=front_branch_competition_y_weight,
+            front_branch_competition_diag_weight=front_branch_competition_diag_weight,
+            front_branch_density_power=front_branch_density_power,
+            front_branch_align_power=front_branch_align_power,
+            front_branch_competition_threshold=front_branch_competition_threshold,
+            front_branch_normalize_gamma=front_branch_normalize_gamma,
+        )
+
+    elif theory_name == "thick_front_measured_guided":
+        front_strength = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_STRENGTH", 0.03),
+            "cfg.THICK_FRONT_STRENGTH",
+        )
+        front_misaligned_damp = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_MISALIGNED_DAMP", 0.01),
+            "cfg.THICK_FRONT_MISALIGNED_DAMP",
+        )
+        front_diag_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_DIAG_WEIGHT", 0.5),
+            "cfg.THICK_FRONT_DIAG_WEIGHT",
+        )
+        front_density_weighted = getattr(cfg, "THICK_FRONT_DENSITY_WEIGHTED", True)
+        _assert(
+            isinstance(front_density_weighted, bool),
+            f"cfg.THICK_FRONT_DENSITY_WEIGHTED must be bool, got {type(front_density_weighted)}",
+        )
+        front_phase_relax_strength = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_PHASE_RELAX_STRENGTH", 0.0),
+            "cfg.THICK_FRONT_PHASE_RELAX_STRENGTH",
+        )
+
+        front_branch_competition_strength = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_STRENGTH", 0.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_STRENGTH",
+        )
+        _assert(
+            front_branch_competition_strength >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_STRENGTH must be >= 0, got {front_branch_competition_strength}",
+        )
+
+        front_branch_competition_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_POWER",
+        )
+
+        front_branch_gate_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_GATE_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_GATE_POWER",
+        )
+
+        front_branch_competition_x_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT", 0.35),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT",
+        )
+        _assert(
+            front_branch_competition_x_weight >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT must be >= 0, got {front_branch_competition_x_weight}",
+        )
+
+        front_branch_competition_y_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT", 1.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT",
+        )
+        _assert(
+            front_branch_competition_y_weight >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT must be >= 0, got {front_branch_competition_y_weight}",
+        )
+
+        front_branch_competition_diag_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT", 0.35),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT",
+        )
+        _assert(
+            front_branch_competition_diag_weight >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT must be >= 0, got {front_branch_competition_diag_weight}",
+        )
+
+        front_branch_density_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_DENSITY_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_DENSITY_POWER",
+        )
+        _assert(
+            front_branch_density_power >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_DENSITY_POWER must be >= 0, got {front_branch_density_power}",
+        )
+
+        front_branch_align_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_ALIGN_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_ALIGN_POWER",
+        )
+        _assert(
+            front_branch_align_power >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_ALIGN_POWER must be >= 0, got {front_branch_align_power}",
+        )
+
+        front_branch_competition_threshold = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_THRESHOLD", 0.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_THRESHOLD",
+        )
+        _assert(
+            front_branch_competition_threshold >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_THRESHOLD must be >= 0, got {front_branch_competition_threshold}",
+        )
+
+        front_branch_normalize_gamma = getattr(cfg, "THICK_FRONT_BRANCH_NORMALIZE_GAMMA", True)
+        _assert(
+            isinstance(front_branch_normalize_gamma, bool),
+            f"cfg.THICK_FRONT_BRANCH_NORMALIZE_GAMMA must be bool, got {type(front_branch_normalize_gamma)}",
+        )
+
+        theory = ThickFrontMeasurementGuidedTheory(
+            grid=grid,
+            potential=potential,
+            m_mass=m_mass,
+            hbar=hbar,
+            front_strength=front_strength,
+            front_misaligned_damp=front_misaligned_damp,
+            front_diag_weight=front_diag_weight,
+            front_density_weighted=front_density_weighted,
+            front_phase_relax_strength=front_phase_relax_strength,
+            front_branch_competition_strength=front_branch_competition_strength,
+            front_branch_competition_power=front_branch_competition_power,
+            front_branch_gate_power=front_branch_gate_power,
+            front_branch_competition_x_weight=front_branch_competition_x_weight,
+            front_branch_competition_y_weight=front_branch_competition_y_weight,
+            front_branch_competition_diag_weight=front_branch_competition_diag_weight,
+            front_branch_density_power=front_branch_density_power,
+            front_branch_align_power=front_branch_align_power,
+            front_branch_competition_threshold=front_branch_competition_threshold,
+            front_branch_normalize_gamma=front_branch_normalize_gamma,
+        )
+
+    elif theory_name == "thick_front_world_line":
+        front_strength = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_STRENGTH", 0.03),
+            "cfg.THICK_FRONT_STRENGTH",
+        )
+        front_misaligned_damp = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_MISALIGNED_DAMP", 0.01),
+            "cfg.THICK_FRONT_MISALIGNED_DAMP",
+        )
+        front_diag_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_DIAG_WEIGHT", 0.5),
+            "cfg.THICK_FRONT_DIAG_WEIGHT",
+        )
+        front_density_weighted = getattr(cfg, "THICK_FRONT_DENSITY_WEIGHTED", True)
+        _assert(
+            isinstance(front_density_weighted, bool),
+            f"cfg.THICK_FRONT_DENSITY_WEIGHTED must be bool, got {type(front_density_weighted)}",
+        )
+        front_phase_relax_strength = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_PHASE_RELAX_STRENGTH", 0.0),
+            "cfg.THICK_FRONT_PHASE_RELAX_STRENGTH",
+        )
+
+        front_branch_competition_strength = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_STRENGTH", 0.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_STRENGTH",
+        )
+        _assert(
+            front_branch_competition_strength >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_STRENGTH must be >= 0, got {front_branch_competition_strength}",
+        )
+
+        front_branch_competition_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_POWER",
+        )
+
+        front_branch_gate_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_GATE_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_GATE_POWER",
+        )
+
+        front_branch_competition_x_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT", 0.35),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT",
+        )
+        _assert(
+            front_branch_competition_x_weight >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT must be >= 0, got {front_branch_competition_x_weight}",
+        )
+
+        front_branch_competition_y_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT", 1.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT",
+        )
+        _assert(
+            front_branch_competition_y_weight >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT must be >= 0, got {front_branch_competition_y_weight}",
+        )
+
+        front_branch_competition_diag_weight = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT", 0.35),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT",
+        )
+        _assert(
+            front_branch_competition_diag_weight >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT must be >= 0, got {front_branch_competition_diag_weight}",
+        )
+
+        front_branch_density_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_DENSITY_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_DENSITY_POWER",
+        )
+        _assert(
+            front_branch_density_power >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_DENSITY_POWER must be >= 0, got {front_branch_density_power}",
+        )
+
+        front_branch_align_power = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_ALIGN_POWER", 1.0),
+            "cfg.THICK_FRONT_BRANCH_ALIGN_POWER",
+        )
+        _assert(
+            front_branch_align_power >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_ALIGN_POWER must be >= 0, got {front_branch_align_power}",
+        )
+
+        front_branch_competition_threshold = _assert_finite_scalar(
+            getattr(cfg, "THICK_FRONT_BRANCH_COMPETITION_THRESHOLD", 0.0),
+            "cfg.THICK_FRONT_BRANCH_COMPETITION_THRESHOLD",
+        )
+        _assert(
+            front_branch_competition_threshold >= 0.0,
+            f"cfg.THICK_FRONT_BRANCH_COMPETITION_THRESHOLD must be >= 0, got {front_branch_competition_threshold}",
+        )
+
+        front_branch_normalize_gamma = getattr(cfg, "THICK_FRONT_BRANCH_NORMALIZE_GAMMA", True)
+        _assert(
+            isinstance(front_branch_normalize_gamma, bool),
+            f"cfg.THICK_FRONT_BRANCH_NORMALIZE_GAMMA must be bool, got {type(front_branch_normalize_gamma)}",
+        )
+
+        theory = ThickFrontWorldLineTheory(
+            grid=grid,
+            potential=potential,
+            m_mass=m_mass,
+            hbar=hbar,
+            front_strength=front_strength,
+            front_misaligned_damp=front_misaligned_damp,
+            front_diag_weight=front_diag_weight,
+            front_density_weighted=front_density_weighted,
+            front_phase_relax_strength=front_phase_relax_strength,
+            front_branch_competition_strength=front_branch_competition_strength,
+            front_branch_competition_power=front_branch_competition_power,
+            front_branch_gate_power=front_branch_gate_power,
+            front_branch_competition_x_weight=front_branch_competition_x_weight,
+            front_branch_competition_y_weight=front_branch_competition_y_weight,
+            front_branch_competition_diag_weight=front_branch_competition_diag_weight,
+            front_branch_density_power=front_branch_density_power,
+            front_branch_align_power=front_branch_align_power,
+            front_branch_competition_threshold=front_branch_competition_threshold,
+            front_branch_normalize_gamma=front_branch_normalize_gamma,
         )
 
     elif theory_name == "dirac":
@@ -224,6 +563,7 @@ def build_theory(cfg, grid, potential):
             "schrodinger_measurement",
             "thick_front",
             "thick_front_optimized",
+            "thick_front_measured_guided",
             "dirac",
             "dirac_thick_front",
         ]

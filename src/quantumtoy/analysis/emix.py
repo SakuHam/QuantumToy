@@ -152,6 +152,49 @@ def gaussian_weights(Tk: np.ndarray, mu: float, sigma: float) -> np.ndarray:
 
 
 # ============================================================
+# Click detection helpers
+# ============================================================
+
+def _nearest_detector_cell_to_point(
+    screen_mask_vis: np.ndarray,
+    X_vis: np.ndarray,
+    Y_vis: np.ndarray,
+    x_target: float,
+    y_target: float,
+):
+    """
+    Return nearest visible detector cell to a requested forced click point.
+
+    Returns:
+        iy_vis, ix_vis, x_click, y_click
+    """
+    _assert(np.any(screen_mask_vis), "screen_mask_vis is empty")
+    _assert_finite_scalar(x_target, "force_click_x")
+    _assert_finite_scalar(y_target, "force_click_y")
+
+    iy_idx, ix_idx = np.where(screen_mask_vis)
+    _assert(iy_idx.size > 0, "No detector cells found in screen_mask_vis")
+
+    xs = X_vis[iy_idx, ix_idx]
+    ys = Y_vis[iy_idx, ix_idx]
+
+    d2 = (xs - float(x_target)) ** 2 + (ys - float(y_target)) ** 2
+    _assert(np.all(np.isfinite(d2)), "forced click distance array contains non-finite values")
+
+    j = int(np.argmin(d2))
+    iy_vis = int(iy_idx[j])
+    ix_vis = int(ix_idx[j])
+
+    x_click = float(X_vis[iy_vis, ix_vis])
+    y_click = float(Y_vis[iy_vis, ix_vis])
+
+    _assert(screen_mask_vis[iy_vis, ix_vis],
+            "nearest forced click cell lies outside screen_mask_vis")
+
+    return iy_vis, ix_vis, x_click, y_click
+
+
+# ============================================================
 # Click detection
 # ============================================================
 
@@ -164,10 +207,22 @@ def detect_click_from_screen(
     X_vis: np.ndarray,
     Y_vis: np.ndarray,
     rng_seed: int = 123456,
+    click_mode: str = "born",
+    force_click_x: float | None = None,
+    force_click_y: float | None = None,
 ):
     """
     Returns:
         idx_det, t_det, x_click, y_click, screen_int
+
+    click_mode
+    ----------
+    "born"
+        Sample click position from detector Born weights at detection time.
+
+    "forced_point"
+        Keep detection time from detector argmax, but force click position
+        to the nearest detector cell to (force_click_x, force_click_y).
     """
     _assert_times(times)
     _assert_positive_scalar(dx, "dx")
@@ -176,6 +231,14 @@ def detect_click_from_screen(
     _assert(frames_density.shape[0] == len(times),
             f"frames_density Nt={frames_density.shape[0]} must equal len(times)={len(times)}")
     _assert(np.any(screen_mask_vis), "screen_mask_vis is empty")
+    _assert(click_mode in {"born", "forced_point"},
+            f"click_mode must be 'born' or 'forced_point', got {click_mode!r}")
+
+    if click_mode == "forced_point":
+        _assert(force_click_x is not None, "force_click_x is required for click_mode='forced_point'")
+        _assert(force_click_y is not None, "force_click_y is required for click_mode='forced_point'")
+        _assert_finite_scalar(force_click_x, "force_click_x")
+        _assert_finite_scalar(force_click_y, "force_click_y")
 
     screen_int = np.array(
         [np.sum(frames_density[i][screen_mask_vis]) * dx * dy for i in range(len(times))],
@@ -201,21 +264,34 @@ def detect_click_from_screen(
     _assert(np.isfinite(wsum), "wsum is non-finite")
     _assert(wsum > 0.0, "No positive intensity on screen at detection time")
 
-    p = (w / wsum).ravel()
-    _assert(np.all(np.isfinite(p)), "click probability vector contains non-finite values")
-    _assert(np.all(p >= 0.0), "click probability vector contains negative values")
-    _assert(np.isclose(np.sum(p), 1.0, atol=1e-12),
-            f"click probability vector must sum to 1, got {np.sum(p)}")
+    if click_mode == "born":
+        p = (w / wsum).ravel()
+        _assert(np.all(np.isfinite(p)), "click probability vector contains non-finite values")
+        _assert(np.all(p >= 0.0), "click probability vector contains negative values")
+        _assert(np.isclose(np.sum(p), 1.0, atol=1e-12),
+                f"click probability vector must sum to 1, got {np.sum(p)}")
 
-    rng = np.random.default_rng(rng_seed)
-    flat_idx = int(rng.choice(p.size, p=p))
-    iy_vis, ix_vis = np.unravel_index(flat_idx, w.shape)
+        rng = np.random.default_rng(rng_seed)
+        flat_idx = int(rng.choice(p.size, p=p))
+        iy_vis, ix_vis = np.unravel_index(flat_idx, w.shape)
 
-    _assert(screen_mask_vis[iy_vis, ix_vis],
-            "chosen click point lies outside screen_mask_vis")
+        _assert(screen_mask_vis[iy_vis, ix_vis],
+                "chosen click point lies outside screen_mask_vis")
 
-    x_click = float(X_vis[iy_vis, ix_vis])
-    y_click = float(Y_vis[iy_vis, ix_vis])
+        x_click = float(X_vis[iy_vis, ix_vis])
+        y_click = float(Y_vis[iy_vis, ix_vis])
+
+    elif click_mode == "forced_point":
+        iy_vis, ix_vis, x_click, y_click = _nearest_detector_cell_to_point(
+            screen_mask_vis=screen_mask_vis,
+            X_vis=X_vis,
+            Y_vis=Y_vis,
+            x_target=float(force_click_x),
+            y_target=float(force_click_y),
+        )
+
+    else:
+        raise ValueError(f"Unsupported click_mode: {click_mode}")
 
     _assert(np.isfinite(x_click) and np.isfinite(y_click),
             f"click coordinates must be finite, got ({x_click}, {y_click})")

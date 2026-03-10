@@ -509,52 +509,65 @@ def main():
     # --------------------------------------------------------
     # Continuity equation debug
     # --------------------------------------------------------
-#    if cfg.SAVE_COMPLEX_STATE_FRAMES and state_vis_frames is not None:
-#
-#        rms_mean, rms_max, abs_max = continuity_residual_from_state_frames(
-#            theory=theory,
-#            state_vis_frames=state_vis_frames,
-#            dx=grid.dx,
-#            dy=grid.dy,
-#            dt=cfg.save_every * cfg.dt,
-#        )
-#
-#        print(
-#            "[CONTINUITY] "
-#            f"RMS_mean≈{rms_mean:.3e}, "
-#            f"RMS_max≈{rms_max:.3e}, "
-#            f"ABS_max≈{abs_max:.3e}"
-#        )
-#
-#        x_mean = float(np.sum(rho * grid.X) * grid.dx * grid.dy)
-#        jx, jy, _ = theory.current(state)
-#        jx_tot = float(np.sum(jx) * grid.dx * grid.dy)
-#        jy_tot = float(np.sum(jy) * grid.dx * grid.dy)
-#
-#        print(
-#            f"[FREEDBG] step={n:5d} t={n*cfg.dt:7.3f} "
-#            f"x_mean={x_mean: .4f} jx_tot={jx_tot: .4e} jy_tot={jy_tot: .4e}"
-#        )
-#
-#        if not np.any(potential.screen_mask_vis):
-#            print("[DEBUG] screen_mask_vis empty -> skipping click/backward/Emix analysis.")
-#            plt.figure(figsize=(8, 5))
-#            plt.imshow(
-#                frames_density[-1],
-#                extent=(
-#                    grid.x_vis_min, grid.x_vis_max,
-#                    grid.y_vis_min, grid.y_vis_max,
-#                ),
-#                origin="lower",
-#                cmap="magma",
-#                aspect="auto",
-#            )
-#            plt.colorbar(label="rho")
-#            plt.title(f"Forward density only (debug free case), t={times[-1]:.3f}")
-#            plt.xlabel("x")
-#            plt.ylabel("y")
-#            plt.show()
-#            return
+    if DEBUG_FREE_CASE:
+        if cfg.SAVE_COMPLEX_STATE_FRAMES and state_vis_frames is not None:
+
+            rms_mean, rms_max, abs_max = continuity_residual_from_state_frames(
+                theory=theory,
+                state_vis_frames=state_vis_frames,
+                dx=grid.dx,
+                dy=grid.dy,
+                dt=cfg.save_every * cfg.dt,
+            )
+
+            print(
+                "[CONTINUITY] "
+                f"RMS_mean≈{rms_mean:.3e}, "
+                f"RMS_max≈{rms_max:.3e}, "
+                f"ABS_max≈{abs_max:.3e}"
+            )
+
+            x_mean = float(np.sum(rho * grid.X) * grid.dx * grid.dy)
+            jx, jy, _ = theory.current(state)
+            jx_tot = float(np.sum(jx) * grid.dx * grid.dy)
+            jy_tot = float(np.sum(jy) * grid.dx * grid.dy)
+
+            print(
+                f"[FREEDBG] step={n:5d} t={n*cfg.dt:7.3f} "
+                f"x_mean={x_mean: .4f} jx_tot={jx_tot: .4e} jy_tot={jy_tot: .4e}"
+            )
+
+            if not np.any(potential.screen_mask_vis):
+                print("[DEBUG] screen_mask_vis empty -> skipping click/backward/Emix analysis.")
+                plt.figure(figsize=(8, 5))
+                if cfg.USE_LOG_OUTPUT:
+                    plt.imshow(
+                        np.log10(frames_density[-1] + 1e-20), 
+                        extent=(
+                            grid.x_vis_min, grid.x_vis_max,
+                            grid.y_vis_min, grid.y_vis_max,
+                        ),
+                        origin="lower",
+                        cmap="magma",
+                        aspect="auto",
+                    )
+                else:
+                    plt.imshow(
+                        frames_density[-1],
+                        extent=(
+                            grid.x_vis_min, grid.x_vis_max,
+                            grid.y_vis_min, grid.y_vis_max,
+                        ),
+                        origin="lower",
+                        cmap="magma",
+                        aspect="auto",
+                    )
+                plt.colorbar(label="rho")
+                plt.title(f"Forward density only (debug free case), t={times[-1]:.3f}")
+                plt.xlabel("x")
+                plt.ylabel("y")
+                plt.show()
+                return
 
     # --------------------------------------------------------
     # 4) Detection time + click
@@ -568,9 +581,15 @@ def main():
         X_vis=grid.X_vis,
         Y_vis=grid.Y_vis,
         rng_seed=cfg.CLICK_RNG_SEED,
+        click_mode=cfg.CLICK_MODE,
+        force_click_x=cfg.FORCE_CLICK_X,
+        force_click_y=cfg.FORCE_CLICK_Y,
     )
 
-    print(f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f})")
+    print(
+        f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f}), "
+        f"click_mode={cfg.CLICK_MODE}"
+    )
     print(
         f"[SCREEN] max={np.max(screen_int):.6e} "
         f"argmax_i={idx_det} t_det={t_det:.6f} "
@@ -653,7 +672,8 @@ def main():
             Emix_density=Emix_density_old,
             dx=grid.dx,
             dy=grid.dy,
-            mode="density_product_oldstyle",
+            mode=cfg.RHO_MODE,
+            blend_alpha=cfg.RHO_BLEND_ALPHA,
         )
 
         rx, ry, rs = compute_ridge_xy(
