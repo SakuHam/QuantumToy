@@ -11,6 +11,8 @@ from core.potentials import build_double_slit_and_caps
 from core.utils import make_packet, norm_prob
 from theories.registry import build_theory
 
+from detection.factory import build_detector
+
 from analysis.emix import (
     detect_click_from_screen,
     build_backward_library,
@@ -363,7 +365,7 @@ def main():
     cfg = AppConfig()
 
     # --------------------------------------------------------
-    # 1) Build grid / potential / theory
+    # 1) Build grid / potential / theory / detector
     # --------------------------------------------------------
     grid = build_grid(
         visible_lx=cfg.VISIBLE_LX,
@@ -393,6 +395,7 @@ def main():
         potential = build_double_slit_and_caps(grid, cfg)
 
     theory = build_theory(cfg, grid, potential)
+    detector = build_detector(cfg, grid)
 
     # --------------------------------------------------------
     # 2) Initial state
@@ -408,6 +411,7 @@ def main():
     )
 
     state = theory.initialize_state(psi0)
+    detector.reset()
 
     # --------------------------------------------------------
     # 3) Forward simulation
@@ -417,18 +421,36 @@ def main():
     times = []
     norms = []
 
-    print(f"Forward simulation starts... theory={cfg.THEORY_NAME}")
+    detector_diags = []
+    detector_clicked = False
+    det_result_final = None
+
+    print(f"Forward simulation starts... theory={cfg.THEORY_NAME}, detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}")
     if cfg.THEORY_NAME == "dirac":
         vx_est, vy_est, sp_est = theory.expected_group_velocity(cfg.k0x, cfg.k0y)
         print(f"[DIRAC V_EST] vx≈{vx_est:.6f}, vy≈{vy_est:.6f}, |v|≈{sp_est:.6f}")
 
     for n in range(cfg.n_steps + 1):
+        t_now = n * cfg.dt
+
         rho = theory.density(state)
         norm_now = norm_prob(rho, grid.dx, grid.dy)
 
+        # detector step on full state
+        det_res = detector.step(state, cfg.dt, t=t_now)
+        detector_diags.append(det_res.aux if det_res.aux is not None else {})
+
+        if det_res.clicked and not detector_clicked:
+            detector_clicked = True
+            det_result_final = det_res
+            print(
+                f"[DETECTOR] clicked at step={n}, t={t_now:.6f}, "
+                f"x={det_res.click_x}, y={det_res.click_y}"
+            )
+
         if n % cfg.save_every == 0:
             frames_density.append(rho[grid.ys, grid.xs].copy())
-            times.append(n * cfg.dt)
+            times.append(t_now)
             norms.append(norm_now)
 
             if cfg.SAVE_COMPLEX_STATE_FRAMES:
@@ -506,6 +528,7 @@ def main():
                 X_like=grid.X_vis,
                 Y_like=grid.Y_vis,
             )
+
     # --------------------------------------------------------
     # Continuity equation debug
     # --------------------------------------------------------
@@ -542,7 +565,7 @@ def main():
                 plt.figure(figsize=(8, 5))
                 if cfg.USE_LOG_OUTPUT:
                     plt.imshow(
-                        np.log10(frames_density[-1] + 1e-20), 
+                        np.log10(frames_density[-1] + 1e-20),
                         extent=(
                             grid.x_vis_min, grid.x_vis_max,
                             grid.y_vis_min, grid.y_vis_max,
@@ -572,27 +595,50 @@ def main():
     # --------------------------------------------------------
     # 4) Detection time + click
     # --------------------------------------------------------
-    idx_det, t_det, x_click, y_click, screen_int = detect_click_from_screen(
-        frames_density=frames_density,
-        times=times,
-        screen_mask_vis=potential.screen_mask_vis,
-        dx=grid.dx,
-        dy=grid.dy,
-        X_vis=grid.X_vis,
-        Y_vis=grid.Y_vis,
-        rng_seed=cfg.CLICK_RNG_SEED,
-        click_mode=cfg.CLICK_MODE,
-        force_click_x=cfg.FORCE_CLICK_X,
-        force_click_y=cfg.FORCE_CLICK_Y,
-    )
+    # First preference: detector result
+    if detector_clicked and det_result_final is not None:
+        x_click = float(det_result_final.click_x)
+        y_click = float(det_result_final.click_y)
+
+        # snap t_det to nearest saved forward frame for backward library alignment
+        idx_det = int(np.argmin(np.abs(times - float(det_result_final.click_time if det_result_final.click_time is not None else times[-1]))))
+        t_det = float(times[idx_det])
+
+        screen_int = np.array(
+            [np.sum(frames_density[i][potential.screen_mask_vis]) * grid.dx * grid.dy for i in range(Nt)],
+            dtype=float,
+        )
+
+        print(
+            f"[CLICK] detector-driven click: "
+            f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f}), "
+            f"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
+        )
+    else:
+        # fallback to old screen/Born-style detection
+        idx_det, t_det, x_click, y_click, screen_int = detect_click_from_screen(
+            frames_density=frames_density,
+            times=times,
+            screen_mask_vis=potential.screen_mask_vis,
+            dx=grid.dx,
+            dy=grid.dy,
+            X_vis=grid.X_vis,
+            Y_vis=grid.Y_vis,
+            rng_seed=cfg.CLICK_RNG_SEED,
+            click_mode=cfg.CLICK_MODE,
+            force_click_x=cfg.FORCE_CLICK_X,
+            force_click_y=cfg.FORCE_CLICK_Y,
+        )
+
+        print(
+            f"[CLICK] fallback screen click: "
+            f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f}), "
+            f"click_mode={cfg.CLICK_MODE}"
+        )
 
     print(
-        f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f}), "
-        f"click_mode={cfg.CLICK_MODE}"
-    )
-    print(
         f"[SCREEN] max={np.max(screen_int):.6e} "
-        f"argmax_i={idx_det} t_det={t_det:.6f} "
+        f"argmax_i={np.argmax(screen_int)} t_argmax={times[int(np.argmax(screen_int))]:.6f} "
         f"first={screen_int[0]:.6e} last={screen_int[-1]:.6e}"
     )
 
@@ -845,7 +891,8 @@ def main():
 
     title = ax.set_title(
         rf"ρ(t): σT={sigma_init:.3f}, t={times[0]:.3f}, "
-        rf"ridge={cfg.RIDGE_MODE}, theory={cfg.THEORY_NAME}"
+        rf"ridge={cfg.RIDGE_MODE}, theory={cfg.THEORY_NAME}, "
+        rf"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
     )
 
     ridge_marker, = ax.plot(
@@ -857,6 +904,17 @@ def main():
         color="lime",
         alpha=0.9,
         label=f"ridge ({cfg.RIDGE_MODE})",
+    )
+
+    click_marker, = ax.plot(
+        [x_click],
+        [y_click],
+        marker="x",
+        markersize=9,
+        linestyle="None",
+        color="yellow",
+        alpha=0.9,
+        label="click",
     )
 
     ridge_trail, = ax.plot(
@@ -1030,6 +1088,7 @@ def main():
             rf"t={times[i]:.3f}",
             rf"ridge={cfg.RIDGE_MODE}",
             rf"theory={cfg.THEORY_NAME}",
+            rf"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}",
             rf"norm≈{norms[i]:.4f}",
             rf"Γ≈{ridge_s[0][i]:.3e}",
         ]
@@ -1134,7 +1193,7 @@ def main():
         update_bohmian_overlay(i)
         title.set_text(make_title(i))
 
-        artists = [im, ridge_marker, ridge_trail]
+        artists = [im, ridge_marker, click_marker, ridge_trail]
 
         if flow_quiver is not None:
             artists.append(flow_quiver)
@@ -1194,6 +1253,15 @@ def main():
                 )
             else:
                 print(f"[BOHM] traj {k}: no valid steps")
+
+    if detector_clicked and det_result_final is not None:
+        print(
+            f"[DETECTOR FINAL] clicked=True "
+            f"x={det_result_final.click_x}, y={det_result_final.click_y}, "
+            f"t={det_result_final.click_time}"
+        )
+    else:
+        print("[DETECTOR FINAL] clicked=False (fallback click may have been used)")
 
     # --------------------------------------------------------
     # 15) Save + show

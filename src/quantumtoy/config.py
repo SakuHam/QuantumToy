@@ -8,10 +8,21 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "thick_front_world_line"
+    THEORY_NAME: str = "schrodinger"
 
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
+
+    # ============================================================
+    # Detector
+    # ============================================================
+
+    DETECTOR_NAME = "born"   # tai "emergent"
+    DETECTOR_GATE_CENTER_X = 10.0
+    DETECTOR_GATE_WIDTH = 0.75
+    DETECTOR_CLICK_THRESHOLD = 1.0
+    DETECTOR_MIN_TOTAL_WEIGHT = 1e-6
+    DETECTOR_MIN_PEAK_WEIGHT = 1e-8
 
     # ============================================================
     # Ridge
