@@ -62,54 +62,34 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
     Important updates in this version:
         1) competition is evaluated from psi_tmp, i.e. AFTER the local front
            sharpening step
-        2) competition uses full-resolution scipy maximum_filter
-        3) optional Gaussian smoothing is applied to gain and competition fields
+        2) competition can use current / flow direction derived from psi_tmp
+        3) competition can prefer transverse (cross-flow) competitors rather
+           than same-branch along-flow neighbors
+        4) optional Gaussian smoothing is applied to gain and competition fields
            to reduce grid anisotropy / square artifacts
-        4) competition can be boosted near the detector / screen region
+        5) competition can be boosted near the detector / screen region
+        6) flow competition is sped up by evaluating only active pixels
     """
 
     # --------------------------------------------------------
     # Original thick-front parameters
     # --------------------------------------------------------
 
-    # Strength of thick-front sharpening per step
     front_strength: float = 0.03
-
-    # Small damping on badly misaligned regions
     front_misaligned_damp: float = 0.01
-
-    # Mix of axis neighbors vs diagonal neighbors
     front_diag_weight: float = 0.5
-
-    # Use visible local density as extra weight
     front_density_weighted: bool = True
-
-    # Small epsilon for stable division
     front_eps: float = 1e-12
-
-    # Optional soft phase pull toward local coherent phase
     front_phase_relax_strength: float = 0.00
-
-    # Clip exponent argument for stability
     front_clip: float = 0.25
-
-    # Optional Gaussian blur on gain before exponentiation
-    # Helps suppress grid-shaped artifacts and over-sharpening.
     front_gain_blur_sigma: float = 1.0
 
     # --------------------------------------------------------
     # Branch competition / lateral inhibition parameters
     # --------------------------------------------------------
 
-    # Main strength of branch competition damping.
-    # 0.0 disables the new term.
-    front_branch_competition_strength: float = 0.00
-
-    # Nonlinear contrast for competition term
+    front_branch_competition_strength: float = 0.20
     front_branch_competition_power: float = 1.00
-
-    # Gate competition by local positive alignment:
-    # competition *= max(align_real, 0)^front_branch_gate_power
     front_branch_gate_power: float = 1.00
 
     # Kept for compatibility / possible future variants
@@ -117,53 +97,49 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
     front_branch_competition_y_weight: float = 1.00
     front_branch_competition_diag_weight: float = 0.35
 
-    # Exponent for gamma_like = rho^a * align_pos^b
     front_branch_density_power: float = 1.0
     front_branch_align_power: float = 2.0
-
-    # Optional threshold before damping starts
     front_branch_competition_threshold: float = 0.00
-
-    # If True, normalize gamma_like by its frame max before competition.
     front_branch_normalize_gamma: bool = True
 
     # --------------------------------------------------------
-    # Full-resolution SciPy competition parameters
+    # Competition search radius / filtering
     # --------------------------------------------------------
 
-    # Competition search radius in full-resolution pixels
     front_branch_competition_radius: int = 20
-
-    # Local branch is safe if it is within this factor of the strongest
-    # nearby competitor.
-    # margin > 1 suppresses self-competition even if center is included
-    # in the maximum filter.
-    front_branch_competition_margin: float = 1.00
-
-    # Optional Gaussian blur on competition_raw before comp_dt
-    # Helps expand extremely sparse competition and reduce blocky/square artifacts.
+    front_branch_competition_margin: float = 0.90 #1.00
     front_branch_competition_blur_sigma: float = 0.5
+
+    # --------------------------------------------------------
+    # Flow-based branch competition
+    # --------------------------------------------------------
+
+    # If False, falls back to simple local maximum_filter competition
+    front_branch_use_flow_direction: bool = True
+
+    # Use Bohmian-like current direction computed from psi_tmp
+    front_branch_direction_mismatch_power: float = 1.0
+
+    # Prefer competitors across the local flow direction
+    # 0.0 -> no transverse preference
+    # 1.0+ -> stronger normal-direction competition
+    front_branch_transverse_weight_power: float = 2.0
+
+    # Ignore direction info where local speed is too tiny
+    # threshold = fraction * max(speed)
+    front_branch_min_speed_fraction: float = 1e-4
+
+    # Optional floor on local density for valid direction competition
+    front_branch_min_rho_fraction: float = 1e-6
 
     # --------------------------------------------------------
     # Detector / screen-local competition boost
     # --------------------------------------------------------
 
-    # If enabled, competition becomes stronger near a chosen x-location
-    # (typically the screen / detector region).
     front_branch_detector_gate_enabled: bool = True
-
-    # Center x-position of the detector competition boost
     front_branch_detector_gate_center_x: float = 10.0
-
-    # Width (sigma) of the detector competition boost
     front_branch_detector_gate_width: float = 2.0
-
-    # Multiplicative boost factor:
-    # local_strength = base_strength * (1 + boost * gate)
-    #
-    # Example:
-    # boost = 2 means 3x strength at gate maximum
-    front_branch_detector_gate_boost: float = 10.0 #2.0
+    front_branch_detector_gate_boost: float = 10.0
 
     # --------------------------------------------------------
     # Debug / safety parameters
@@ -171,6 +147,12 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
 
     front_debug_checks: bool = True
     front_norm_tol: float = 1e-8
+
+    front_debug_plot_enabled: bool = True
+    front_debug_plot_once: bool = True
+    front_debug_plot_every: int = 1
+    front_debug_quiver_stride: int = 24
+    front_debug_abs2_floor: float = 1e-10
 
     # --------------------------------------------------------
     # Validation
@@ -222,10 +204,25 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         _assert(self.front_branch_competition_blur_sigma >= 0.0,
                 "front_branch_competition_blur_sigma must be >= 0")
 
+        _assert(self.front_branch_direction_mismatch_power >= 0.0,
+                "front_branch_direction_mismatch_power must be >= 0")
+        _assert(self.front_branch_transverse_weight_power >= 0.0,
+                "front_branch_transverse_weight_power must be >= 0")
+        _assert(self.front_branch_min_speed_fraction >= 0.0,
+                "front_branch_min_speed_fraction must be >= 0")
+        _assert(self.front_branch_min_rho_fraction >= 0.0,
+                "front_branch_min_rho_fraction must be >= 0")
+
         _assert(self.front_branch_detector_gate_width > 0.0,
                 "front_branch_detector_gate_width must be > 0")
         _assert(self.front_branch_detector_gate_boost >= 0.0,
                 "front_branch_detector_gate_boost must be >= 0")
+
+        self._debug_plot_counter = 0
+        self._debug_plot_done = False
+
+        self._competition_offsets = self._build_competition_offsets()
+        self._detector_gate_cache = None
 
     # --------------------------------------------------------
     # Basic utilities
@@ -252,10 +249,10 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         z_yp = np.roll(z, -1, axis=0)
         z_ym = np.roll(z,  1, axis=0)
 
-        z_d1 = np.roll(z_xp, -1, axis=0)  # (+x, +y)
-        z_d2 = np.roll(z_xp,  1, axis=0)  # (+x, -y)
-        z_d3 = np.roll(z_xm, -1, axis=0)  # (-x, +y)
-        z_d4 = np.roll(z_xm,  1, axis=0)  # (-x, -y)
+        z_d1 = np.roll(z_xp, -1, axis=0)
+        z_d2 = np.roll(z_xp,  1, axis=0)
+        z_d3 = np.roll(z_xm, -1, axis=0)
+        z_d4 = np.roll(z_xm,  1, axis=0)
 
         axis_sum = z_xp + z_xm + z_yp + z_ym
         diag_sum = z_d1 + z_d2 + z_d3 + z_d4
@@ -268,12 +265,49 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         _assert_complex_array_2d(out, "_neighbor_average_complex(out)")
         return out
 
+    def _build_competition_offsets(self):
+        """
+        Precompute integer offsets inside the competition radius.
+        Each entry is (dy, dx, ox, oy), where (ox, oy) is the normalized offset.
+        """
+        radius = int(self.front_branch_competition_radius)
+        offsets = []
+
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if dx == 0 and dy == 0:
+                    continue
+
+                dist2 = dx * dx + dy * dy
+                if dist2 > radius * radius:
+                    continue
+
+                dist = float(np.sqrt(dist2))
+                ox = dx / dist
+                oy = dy / dist
+                offsets.append((dy, dx, ox, oy))
+
+        return offsets
+
+    def _wrapped_take(self, arr: np.ndarray, ys: np.ndarray, xs: np.ndarray, dy: int, dx: int):
+        """
+        Gather arr[(ys+dy)%H, (xs+dx)%W] without rolling the full array.
+        """
+        h, w = arr.shape
+        y2 = (ys + dy) % h
+        x2 = (xs + dx) % w
+        return arr[y2, x2]
+
     def _detector_competition_gate(self) -> np.ndarray:
         """
         Spatial gate that boosts competition near the detector / screen.
 
         Uses a Gaussian in x centered at front_branch_detector_gate_center_x.
+        Cached because grid/X is static.
         """
+        if self._detector_gate_cache is not None:
+            return self._detector_gate_cache
+
         X = self.grid.X
         xc = float(self.front_branch_detector_gate_center_x)
         sigma = float(self.front_branch_detector_gate_width)
@@ -281,6 +315,8 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         gate = np.exp(-((X - xc) ** 2) / (2.0 * sigma ** 2)).astype(float)
         _assert_real_array_2d(gate, "detector_gate")
         _assert(np.all(gate >= -1e-14), "detector_gate contains significantly negative values")
+
+        self._detector_gate_cache = gate
         return gate
 
     # --------------------------------------------------------
@@ -315,7 +351,6 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         u_nei_mag = np.abs(u_nei)
         u_local = u_nei / np.maximum(u_nei_mag, self.front_eps)
 
-        # Real part of phase agreement: +1 aligned, -1 opposite
         align_real = np.real(np.conjugate(u) * u_local)
 
         _assert_real_array_2d(align_real, "align_real")
@@ -323,23 +358,90 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
 
         return align_real.astype(float), rho.astype(float), u_local
 
-    def _branch_competition_field(
+    def _flow_direction_field(self, psi: np.ndarray):
+        """
+        Compute Bohmian-like local flow direction from current:
+            j = (hbar/m) Im(conj(psi) grad psi)
+            v = j / rho
+
+        Returns:
+            jx, jy, rho, speed, ux, uy, valid_mask
+        """
+        _assert_complex_array_2d(psi, "psi(flow)")
+
+        dpsi_dx = (
+            np.roll(psi, -1, axis=1) - np.roll(psi, 1, axis=1)
+        ) / (2.0 * self.grid.dx)
+
+        dpsi_dy = (
+            np.roll(psi, -1, axis=0) - np.roll(psi, 1, axis=0)
+        ) / (2.0 * self.grid.dy)
+
+        _assert_complex_array_2d(dpsi_dx, "dpsi_dx(flow)")
+        _assert_complex_array_2d(dpsi_dy, "dpsi_dy(flow)")
+
+        rho = (np.abs(psi) ** 2).astype(float)
+        _assert_real_array_2d(rho, "rho(flow)")
+
+        jx = (
+            (self.hbar / self.m_mass)
+            * np.imag(np.conjugate(psi) * dpsi_dx)
+        ).astype(float)
+
+        jy = (
+            (self.hbar / self.m_mass)
+            * np.imag(np.conjugate(psi) * dpsi_dy)
+        ).astype(float)
+
+        _assert_real_array_2d(jx, "jx(flow)")
+        _assert_real_array_2d(jy, "jy(flow)")
+
+        vx = jx / np.maximum(rho, self.front_eps)
+        vy = jy / np.maximum(rho, self.front_eps)
+
+        _assert_real_array_2d(vx, "vx(flow)")
+        _assert_real_array_2d(vy, "vy(flow)")
+
+        speed = np.sqrt(np.maximum(vx * vx + vy * vy, 0.0)).astype(float)
+        _assert_real_array_2d(speed, "speed(flow)")
+
+        speed_max = float(np.max(speed))
+        rho_max = float(np.max(rho))
+
+        speed_thr = float(self.front_branch_min_speed_fraction) * max(speed_max, self.front_eps)
+        rho_thr = float(self.front_branch_min_rho_fraction) * max(rho_max, self.front_eps)
+
+        valid_mask = (speed > speed_thr) & (rho > rho_thr)
+        _assert_real_array_2d(valid_mask.astype(float), "valid_mask(flow)")
+
+        ux = np.zeros_like(speed, dtype=float)
+        uy = np.zeros_like(speed, dtype=float)
+
+        denom = np.maximum(speed, self.front_eps)
+        ux[valid_mask] = vx[valid_mask] / denom[valid_mask]
+        uy[valid_mask] = vy[valid_mask] / denom[valid_mask]
+
+        _assert_real_array_2d(ux, "ux(flow)")
+        _assert_real_array_2d(uy, "uy(flow)")
+
+        return (
+            jx.astype(float),
+            jy.astype(float),
+            rho.astype(float),
+            speed.astype(float),
+            ux.astype(float),
+            uy.astype(float),
+            valid_mask.astype(bool),
+        )
+
+    def _branch_competition_field_simple(
         self,
         rho: np.ndarray,
         align_real: np.ndarray,
     ):
         """
-        Construct a competition field based on a local ridge-likeness measure.
-
-        gamma_like is large when:
-          - local density is large
-          - phase alignment is positive and strong
-
-        Competition is computed directly on the full-resolution grid:
-          1) build gamma_like
-          2) find strongest nearby competitor via scipy maximum_filter
-          3) compute competition on the full grid
-          4) optionally smooth competition with a Gaussian
+        Old-style simple scalar competition based on local maximum_filter.
+        Kept as fallback.
         """
         _assert_real_array_2d(rho, "rho")
         _assert_real_array_2d(align_real, "align_real")
@@ -357,17 +459,12 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
             if gmax > self.front_eps:
                 gamma_like = gamma_like / gmax
 
-        _assert_real_array_2d(gamma_like, "gamma_like")
-        _assert(np.all(gamma_like >= -1e-14), "gamma_like contains significantly negative values")
-
         filt_size = 2 * int(self.front_branch_competition_radius) + 1
         neighbor_max = maximum_filter(
             gamma_like,
             size=(filt_size, filt_size),
             mode="wrap",
         ).astype(float)
-
-        _assert_real_array_2d(neighbor_max, "neighbor_max")
 
         competition_raw = np.maximum(
             neighbor_max - float(self.front_branch_competition_margin) * gamma_like,
@@ -383,15 +480,6 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         if p != 1.0:
             competition_raw = competition_raw ** p
 
-        # Optional smoothing to reduce square/grid artifacts and expand sparse masks
-        if self.front_branch_competition_blur_sigma > 0.0:
-            competition_raw = gaussian_filter(
-                competition_raw,
-                sigma=float(self.front_branch_competition_blur_sigma),
-                mode="wrap",
-            )
-
-        # Gate competition by local positive alignment
         gpow = float(self.front_branch_gate_power)
         if gpow > 0.0:
             competition_gate = np.power(np.maximum(align_pos, 0.0), gpow)
@@ -399,16 +487,215 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         else:
             competition_gate = np.ones_like(competition_raw, dtype=float)
 
-        _assert_real_array_2d(competition_raw, "competition_raw")
-        _assert_real_array_2d(competition_gate, "competition_gate")
-        _assert(np.all(competition_raw >= -1e-14),
-                "competition_raw contains significantly negative values")
+        if self.front_branch_competition_blur_sigma > 0.0:
+            competition_raw = gaussian_filter(
+                competition_raw,
+                sigma=float(self.front_branch_competition_blur_sigma),
+                mode="wrap",
+            )
 
         return (
             gamma_like.astype(float),
             neighbor_max.astype(float),
             competition_raw.astype(float),
             competition_gate.astype(float),
+            None,
+            None,
+        )
+
+    def _branch_competition_field_flow(
+        self,
+        rho: np.ndarray,
+        align_real: np.ndarray,
+        ux: np.ndarray,
+        uy: np.ndarray,
+        valid_mask: np.ndarray,
+    ):
+        """
+        Faster flow-aware branch competition.
+
+        Main optimization:
+          - evaluate competitors only on active pixels (valid_mask),
+            instead of rolling full arrays for every offset.
+          - gather shifted neighbor values by wrapped indexing.
+        """
+        _assert_real_array_2d(rho, "rho")
+        _assert_real_array_2d(align_real, "align_real")
+        _assert_real_array_2d(ux, "ux")
+        _assert_real_array_2d(uy, "uy")
+        _assert(isinstance(valid_mask, np.ndarray), "valid_mask must be ndarray")
+        _assert(valid_mask.ndim == 2, "valid_mask must be 2D")
+        _assert(
+            rho.shape == align_real.shape == ux.shape == uy.shape == valid_mask.shape,
+            "flow competition fields must have same shape"
+        )
+
+        align_pos = np.maximum(align_real, 0.0)
+
+        gamma_like = (
+            np.power(np.maximum(rho, 0.0), float(self.front_branch_density_power))
+            * np.power(np.maximum(align_pos, 0.0), float(self.front_branch_align_power))
+        ).astype(float)
+
+        if self.front_branch_normalize_gamma:
+            gmax = float(np.max(gamma_like))
+            if gmax > self.front_eps:
+                gamma_like = gamma_like / gmax
+
+        _assert_real_array_2d(gamma_like, "gamma_like(flow competition)")
+
+        # ----------------------------------------------------
+        # Active pixels only
+        # ----------------------------------------------------
+        active = valid_mask.copy()
+
+        # Optional extra restriction: if gamma_like is exactly zero, it cannot compete anyway
+        active &= (gamma_like > 0.0)
+
+        ys, xs = np.where(active)
+
+        # If no active pixels, return zero fields quickly
+        if ys.size == 0:
+            zero = np.zeros_like(gamma_like, dtype=float)
+            one_gate = np.ones_like(gamma_like, dtype=float)
+            return (
+                gamma_like.astype(float),
+                zero,
+                zero,
+                one_gate,
+                zero,
+                zero,
+            )
+
+        gamma_a = gamma_like[ys, xs]
+        ux_a = ux[ys, xs]
+        uy_a = uy[ys, xs]
+
+        # local normal direction n = (-uy, ux)
+        nx_a = -uy_a
+        ny_a = ux_a
+
+        neighbor_max_a = np.zeros_like(gamma_a, dtype=float)
+        competitor_score_a = np.zeros_like(gamma_a, dtype=float)
+        transverse_best_a = np.zeros_like(gamma_a, dtype=float)
+        direction_mismatch_best_a = np.zeros_like(gamma_a, dtype=float)
+
+        mismatch_pow = float(self.front_branch_direction_mismatch_power)
+        transverse_pow = float(self.front_branch_transverse_weight_power)
+
+        for dy, dx, ox, oy in self._competition_offsets:
+            gamma_s = self._wrapped_take(gamma_like, ys, xs, dy, dx)
+            ux_s = self._wrapped_take(ux, ys, xs, dy, dx)
+            uy_s = self._wrapped_take(uy, ys, xs, dy, dx)
+            valid_s = self._wrapped_take(valid_mask, ys, xs, dy, dx)
+
+            # Direction mismatch:
+            # 0 = same/opposite line direction if abs(dot)=1
+            # 1 = orthogonal
+            dot_dir = np.clip(ux_a * ux_s + uy_a * uy_s, -1.0, 1.0)
+            dir_mismatch = np.maximum(1.0 - np.abs(dot_dir), 0.0)
+
+            if mismatch_pow != 1.0:
+                dir_mismatch = dir_mismatch ** mismatch_pow
+
+            # Prefer competitors across the local flow, not along it
+            transverse = np.abs(nx_a * ox + ny_a * oy)
+
+            if transverse_pow != 1.0 and transverse_pow > 0.0:
+                transverse = transverse ** transverse_pow
+            elif transverse_pow == 0.0:
+                transverse = np.ones_like(transverse, dtype=float)
+
+            valid_pair = valid_s.astype(float)
+            weight = gamma_s * dir_mismatch * transverse * valid_pair
+
+            neighbor_max_a = np.maximum(neighbor_max_a, gamma_s)
+            competitor_score_a = np.maximum(competitor_score_a, weight)
+            transverse_best_a = np.maximum(transverse_best_a, transverse * valid_pair)
+            direction_mismatch_best_a = np.maximum(direction_mismatch_best_a, dir_mismatch * valid_pair)
+
+        competition_raw_a = np.maximum(
+            competitor_score_a - float(self.front_branch_competition_margin) * gamma_a,
+            0.0,
+        )
+
+        competition_raw_a = np.maximum(
+            competition_raw_a - float(self.front_branch_competition_threshold),
+            0.0,
+        )
+
+        p = float(self.front_branch_competition_power)
+        if p != 1.0:
+            competition_raw_a = competition_raw_a ** p
+
+        gpow = float(self.front_branch_gate_power)
+        if gpow > 0.0:
+            competition_gate = np.ones_like(gamma_like, dtype=float)
+            competition_gate_a = np.power(np.maximum(align_pos[ys, xs], 0.0), gpow)
+            competition_raw_a = competition_raw_a * competition_gate_a
+            competition_gate[ys, xs] = competition_gate_a
+        else:
+            competition_gate = np.ones_like(gamma_like, dtype=float)
+
+        # Scatter back to full-size fields
+        neighbor_max = np.zeros_like(gamma_like, dtype=float)
+        competition_raw = np.zeros_like(gamma_like, dtype=float)
+        transverse_best = np.zeros_like(gamma_like, dtype=float)
+        direction_mismatch_best = np.zeros_like(gamma_like, dtype=float)
+
+        neighbor_max[ys, xs] = neighbor_max_a
+        competition_raw[ys, xs] = competition_raw_a
+        transverse_best[ys, xs] = transverse_best_a
+        direction_mismatch_best[ys, xs] = direction_mismatch_best_a
+
+        if self.front_branch_competition_blur_sigma > 0.0:
+            competition_raw = gaussian_filter(
+                competition_raw,
+                sigma=float(self.front_branch_competition_blur_sigma),
+                mode="wrap",
+            )
+
+        _assert_real_array_2d(competition_raw, "competition_raw(flow)")
+        _assert_real_array_2d(competition_gate, "competition_gate(flow)")
+
+        return (
+            gamma_like.astype(float),
+            neighbor_max.astype(float),
+            competition_raw.astype(float),
+            competition_gate.astype(float),
+            transverse_best.astype(float),
+            direction_mismatch_best.astype(float),
+        )
+
+    def _branch_competition_field(
+        self,
+        rho: np.ndarray,
+        align_real: np.ndarray,
+        ux: np.ndarray | None = None,
+        uy: np.ndarray | None = None,
+        valid_mask: np.ndarray | None = None,
+    ):
+        """
+        Dispatcher: flow-aware branch competition if direction fields are provided,
+        otherwise fallback to simple local maximum competition.
+        """
+        if (
+            self.front_branch_use_flow_direction
+            and ux is not None
+            and uy is not None
+            and valid_mask is not None
+        ):
+            return self._branch_competition_field_flow(
+                rho=rho,
+                align_real=align_real,
+                ux=ux,
+                uy=uy,
+                valid_mask=valid_mask,
+            )
+
+        return self._branch_competition_field_simple(
+            rho=rho,
+            align_real=align_real,
         )
 
     # --------------------------------------------------------
@@ -425,23 +712,18 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         3) optionally smooth gain
         4) form psi_tmp = sharpened field
         5) recompute coherence from psi_tmp
-        6) compute competition from psi_tmp-derived fields
-        7) optionally smooth competition
-        8) optionally boost competition near detector
-        9) apply competition damping
-        10) optional phase relaxation
+        6) compute flow direction from psi_tmp
+        7) compute competition from psi_tmp-derived fields
+        8) optionally smooth competition
+        9) optionally boost competition near detector
+        10) apply competition damping
+        11) optional phase relaxation
         """
         _assert_complex_array_2d(psi, "psi")
         _assert_finite_scalar(dt, "dt")
 
-        # --------------------------------------------
-        # Diagnostics on input norm
-        # --------------------------------------------
         prob_in = self._state_probability(psi)
 
-        # --------------------------------------------
-        # Coherence from original psi
-        # --------------------------------------------
         align_real, rho, u_local = self._coherence_alignment_score(psi)
 
         gain = (
@@ -455,7 +737,6 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
                 rho_scale = rho / rho_mean
                 gain = gain * np.sqrt(np.maximum(rho_scale, 0.0))
 
-        # Optional smoothing to reduce grid anisotropy and explosive local growth
         if self.front_gain_blur_sigma > 0.0:
             gain = gaussian_filter(
                 gain,
@@ -481,6 +762,33 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         # --------------------------------------------
         align_real_tmp, rho_tmp, u_local_tmp = self._coherence_alignment_score(psi_tmp)
 
+        # --------------------------------------------
+        # Flow field from sharpened psi_tmp
+        # --------------------------------------------
+        jx_tmp = None
+        jy_tmp = None
+        speed_tmp = None
+        ux_tmp = None
+        uy_tmp = None
+        flow_valid_mask = None
+
+        if self.front_branch_use_flow_direction:
+            (
+                jx_tmp,
+                jy_tmp,
+                rho_flow_tmp,
+                speed_tmp,
+                ux_tmp,
+                uy_tmp,
+                flow_valid_mask,
+            ) = self._flow_direction_field(psi_tmp)
+
+            if self.front_debug_checks:
+                _assert(
+                    np.allclose(rho_flow_tmp, rho_tmp, atol=1e-12, rtol=1e-10),
+                    "rho from flow field and rho from coherence score differ unexpectedly"
+                )
+
         competition_raw = None
         competition_gate = None
         gamma_like = None
@@ -488,17 +796,28 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         comp_dt = None
         detector_gate = None
         local_strength = None
+        transverse_best = None
+        direction_mismatch_best = None
 
         # --------------------------------------------
         # Second stage: competition from psi_tmp
         # --------------------------------------------
         if self.front_branch_competition_strength > 0.0:
-            gamma_like, neighbor_max, competition_raw, competition_gate = self._branch_competition_field(
+            (
+                gamma_like,
+                neighbor_max,
+                competition_raw,
+                competition_gate,
+                transverse_best,
+                direction_mismatch_best,
+            ) = self._branch_competition_field(
                 rho=rho_tmp,
                 align_real=align_real_tmp,
+                ux=ux_tmp,
+                uy=uy_tmp,
+                valid_mask=flow_valid_mask,
             )
 
-            # Optional detector/screen-local boost
             if self.front_branch_detector_gate_enabled:
                 detector_gate = self._detector_competition_gate()
                 local_strength = float(self.front_branch_competition_strength) * (
@@ -549,7 +868,6 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
             _assert(prob_after_comp > 0.0, f"prob_after_comp must be > 0, got {prob_after_comp}")
             _assert(prob_after_relax > 0.0, f"prob_after_relax must be > 0, got {prob_after_relax}")
 
-            # Competition should not increase norm if it is pure damping.
             if self.front_branch_competition_strength > 0.0:
                 _assert(
                     prob_after_comp <= prob_after_gain + 1e-12,
@@ -574,7 +892,16 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
 
             "gain_dt_mean": float(np.mean(gain_dt)),
             "gain_dt_max": float(np.max(gain_dt)),
+
+            "flow_direction_enabled": bool(self.front_branch_use_flow_direction),
         }
+
+        if speed_tmp is not None:
+            aux_front["flow_speed_mean"] = float(np.mean(speed_tmp))
+            aux_front["flow_speed_max"] = float(np.max(speed_tmp))
+            aux_front["flow_valid_fraction"] = float(np.mean(flow_valid_mask.astype(float)))
+            aux_front["flow_jx_mean_abs"] = float(np.mean(np.abs(jx_tmp)))
+            aux_front["flow_jy_mean_abs"] = float(np.mean(np.abs(jy_tmp)))
 
         if competition_raw is not None:
             aux_front["branch_gamma_like_mean"] = float(np.mean(gamma_like))
@@ -590,9 +917,50 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
             aux_front["branch_local_strength_mean"] = float(np.mean(local_strength))
             aux_front["branch_local_strength_max"] = float(np.max(local_strength))
 
+            if transverse_best is not None:
+                aux_front["branch_transverse_best_mean"] = float(np.mean(transverse_best))
+                aux_front["branch_transverse_best_max"] = float(np.max(transverse_best))
+
+            if direction_mismatch_best is not None:
+                aux_front["branch_direction_mismatch_best_mean"] = float(
+                    np.mean(direction_mismatch_best)
+                )
+                aux_front["branch_direction_mismatch_best_max"] = float(
+                    np.max(direction_mismatch_best)
+                )
+
             if detector_gate is not None:
                 aux_front["branch_detector_gate_mean"] = float(np.mean(detector_gate))
                 aux_front["branch_detector_gate_max"] = float(np.max(detector_gate))
+
+        if self.front_debug_plot_enabled and (competition_raw is not None):
+            comp_max = float(np.max(competition_raw))
+
+            if comp_max > 1e-9:
+                self._debug_plot_counter += 1
+
+                should_plot = (
+                    (not self.front_debug_plot_once or not self._debug_plot_done)
+                    and (self._debug_plot_counter % max(1, self.front_debug_plot_every) == 0)
+                )
+
+                if should_plot:
+                    self._debug_plot_front_fields(
+                        psi_tmp=psi_tmp,
+                        rho_tmp=rho_tmp,
+                        gain_dt=gain_dt,
+                        align_real_tmp=align_real_tmp,
+                        speed_tmp=speed_tmp,
+                        ux_tmp=ux_tmp,
+                        uy_tmp=uy_tmp,
+                        flow_valid_mask=flow_valid_mask,
+                        gamma_like=gamma_like,
+                        competition_raw=competition_raw,
+                        transverse_best=transverse_best,
+                        direction_mismatch_best=direction_mismatch_best,
+                        comp_dt=comp_dt,
+                    )
+                    self._debug_plot_done = True
 
         return psi_new.astype(np.complex128), aux_front
 
@@ -661,6 +1029,12 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
             "front_branch_competition_radius": int(self.front_branch_competition_radius),
             "front_branch_competition_margin": float(self.front_branch_competition_margin),
             "front_branch_competition_blur_sigma": float(self.front_branch_competition_blur_sigma),
+
+            "front_branch_use_flow_direction": bool(self.front_branch_use_flow_direction),
+            "front_branch_direction_mismatch_power": float(self.front_branch_direction_mismatch_power),
+            "front_branch_transverse_weight_power": float(self.front_branch_transverse_weight_power),
+            "front_branch_min_speed_fraction": float(self.front_branch_min_speed_fraction),
+            "front_branch_min_rho_fraction": float(self.front_branch_min_rho_fraction),
 
             "front_branch_detector_gate_enabled": bool(self.front_branch_detector_gate_enabled),
             "front_branch_detector_gate_center_x": float(self.front_branch_detector_gate_center_x),
@@ -735,3 +1109,87 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         _assert_real_array_2d(jy, "jy")
 
         return jx, jy, rho
+
+    def _debug_plot_front_fields(
+        self,
+        psi_tmp: np.ndarray,
+        rho_tmp: np.ndarray,
+        gain_dt: np.ndarray,
+        align_real_tmp: np.ndarray,
+        speed_tmp: np.ndarray | None = None,
+        ux_tmp: np.ndarray | None = None,
+        uy_tmp: np.ndarray | None = None,
+        flow_valid_mask: np.ndarray | None = None,
+        gamma_like: np.ndarray | None = None,
+        competition_raw: np.ndarray | None = None,
+        transverse_best: np.ndarray | None = None,
+        direction_mismatch_best: np.ndarray | None = None,
+        comp_dt: np.ndarray | None = None,
+    ):
+        import matplotlib.pyplot as plt
+
+        nrows, ncols = 2, 3
+        fig, axes = plt.subplots(nrows, ncols, figsize=(16, 9))
+        axes = axes.ravel()
+
+        def _show(ax, arr, title, cmap="magma", symmetric=False):
+            arr = np.asarray(arr)
+            if symmetric:
+                vmax = float(np.max(np.abs(arr))) if arr.size else 1.0
+                if vmax <= 0.0:
+                    vmax = 1.0
+                im = ax.imshow(arr, origin="lower", cmap=cmap, vmin=-vmax, vmax=vmax)
+            else:
+                im = ax.imshow(arr, origin="lower", cmap=cmap)
+            ax.set_title(title)
+            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        abs2 = np.abs(psi_tmp) ** 2
+        _show(axes[0], abs2, "|psi_tmp|^2", cmap="magma")
+        _show(axes[1], gain_dt, "gain_dt", cmap="RdBu_r", symmetric=True)
+        _show(axes[2], align_real_tmp, "align_real_tmp", cmap="RdBu_r", symmetric=True)
+
+        if competition_raw is not None:
+            _show(axes[3], competition_raw, "competition_raw", cmap="viridis")
+        elif gamma_like is not None:
+            _show(axes[3], gamma_like, "gamma_like", cmap="viridis")
+        else:
+            axes[3].axis("off")
+
+        if comp_dt is not None:
+            _show(axes[4], comp_dt, "comp_dt", cmap="viridis")
+        elif speed_tmp is not None:
+            _show(axes[4], speed_tmp, "flow speed", cmap="viridis")
+        else:
+            axes[4].axis("off")
+
+        phase = np.angle(psi_tmp)
+        mask = abs2 > float(self.front_debug_abs2_floor)
+        phase_vis = np.full_like(phase, np.nan, dtype=float)
+        phase_vis[mask] = phase[mask]
+
+        im = axes[5].imshow(phase_vis, origin="lower", cmap="twilight", vmin=-np.pi, vmax=np.pi)
+        axes[5].set_title("arg(psi_tmp) + flow")
+        plt.colorbar(im, ax=axes[5], fraction=0.046, pad=0.04)
+
+        if (
+            ux_tmp is not None
+            and uy_tmp is not None
+            and flow_valid_mask is not None
+        ):
+            stride = max(1, int(self.front_debug_quiver_stride))
+            yy, xx = np.mgrid[0:ux_tmp.shape[0], 0:ux_tmp.shape[1]]
+
+            xs = xx[::stride, ::stride]
+            ys = yy[::stride, ::stride]
+            uxs = ux_tmp[::stride, ::stride].copy()
+            uys = uy_tmp[::stride, ::stride].copy()
+            vms = flow_valid_mask[::stride, ::stride]
+
+            uxs[~vms] = 0.0
+            uys[~vms] = 0.0
+
+            axes[5].quiver(xs, ys, uxs, uys, color="white", scale=25)
+
+        plt.tight_layout()
+        plt.show()

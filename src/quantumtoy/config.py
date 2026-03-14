@@ -8,7 +8,7 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "thick_front_measured_guided"
+    THEORY_NAME: str = "thick_front_world_line"
 
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
@@ -16,7 +16,7 @@ class AppConfig:
     # ============================================================
     # Ridge
     # ============================================================
-    RIDGE_MODE: str = "centroid_top_snap_localmax"
+    RIDGE_MODE: str = "centroid_top"
     CENTROID_TOP_Q: float = 0.02
     LOCALMAX_RADIUS: int = 20
     LOCALMAX_SMOOTH_ALPHA: float = 0.0
