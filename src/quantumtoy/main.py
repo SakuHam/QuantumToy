@@ -4,12 +4,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Slider
+from matplotlib.colors import PowerNorm
 
 from config import AppConfig
 from core.grid import build_grid
 from core.potentials import build_double_slit_and_caps
 from core.utils import make_packet, norm_prob
 from theories.registry import build_theory
+
+from detection.factory import build_detector
 
 from analysis.emix import (
     detect_click_from_screen,
@@ -79,7 +82,104 @@ def estimate_group_velocity(cfg, theory) -> float:
 
     return float(cfg.k0x / (cfg.m_mass + 1e-30))
 
+# ============================================================
+# Quantum flow debug plots
+# ============================================================
 
+def debug_plot_quantum_flow(theory, state, grid, title="Quantum flow debug"):
+    """
+    Plot quantum velocity field v = j / rho on top of density.
+    Extremely useful for detecting jet artifacts and numerical issues.
+    """
+
+    rho = theory.density(state)
+    jx, jy, _ = theory.current(state)
+
+    rho_vis = rho[grid.ys, grid.xs]
+    jx_vis = jx[grid.ys, grid.xs]
+    jy_vis = jy[grid.ys, grid.xs]
+
+    eps = 1e-14
+
+    vx = jx_vis / (rho_vis + eps)
+    vy = jy_vis / (rho_vis + eps)
+
+    X = grid.X_vis
+    Y = grid.Y_vis
+
+    plt.figure(figsize=(8,5))
+
+    plt.imshow(
+        np.log10(rho_vis + 1e-20),
+        extent=(grid.x_vis_min, grid.x_vis_max,
+                grid.y_vis_min, grid.y_vis_max),
+        origin="lower",
+        cmap="magma",
+        aspect="auto",
+    )
+
+    step = 10
+
+    plt.quiver(
+        X[::step,::step],
+        Y[::step,::step],
+        vx[::step,::step],
+        vy[::step,::step],
+        color="cyan",
+        scale=30
+    )
+
+    plt.title(title)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.colorbar(label="log10 density")
+
+    plt.show()
+
+
+def debug_plot_divergence(theory, state, grid, title="Velocity divergence"):
+    """
+    Plot divergence of Bohmian velocity field.
+    Helps visualize compression / expansion regions.
+    """
+
+    rho = theory.density(state)
+    jx, jy, _ = theory.current(state)
+
+    eps = 1e-14
+
+    vx = jx / (rho + eps)
+    vy = jy / (rho + eps)
+
+    dvx_dx = np.gradient(vx, grid.dx, axis=1)
+    dvy_dy = np.gradient(vy, grid.dy, axis=0)
+
+    div = dvx_dx + dvy_dy
+
+    div_vis = div[grid.ys, grid.xs]
+
+    plt.figure(figsize=(8,5))
+
+    vmax = np.percentile(np.abs(div_vis), 99)
+
+    plt.imshow(
+        div_vis,
+        extent=(grid.x_vis_min, grid.x_vis_max,
+                grid.y_vis_min, grid.y_vis_max),
+        origin="lower",
+        cmap="seismic",
+        vmin=-vmax,
+        vmax=vmax,
+        aspect="auto",
+    )
+
+    plt.title(title)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.colorbar(label="div v")
+
+    plt.show()
+        
 # ============================================================
 # Diagnostic reference helpers
 # ============================================================
@@ -354,6 +454,188 @@ def run_diagnostics(
 
     print("\n================ DIAGNOSTIC BLOCK END ==================\n")
 
+# ============================================================
+# Phase + density composite debug
+# ============================================================
+
+def debug_plot_phase_density_composite(
+    state,
+    grid,
+    title="Phase + density composite",
+    density_gamma: float = 0.35,
+    density_floor: float = 1e-12,
+):
+    """
+    Quantum composite plot:
+      - hue   = phase arg(psi)
+      - value = density brightness
+      - saturation = 1
+
+    For spinor states, uses total density and first component phase by default.
+    """
+
+    if state.ndim == 2:
+        psi_vis = state[grid.ys, grid.xs]
+        rho_vis = np.abs(psi_vis) ** 2
+        phase_vis = np.angle(psi_vis)
+
+    elif state.ndim == 3:
+        psi_vis = state[:, grid.ys, grid.xs]
+        rho_vis = np.sum(np.abs(psi_vis) ** 2, axis=0)
+
+        # Use phase of dominant / first component for visualization
+        phase_vis = np.angle(psi_vis[0])
+    else:
+        raise ValueError(f"Unsupported state ndim={state.ndim}")
+
+    rho_norm = rho_vis / (np.max(rho_vis) + 1e-30)
+    value = np.clip(rho_norm, 0.0, 1.0) ** density_gamma
+
+    # Mask very weak regions so random phase there does not dominate
+    weak_mask = rho_norm < density_floor
+    value[weak_mask] = 0.0
+
+    # phase in [-pi, pi] -> hue in [0,1]
+    hue = (phase_vis + np.pi) / (2.0 * np.pi)
+    sat = np.ones_like(hue)
+
+    hsv = np.stack([hue, sat, value], axis=-1)
+    rgb = hsv_to_rgb(hsv)
+
+    plt.figure(figsize=(8, 5))
+    plt.imshow(
+        rgb,
+        extent=(grid.x_vis_min, grid.x_vis_max, grid.y_vis_min, grid.y_vis_max),
+        origin="lower",
+        aspect="auto",
+    )
+    plt.title(title)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.show()
+
+def debug_plot_phase_density_composite_with_contours(
+    state,
+    grid,
+    title="Phase + density composite + contours",
+    density_gamma: float = 0.35,
+    density_floor: float = 1e-12,
+):
+    from matplotlib.colors import hsv_to_rgb
+
+    if state.ndim == 2:
+        psi_vis = state[grid.ys, grid.xs]
+        rho_vis = np.abs(psi_vis) ** 2
+        phase_vis = np.angle(psi_vis)
+
+    elif state.ndim == 3:
+        psi_vis = state[:, grid.ys, grid.xs]
+        rho_vis = np.sum(np.abs(psi_vis) ** 2, axis=0)
+        phase_vis = np.angle(psi_vis[0])
+    else:
+        raise ValueError(f"Unsupported state ndim={state.ndim}")
+
+    rho_norm = rho_vis / (np.max(rho_vis) + 1e-30)
+    value = np.clip(rho_norm, 0.0, 1.0) ** density_gamma
+    value[rho_norm < density_floor] = 0.0
+
+    hue = (phase_vis + np.pi) / (2.0 * np.pi)
+    sat = np.ones_like(hue)
+
+    hsv = np.stack([hue, sat, value], axis=-1)
+    rgb = hsv_to_rgb(hsv)
+
+    plt.figure(figsize=(8, 5))
+    plt.imshow(
+        rgb,
+        extent=(grid.x_vis_min, grid.x_vis_max, grid.y_vis_min, grid.y_vis_max),
+        origin="lower",
+        aspect="auto",
+    )
+
+    X = grid.X_vis
+    Y = grid.Y_vis
+
+    # Density contours
+    levels = [0.05, 0.10, 0.20, 0.40, 0.70]
+    plt.contour(
+        X,
+        Y,
+        rho_norm,
+        levels=levels,
+        colors="white",
+        linewidths=0.7,
+        alpha=0.7,
+    )
+
+    plt.title(title)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.show()
+
+# ============================================================
+# Phase winding map (quantum vortices)
+# ============================================================
+
+# ============================================================
+# Phase winding map (quantum vortices)
+# ============================================================
+
+def debug_plot_phase_winding(state, grid, title="Phase winding map"):
+
+    if state.ndim == 2:
+        psi = state
+    elif state.ndim == 3:
+        psi = state[0]   # spinor tapauksessa ensimmäinen komponentti
+    else:
+        raise ValueError(f"Unsupported state ndim={state.ndim}")
+
+    phase = np.angle(psi)
+
+    # wrapped phase differences in [-pi, pi]
+    dpx = np.diff(phase, axis=1)
+    dpy = np.diff(phase, axis=0)
+
+    dpx = (dpx + np.pi) % (2.0 * np.pi) - np.pi
+    dpy = (dpy + np.pi) % (2.0 * np.pi) - np.pi
+
+    # circulation around each cell
+    # resulting shape: (Ny-1, Nx-1)
+    winding = (
+        dpx[:-1, :]      # top edge
+        + dpy[:, 1:]     # right edge
+        - dpx[1:, :]     # bottom edge
+        - dpy[:, :-1]    # left edge
+    ) / (2.0 * np.pi)
+
+    # grid.ys / grid.xs are slices -> convert carefully
+    y0 = grid.ys.start
+    y1 = grid.ys.stop - 1
+    x0 = grid.xs.start
+    x1 = grid.xs.stop - 1
+
+    winding_vis = winding[y0:y1, x0:x1]
+
+    plt.figure(figsize=(8, 5))
+    plt.imshow(
+        winding_vis,
+        extent=(
+            grid.x_vis_min,
+            grid.x_vis_max - grid.dx,
+            grid.y_vis_min,
+            grid.y_vis_max - grid.dy,
+        ),
+        origin="lower",
+        cmap="seismic",
+        vmin=-1,
+        vmax=1,
+        aspect="auto",
+    )
+    plt.title(title)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.colorbar(label="phase winding")
+    plt.show()
 
 # ============================================================
 # Main
@@ -363,7 +645,7 @@ def main():
     cfg = AppConfig()
 
     # --------------------------------------------------------
-    # 1) Build grid / potential / theory
+    # 1) Build grid / potential / theory / detector
     # --------------------------------------------------------
     grid = build_grid(
         visible_lx=cfg.VISIBLE_LX,
@@ -393,6 +675,7 @@ def main():
         potential = build_double_slit_and_caps(grid, cfg)
 
     theory = build_theory(cfg, grid, potential)
+    detector = build_detector(cfg, grid)
 
     # --------------------------------------------------------
     # 2) Initial state
@@ -408,6 +691,7 @@ def main():
     )
 
     state = theory.initialize_state(psi0)
+    detector.reset()
 
     # --------------------------------------------------------
     # 3) Forward simulation
@@ -417,18 +701,36 @@ def main():
     times = []
     norms = []
 
-    print(f"Forward simulation starts... theory={cfg.THEORY_NAME}")
+    detector_diags = []
+    detector_clicked = False
+    det_result_final = None
+
+    print(f"Forward simulation starts... theory={cfg.THEORY_NAME}, detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}")
     if cfg.THEORY_NAME == "dirac":
         vx_est, vy_est, sp_est = theory.expected_group_velocity(cfg.k0x, cfg.k0y)
         print(f"[DIRAC V_EST] vx≈{vx_est:.6f}, vy≈{vy_est:.6f}, |v|≈{sp_est:.6f}")
 
     for n in range(cfg.n_steps + 1):
+        t_now = n * cfg.dt
+
         rho = theory.density(state)
         norm_now = norm_prob(rho, grid.dx, grid.dy)
 
+        # detector step on full state
+        det_res = detector.step(state, cfg.dt, t=t_now)
+        detector_diags.append(det_res.aux if det_res.aux is not None else {})
+
+        if det_res.clicked and not detector_clicked:
+            detector_clicked = True
+            det_result_final = det_res
+            print(
+                f"[DETECTOR] clicked at step={n}, t={t_now:.6f}, "
+                f"x={det_res.click_x}, y={det_res.click_y}"
+            )
+
         if n % cfg.save_every == 0:
             frames_density.append(rho[grid.ys, grid.xs].copy())
-            times.append(n * cfg.dt)
+            times.append(t_now)
             norms.append(norm_now)
 
             if cfg.SAVE_COMPLEX_STATE_FRAMES:
@@ -465,6 +767,52 @@ def main():
     tau_step = cfg.save_every * cfg.dt
 
     print("Forward done.")
+
+    # --------------------------------------------------------
+    # Debug flow plots
+    # --------------------------------------------------------
+
+    if cfg.DEBUG_FLOW_FIELD:
+        print("[DEBUG] Plotting quantum flow field...")
+        debug_plot_quantum_flow(
+            theory=theory,
+            state=state,
+            grid=grid,
+            title="Quantum flow field (final state)"
+        )
+
+    if cfg.DEBUG_DIVERGENCE:
+        print("[DEBUG] Plotting velocity divergence...")
+        debug_plot_divergence(
+            theory=theory,
+            state=state,
+            grid=grid,
+            title="Velocity divergence (final state)"
+        )
+
+    if cfg.DEBUG_PHASE_DENSITY:
+        print("[DEBUG] Plotting phase+density composite...")
+        debug_plot_phase_density_composite(
+            state=state,
+            grid=grid,
+            title="Phase + density composite (final state)"
+        )
+
+    if cfg.DEBUG_PHASE_DENSITY_CONTOURS:
+        print("[DEBUG] Plotting phase+density composite with contours...")
+        debug_plot_phase_density_composite_with_contours(
+            state=state,
+            grid=grid,
+            title="Phase + density composite + contours (final state)"
+        )
+                
+    if cfg.DEBUG_PHASE_WINDING:
+        print("[DEBUG] Plotting phase winding map...")
+        debug_plot_phase_winding(
+            state=state,
+            grid=grid,
+            title="Phase winding (final state)"
+        )
 
     # --------------------------------------------------------
     # Forward debug checks
@@ -506,6 +854,7 @@ def main():
                 X_like=grid.X_vis,
                 Y_like=grid.Y_vis,
             )
+
     # --------------------------------------------------------
     # Continuity equation debug
     # --------------------------------------------------------
@@ -542,7 +891,7 @@ def main():
                 plt.figure(figsize=(8, 5))
                 if cfg.USE_LOG_OUTPUT:
                     plt.imshow(
-                        np.log10(frames_density[-1] + 1e-20), 
+                        np.log10(frames_density[-1] + 1e-20),
                         extent=(
                             grid.x_vis_min, grid.x_vis_max,
                             grid.y_vis_min, grid.y_vis_max,
@@ -550,6 +899,7 @@ def main():
                         origin="lower",
                         cmap="magma",
                         aspect="auto",
+                        norm=PowerNorm(gamma=0.35),
                     )
                 else:
                     plt.imshow(
@@ -561,6 +911,7 @@ def main():
                         origin="lower",
                         cmap="magma",
                         aspect="auto",
+                        norm=PowerNorm(gamma=0.35),
                     )
                 plt.colorbar(label="rho")
                 plt.title(f"Forward density only (debug free case), t={times[-1]:.3f}")
@@ -572,27 +923,50 @@ def main():
     # --------------------------------------------------------
     # 4) Detection time + click
     # --------------------------------------------------------
-    idx_det, t_det, x_click, y_click, screen_int = detect_click_from_screen(
-        frames_density=frames_density,
-        times=times,
-        screen_mask_vis=potential.screen_mask_vis,
-        dx=grid.dx,
-        dy=grid.dy,
-        X_vis=grid.X_vis,
-        Y_vis=grid.Y_vis,
-        rng_seed=cfg.CLICK_RNG_SEED,
-        click_mode=cfg.CLICK_MODE,
-        force_click_x=cfg.FORCE_CLICK_X,
-        force_click_y=cfg.FORCE_CLICK_Y,
-    )
+    # First preference: detector result
+    if detector_clicked and det_result_final is not None:
+        x_click = float(det_result_final.click_x)
+        y_click = float(det_result_final.click_y)
+
+        # snap t_det to nearest saved forward frame for backward library alignment
+        idx_det = int(np.argmin(np.abs(times - float(det_result_final.click_time if det_result_final.click_time is not None else times[-1]))))
+        t_det = float(times[idx_det])
+
+        screen_int = np.array(
+            [np.sum(frames_density[i][potential.screen_mask_vis]) * grid.dx * grid.dy for i in range(Nt)],
+            dtype=float,
+        )
+
+        print(
+            f"[CLICK] detector-driven click: "
+            f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f}), "
+            f"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
+        )
+    else:
+        # fallback to old screen/Born-style detection
+        idx_det, t_det, x_click, y_click, screen_int = detect_click_from_screen(
+            frames_density=frames_density,
+            times=times,
+            screen_mask_vis=potential.screen_mask_vis,
+            dx=grid.dx,
+            dy=grid.dy,
+            X_vis=grid.X_vis,
+            Y_vis=grid.Y_vis,
+            rng_seed=cfg.CLICK_RNG_SEED,
+            click_mode=cfg.CLICK_MODE,
+            force_click_x=cfg.FORCE_CLICK_X,
+            force_click_y=cfg.FORCE_CLICK_Y,
+        )
+
+        print(
+            f"[CLICK] fallback screen click: "
+            f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f}), "
+            f"click_mode={cfg.CLICK_MODE}"
+        )
 
     print(
-        f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f}), "
-        f"click_mode={cfg.CLICK_MODE}"
-    )
-    print(
         f"[SCREEN] max={np.max(screen_int):.6e} "
-        f"argmax_i={idx_det} t_det={t_det:.6f} "
+        f"argmax_i={np.argmax(screen_int)} t_argmax={times[int(np.argmax(screen_int))]:.6f} "
         f"first={screen_int[0]:.6e} last={screen_int[-1]:.6e}"
     )
 
@@ -811,6 +1185,24 @@ def main():
         )
 
     # --------------------------------------------------------
+    # Data dump
+    # --------------------------------------------------------
+#    np.savez_compressed(
+#        "output.npz",
+#        times=times,
+#        frames_density=frames_density,
+#        state_vis_frames=state_vis_frames,
+#        ridge_x=ridge_x_init,
+#        ridge_y=ridge_y_init,
+#        screen_int=screen_int,
+#        phi_tau_frames=phi_tau_frames,
+#        click_x=x_click,
+#        click_y=y_click,
+#        t_det=t_det,
+#    )
+#    json.dump(config_dict, open("run_meta.json", "w"), indent=2)
+
+    # --------------------------------------------------------
     # 9) Visualization setup
     # --------------------------------------------------------
     extent = (
@@ -832,10 +1224,9 @@ def main():
         ),
         extent=extent,
         origin="lower",
-        vmin=0.0,
-        vmax=1.0,
         cmap="magma",
         interpolation=cfg.IM_INTERPOLATION,
+        norm=PowerNorm(gamma=0.35),
     )
 
     ax.axvline(cfg.barrier_center_x, color="white", linestyle="--", alpha=0.6)
@@ -845,7 +1236,8 @@ def main():
 
     title = ax.set_title(
         rf"ρ(t): σT={sigma_init:.3f}, t={times[0]:.3f}, "
-        rf"ridge={cfg.RIDGE_MODE}, theory={cfg.THEORY_NAME}"
+        rf"ridge={cfg.RIDGE_MODE}, theory={cfg.THEORY_NAME}, "
+        rf"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
     )
 
     ridge_marker, = ax.plot(
@@ -857,6 +1249,17 @@ def main():
         color="lime",
         alpha=0.9,
         label=f"ridge ({cfg.RIDGE_MODE})",
+    )
+
+    click_marker, = ax.plot(
+        [x_click],
+        [y_click],
+        marker="x",
+        markersize=9,
+        linestyle="None",
+        color="yellow",
+        alpha=0.9,
+        label="click",
     )
 
     ridge_trail, = ax.plot(
@@ -1030,6 +1433,7 @@ def main():
             rf"t={times[i]:.3f}",
             rf"ridge={cfg.RIDGE_MODE}",
             rf"theory={cfg.THEORY_NAME}",
+            rf"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}",
             rf"norm≈{norms[i]:.4f}",
             rf"Γ≈{ridge_s[0][i]:.3e}",
         ]
@@ -1134,7 +1538,7 @@ def main():
         update_bohmian_overlay(i)
         title.set_text(make_title(i))
 
-        artists = [im, ridge_marker, ridge_trail]
+        artists = [im, ridge_marker, click_marker, ridge_trail]
 
         if flow_quiver is not None:
             artists.append(flow_quiver)
@@ -1194,6 +1598,15 @@ def main():
                 )
             else:
                 print(f"[BOHM] traj {k}: no valid steps")
+
+    if detector_clicked and det_result_final is not None:
+        print(
+            f"[DETECTOR FINAL] clicked=True "
+            f"x={det_result_final.click_x}, y={det_result_final.click_y}, "
+            f"t={det_result_final.click_time}"
+        )
+    else:
+        print("[DETECTOR FINAL] clicked=False (fallback click may have been used)")
 
     # --------------------------------------------------------
     # 15) Save + show

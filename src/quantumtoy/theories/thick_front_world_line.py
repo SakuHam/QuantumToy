@@ -72,7 +72,7 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
     worldline_mode: str = "forced_weaker_branch"
 
     # Keep modest for normal random-bias modes.
-    worldline_bias_strength: float = 0.01
+    worldline_bias_strength: float = 0.05
 
     # Correlation length in physical units for random bias
     worldline_bias_sigma: float = 2.0
@@ -528,7 +528,6 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
         if self.worldline_bias_strength <= 0.0:
             return None
         if self.worldline_mode == "forced_weaker_branch":
-            # initialized later from branch field
             return self._worldline_bias_field
 
         if self._worldline_bias_field is None:
@@ -581,17 +580,8 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
         Apply local thick-front sharpening + optional branch competition
         + optional persistent frozen worldline bias.
 
-        Follows the newer ThickFrontOptimizedTheory structure:
-          1) compute gain from psi
-          2) optional gain blur
-          3) form psi_tmp
-          4) recompute align/rho from psi_tmp
-          5) compute competition from psi_tmp fields
-          6) apply optional detector-gated competition boost
-          7) for forced_weaker_branch: initialize only after branch split exists
-          8) inject frozen worldline bias into gain and/or competition
-          9) apply damping
-         10) optional phase relaxation
+        Updated to be compatible with the newer flow-aware
+        ThickFrontOptimizedTheory structure.
         """
         _assert_complex_array_2d(psi, "psi")
         _assert_finite_scalar(dt, "dt")
@@ -639,6 +629,33 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
         # --------------------------------------------
         align_real_tmp, rho_tmp, u_local_tmp = self._coherence_alignment_score(psi_tmp)
 
+        # --------------------------------------------
+        # Flow field from sharpened psi_tmp
+        # --------------------------------------------
+        jx_tmp = None
+        jy_tmp = None
+        speed_tmp = None
+        ux_tmp = None
+        uy_tmp = None
+        flow_valid_mask = None
+
+        if self.front_branch_use_flow_direction:
+            (
+                jx_tmp,
+                jy_tmp,
+                rho_flow_tmp,
+                speed_tmp,
+                ux_tmp,
+                uy_tmp,
+                flow_valid_mask,
+            ) = self._flow_direction_field(psi_tmp)
+
+            if self.front_debug_checks:
+                _assert(
+                    np.allclose(rho_flow_tmp, rho_tmp, atol=1e-12, rtol=1e-10),
+                    "rho from flow field and rho from coherence score differ unexpectedly"
+                )
+
         competition_raw = None
         competition_gate = None
         gamma_like = None
@@ -646,14 +663,26 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
         comp_dt = None
         detector_gate = None
         local_strength = None
+        transverse_best = None
+        direction_mismatch_best = None
 
         # --------------------------------------------
         # Competition from post-gain fields
         # --------------------------------------------
         if self.front_branch_competition_strength > 0.0:
-            gamma_like, neighbor_max, competition_raw, competition_gate = self._branch_competition_field(
+            (
+                gamma_like,
+                neighbor_max,
+                competition_raw,
+                competition_gate,
+                transverse_best,
+                direction_mismatch_best,
+            ) = self._branch_competition_field(
                 rho=rho_tmp,
                 align_real=align_real_tmp,
+                ux=ux_tmp,
+                uy=uy_tmp,
+                valid_mask=flow_valid_mask,
             )
 
             if self.front_branch_detector_gate_enabled:
@@ -721,7 +750,6 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
 
             _assert_real_array_2d(bias_effect, "bias_effect")
 
-            # forced_weaker_branch behaves like "both" after initialization
             active_mode = self.worldline_mode
             if active_mode == "forced_weaker_branch":
                 active_mode = "both"
@@ -736,11 +764,39 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
                 align_real_tmp, rho_tmp, u_local_tmp = self._coherence_alignment_score(psi_tmp)
                 prob_after_gain = self._state_probability(psi_tmp)
 
-                # if competition was already computed, recompute it so it matches psi_tmp
+                # refresh flow diagnostics after bias
+                if self.front_branch_use_flow_direction:
+                    (
+                        jx_tmp,
+                        jy_tmp,
+                        rho_flow_tmp,
+                        speed_tmp,
+                        ux_tmp,
+                        uy_tmp,
+                        flow_valid_mask,
+                    ) = self._flow_direction_field(psi_tmp)
+
+                    if self.front_debug_checks:
+                        _assert(
+                            np.allclose(rho_flow_tmp, rho_tmp, atol=1e-12, rtol=1e-10),
+                            "rho from flow field and rho from coherence score differ unexpectedly after worldline gain bias"
+                        )
+
+                # recompute competition so it matches biased psi_tmp
                 if self.front_branch_competition_strength > 0.0:
-                    gamma_like, neighbor_max, competition_raw, competition_gate = self._branch_competition_field(
+                    (
+                        gamma_like,
+                        neighbor_max,
+                        competition_raw,
+                        competition_gate,
+                        transverse_best,
+                        direction_mismatch_best,
+                    ) = self._branch_competition_field(
                         rho=rho_tmp,
                         align_real=align_real_tmp,
+                        ux=ux_tmp,
+                        uy=uy_tmp,
+                        valid_mask=flow_valid_mask,
                     )
 
             # Positive frozen bias reduces competition damping on favored branch
@@ -814,7 +870,16 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
             "prob_after_gain": float(prob_after_gain),
             "prob_after_comp": float(prob_after_comp),
             "prob_after_relax": float(prob_after_relax),
+
+            "flow_direction_enabled": bool(self.front_branch_use_flow_direction),
         }
+
+        if speed_tmp is not None:
+            aux_front["flow_speed_mean"] = float(np.mean(speed_tmp))
+            aux_front["flow_speed_max"] = float(np.max(speed_tmp))
+            aux_front["flow_valid_fraction"] = float(np.mean(flow_valid_mask.astype(float)))
+            aux_front["flow_jx_mean_abs"] = float(np.mean(np.abs(jx_tmp)))
+            aux_front["flow_jy_mean_abs"] = float(np.mean(np.abs(jy_tmp)))
 
         if gamma_like is not None:
             aux_front["branch_gamma_like_mean"] = float(np.mean(gamma_like))
@@ -839,6 +904,18 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
         if local_strength is not None:
             aux_front["branch_local_strength_mean"] = float(np.mean(local_strength))
             aux_front["branch_local_strength_max"] = float(np.max(local_strength))
+
+        if transverse_best is not None:
+            aux_front["branch_transverse_best_mean"] = float(np.mean(transverse_best))
+            aux_front["branch_transverse_best_max"] = float(np.max(transverse_best))
+
+        if direction_mismatch_best is not None:
+            aux_front["branch_direction_mismatch_best_mean"] = float(
+                np.mean(direction_mismatch_best)
+            )
+            aux_front["branch_direction_mismatch_best_max"] = float(
+                np.max(direction_mismatch_best)
+            )
 
         if detector_gate is not None:
             aux_front["branch_detector_gate_mean"] = float(np.mean(detector_gate))
@@ -905,6 +982,12 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
             "front_branch_competition_radius": int(self.front_branch_competition_radius),
             "front_branch_competition_margin": float(self.front_branch_competition_margin),
             "front_branch_competition_blur_sigma": float(self.front_branch_competition_blur_sigma),
+
+            "front_branch_use_flow_direction": bool(self.front_branch_use_flow_direction),
+            "front_branch_direction_mismatch_power": float(self.front_branch_direction_mismatch_power),
+            "front_branch_transverse_weight_power": float(self.front_branch_transverse_weight_power),
+            "front_branch_min_speed_fraction": float(self.front_branch_min_speed_fraction),
+            "front_branch_min_rho_fraction": float(self.front_branch_min_rho_fraction),
 
             "front_branch_detector_gate_enabled": bool(self.front_branch_detector_gate_enabled),
             "front_branch_detector_gate_center_x": float(self.front_branch_detector_gate_center_x),

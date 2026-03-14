@@ -8,15 +8,26 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "thick_front_measured_guided"
+    THEORY_NAME: str = "schrodinger"
 
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
 
     # ============================================================
+    # Detector
+    # ============================================================
+
+    DETECTOR_NAME = "born"   # tai "emergent"
+    DETECTOR_GATE_CENTER_X = 10.0
+    DETECTOR_GATE_WIDTH = 0.75
+    DETECTOR_CLICK_THRESHOLD = 1.0
+    DETECTOR_MIN_TOTAL_WEIGHT = 1e-6
+    DETECTOR_MIN_PEAK_WEIGHT = 1e-8
+
+    # ============================================================
     # Ridge
     # ============================================================
-    RIDGE_MODE: str = "centroid_top_snap_localmax"
+    RIDGE_MODE: str = "centroid_top"
     CENTROID_TOP_Q: float = 0.02
     LOCALMAX_RADIUS: int = 20
     LOCALMAX_SMOOTH_ALPHA: float = 0.0
@@ -53,11 +64,16 @@ class AppConfig:
     PRINT_ALIGNMENT_STATS: bool = True
     ENABLE_DIVERGENCE_DIAGNOSTIC: bool = True
     PRINT_DIVERGENCE_STATS: bool = True
+    DEBUG_FLOW_FIELD = False
+    DEBUG_DIVERGENCE = False
+    DEBUG_PHASE_DENSITY = False
+    DEBUG_PHASE_DENSITY_CONTOURS = False
+    DEBUG_PHASE_WINDING = False
 
     # ============================================================
     # Bohmian overlay
     # ============================================================
-    ENABLE_BOHMIAN_OVERLAY: bool = True
+    ENABLE_BOHMIAN_OVERLAY: bool = False
 
     # init modes:
     #   "born_initial"
