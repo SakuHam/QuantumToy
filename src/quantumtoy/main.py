@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Slider
+from matplotlib.colors import PowerNorm
 
 from config import AppConfig
 from core.grid import build_grid
@@ -81,7 +82,104 @@ def estimate_group_velocity(cfg, theory) -> float:
 
     return float(cfg.k0x / (cfg.m_mass + 1e-30))
 
+# ============================================================
+# Quantum flow debug plots
+# ============================================================
 
+def debug_plot_quantum_flow(theory, state, grid, title="Quantum flow debug"):
+    """
+    Plot quantum velocity field v = j / rho on top of density.
+    Extremely useful for detecting jet artifacts and numerical issues.
+    """
+
+    rho = theory.density(state)
+    jx, jy, _ = theory.current(state)
+
+    rho_vis = rho[grid.ys, grid.xs]
+    jx_vis = jx[grid.ys, grid.xs]
+    jy_vis = jy[grid.ys, grid.xs]
+
+    eps = 1e-14
+
+    vx = jx_vis / (rho_vis + eps)
+    vy = jy_vis / (rho_vis + eps)
+
+    X = grid.X_vis
+    Y = grid.Y_vis
+
+    plt.figure(figsize=(8,5))
+
+    plt.imshow(
+        np.log10(rho_vis + 1e-20),
+        extent=(grid.x_vis_min, grid.x_vis_max,
+                grid.y_vis_min, grid.y_vis_max),
+        origin="lower",
+        cmap="magma",
+        aspect="auto",
+    )
+
+    step = 10
+
+    plt.quiver(
+        X[::step,::step],
+        Y[::step,::step],
+        vx[::step,::step],
+        vy[::step,::step],
+        color="cyan",
+        scale=30
+    )
+
+    plt.title(title)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.colorbar(label="log10 density")
+
+    plt.show()
+
+
+def debug_plot_divergence(theory, state, grid, title="Velocity divergence"):
+    """
+    Plot divergence of Bohmian velocity field.
+    Helps visualize compression / expansion regions.
+    """
+
+    rho = theory.density(state)
+    jx, jy, _ = theory.current(state)
+
+    eps = 1e-14
+
+    vx = jx / (rho + eps)
+    vy = jy / (rho + eps)
+
+    dvx_dx = np.gradient(vx, grid.dx, axis=1)
+    dvy_dy = np.gradient(vy, grid.dy, axis=0)
+
+    div = dvx_dx + dvy_dy
+
+    div_vis = div[grid.ys, grid.xs]
+
+    plt.figure(figsize=(8,5))
+
+    vmax = np.percentile(np.abs(div_vis), 99)
+
+    plt.imshow(
+        div_vis,
+        extent=(grid.x_vis_min, grid.x_vis_max,
+                grid.y_vis_min, grid.y_vis_max),
+        origin="lower",
+        cmap="seismic",
+        vmin=-vmax,
+        vmax=vmax,
+        aspect="auto",
+    )
+
+    plt.title(title)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.colorbar(label="div v")
+
+    plt.show()
+        
 # ============================================================
 # Diagnostic reference helpers
 # ============================================================
@@ -356,6 +454,188 @@ def run_diagnostics(
 
     print("\n================ DIAGNOSTIC BLOCK END ==================\n")
 
+# ============================================================
+# Phase + density composite debug
+# ============================================================
+
+def debug_plot_phase_density_composite(
+    state,
+    grid,
+    title="Phase + density composite",
+    density_gamma: float = 0.35,
+    density_floor: float = 1e-12,
+):
+    """
+    Quantum composite plot:
+      - hue   = phase arg(psi)
+      - value = density brightness
+      - saturation = 1
+
+    For spinor states, uses total density and first component phase by default.
+    """
+
+    if state.ndim == 2:
+        psi_vis = state[grid.ys, grid.xs]
+        rho_vis = np.abs(psi_vis) ** 2
+        phase_vis = np.angle(psi_vis)
+
+    elif state.ndim == 3:
+        psi_vis = state[:, grid.ys, grid.xs]
+        rho_vis = np.sum(np.abs(psi_vis) ** 2, axis=0)
+
+        # Use phase of dominant / first component for visualization
+        phase_vis = np.angle(psi_vis[0])
+    else:
+        raise ValueError(f"Unsupported state ndim={state.ndim}")
+
+    rho_norm = rho_vis / (np.max(rho_vis) + 1e-30)
+    value = np.clip(rho_norm, 0.0, 1.0) ** density_gamma
+
+    # Mask very weak regions so random phase there does not dominate
+    weak_mask = rho_norm < density_floor
+    value[weak_mask] = 0.0
+
+    # phase in [-pi, pi] -> hue in [0,1]
+    hue = (phase_vis + np.pi) / (2.0 * np.pi)
+    sat = np.ones_like(hue)
+
+    hsv = np.stack([hue, sat, value], axis=-1)
+    rgb = hsv_to_rgb(hsv)
+
+    plt.figure(figsize=(8, 5))
+    plt.imshow(
+        rgb,
+        extent=(grid.x_vis_min, grid.x_vis_max, grid.y_vis_min, grid.y_vis_max),
+        origin="lower",
+        aspect="auto",
+    )
+    plt.title(title)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.show()
+
+def debug_plot_phase_density_composite_with_contours(
+    state,
+    grid,
+    title="Phase + density composite + contours",
+    density_gamma: float = 0.35,
+    density_floor: float = 1e-12,
+):
+    from matplotlib.colors import hsv_to_rgb
+
+    if state.ndim == 2:
+        psi_vis = state[grid.ys, grid.xs]
+        rho_vis = np.abs(psi_vis) ** 2
+        phase_vis = np.angle(psi_vis)
+
+    elif state.ndim == 3:
+        psi_vis = state[:, grid.ys, grid.xs]
+        rho_vis = np.sum(np.abs(psi_vis) ** 2, axis=0)
+        phase_vis = np.angle(psi_vis[0])
+    else:
+        raise ValueError(f"Unsupported state ndim={state.ndim}")
+
+    rho_norm = rho_vis / (np.max(rho_vis) + 1e-30)
+    value = np.clip(rho_norm, 0.0, 1.0) ** density_gamma
+    value[rho_norm < density_floor] = 0.0
+
+    hue = (phase_vis + np.pi) / (2.0 * np.pi)
+    sat = np.ones_like(hue)
+
+    hsv = np.stack([hue, sat, value], axis=-1)
+    rgb = hsv_to_rgb(hsv)
+
+    plt.figure(figsize=(8, 5))
+    plt.imshow(
+        rgb,
+        extent=(grid.x_vis_min, grid.x_vis_max, grid.y_vis_min, grid.y_vis_max),
+        origin="lower",
+        aspect="auto",
+    )
+
+    X = grid.X_vis
+    Y = grid.Y_vis
+
+    # Density contours
+    levels = [0.05, 0.10, 0.20, 0.40, 0.70]
+    plt.contour(
+        X,
+        Y,
+        rho_norm,
+        levels=levels,
+        colors="white",
+        linewidths=0.7,
+        alpha=0.7,
+    )
+
+    plt.title(title)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.show()
+
+# ============================================================
+# Phase winding map (quantum vortices)
+# ============================================================
+
+# ============================================================
+# Phase winding map (quantum vortices)
+# ============================================================
+
+def debug_plot_phase_winding(state, grid, title="Phase winding map"):
+
+    if state.ndim == 2:
+        psi = state
+    elif state.ndim == 3:
+        psi = state[0]   # spinor tapauksessa ensimmäinen komponentti
+    else:
+        raise ValueError(f"Unsupported state ndim={state.ndim}")
+
+    phase = np.angle(psi)
+
+    # wrapped phase differences in [-pi, pi]
+    dpx = np.diff(phase, axis=1)
+    dpy = np.diff(phase, axis=0)
+
+    dpx = (dpx + np.pi) % (2.0 * np.pi) - np.pi
+    dpy = (dpy + np.pi) % (2.0 * np.pi) - np.pi
+
+    # circulation around each cell
+    # resulting shape: (Ny-1, Nx-1)
+    winding = (
+        dpx[:-1, :]      # top edge
+        + dpy[:, 1:]     # right edge
+        - dpx[1:, :]     # bottom edge
+        - dpy[:, :-1]    # left edge
+    ) / (2.0 * np.pi)
+
+    # grid.ys / grid.xs are slices -> convert carefully
+    y0 = grid.ys.start
+    y1 = grid.ys.stop - 1
+    x0 = grid.xs.start
+    x1 = grid.xs.stop - 1
+
+    winding_vis = winding[y0:y1, x0:x1]
+
+    plt.figure(figsize=(8, 5))
+    plt.imshow(
+        winding_vis,
+        extent=(
+            grid.x_vis_min,
+            grid.x_vis_max - grid.dx,
+            grid.y_vis_min,
+            grid.y_vis_max - grid.dy,
+        ),
+        origin="lower",
+        cmap="seismic",
+        vmin=-1,
+        vmax=1,
+        aspect="auto",
+    )
+    plt.title(title)
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.colorbar(label="phase winding")
+    plt.show()
 
 # ============================================================
 # Main
@@ -489,6 +769,52 @@ def main():
     print("Forward done.")
 
     # --------------------------------------------------------
+    # Debug flow plots
+    # --------------------------------------------------------
+
+    if cfg.DEBUG_FLOW_FIELD:
+        print("[DEBUG] Plotting quantum flow field...")
+        debug_plot_quantum_flow(
+            theory=theory,
+            state=state,
+            grid=grid,
+            title="Quantum flow field (final state)"
+        )
+
+    if cfg.DEBUG_DIVERGENCE:
+        print("[DEBUG] Plotting velocity divergence...")
+        debug_plot_divergence(
+            theory=theory,
+            state=state,
+            grid=grid,
+            title="Velocity divergence (final state)"
+        )
+
+    if cfg.DEBUG_PHASE_DENSITY:
+        print("[DEBUG] Plotting phase+density composite...")
+        debug_plot_phase_density_composite(
+            state=state,
+            grid=grid,
+            title="Phase + density composite (final state)"
+        )
+
+    if cfg.DEBUG_PHASE_DENSITY_CONTOURS:
+        print("[DEBUG] Plotting phase+density composite with contours...")
+        debug_plot_phase_density_composite_with_contours(
+            state=state,
+            grid=grid,
+            title="Phase + density composite + contours (final state)"
+        )
+                
+    if cfg.DEBUG_PHASE_WINDING:
+        print("[DEBUG] Plotting phase winding map...")
+        debug_plot_phase_winding(
+            state=state,
+            grid=grid,
+            title="Phase winding (final state)"
+        )
+
+    # --------------------------------------------------------
     # Forward debug checks
     # --------------------------------------------------------
     t_final = cfg.n_steps * cfg.dt
@@ -573,6 +899,7 @@ def main():
                         origin="lower",
                         cmap="magma",
                         aspect="auto",
+                        norm=PowerNorm(gamma=0.35),
                     )
                 else:
                     plt.imshow(
@@ -584,6 +911,7 @@ def main():
                         origin="lower",
                         cmap="magma",
                         aspect="auto",
+                        norm=PowerNorm(gamma=0.35),
                     )
                 plt.colorbar(label="rho")
                 plt.title(f"Forward density only (debug free case), t={times[-1]:.3f}")
@@ -857,6 +1185,24 @@ def main():
         )
 
     # --------------------------------------------------------
+    # Data dump
+    # --------------------------------------------------------
+#    np.savez_compressed(
+#        "output.npz",
+#        times=times,
+#        frames_density=frames_density,
+#        state_vis_frames=state_vis_frames,
+#        ridge_x=ridge_x_init,
+#        ridge_y=ridge_y_init,
+#        screen_int=screen_int,
+#        phi_tau_frames=phi_tau_frames,
+#        click_x=x_click,
+#        click_y=y_click,
+#        t_det=t_det,
+#    )
+#    json.dump(config_dict, open("run_meta.json", "w"), indent=2)
+
+    # --------------------------------------------------------
     # 9) Visualization setup
     # --------------------------------------------------------
     extent = (
@@ -878,10 +1224,9 @@ def main():
         ),
         extent=extent,
         origin="lower",
-        vmin=0.0,
-        vmax=1.0,
         cmap="magma",
         interpolation=cfg.IM_INTERPOLATION,
+        norm=PowerNorm(gamma=0.35),
     )
 
     ax.axvline(cfg.barrier_center_x, color="white", linestyle="--", alpha=0.6)

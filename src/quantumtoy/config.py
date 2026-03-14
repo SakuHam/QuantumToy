@@ -64,11 +64,16 @@ class AppConfig:
     PRINT_ALIGNMENT_STATS: bool = True
     ENABLE_DIVERGENCE_DIAGNOSTIC: bool = True
     PRINT_DIVERGENCE_STATS: bool = True
+    DEBUG_FLOW_FIELD = False
+    DEBUG_DIVERGENCE = False
+    DEBUG_PHASE_DENSITY = False
+    DEBUG_PHASE_DENSITY_CONTOURS = False
+    DEBUG_PHASE_WINDING = False
 
     # ============================================================
     # Bohmian overlay
     # ============================================================
-    ENABLE_BOHMIAN_OVERLAY: bool = True
+    ENABLE_BOHMIAN_OVERLAY: bool = False
 
     # init modes:
     #   "born_initial"
