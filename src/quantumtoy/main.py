@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from matplotlib.widgets import Slider
-from matplotlib.colors import PowerNorm
 
 from config import AppConfig
 from core.grid import build_grid
 from core.potentials import build_double_slit_and_caps
 from core.utils import make_packet, norm_prob
+from core.simulation_types import PotentialSpec
 from theories.registry import build_theory
 
 from detection.factory import build_detector
@@ -18,7 +17,9 @@ from analysis.emix import (
     detect_click_from_screen,
     build_backward_library,
     build_Emix_from_phi_tau,
+    build_Emix_density_from_phi_tau,
     make_rho,
+    make_emix_density,
 )
 from analysis.ridge import compute_ridge_xy
 from analysis.current import alignment_and_diagnostics_from_state_frames
@@ -28,29 +29,8 @@ from analysis.bohmian import (
     integrate_bohmian_trajectories,
 )
 from analysis.debug_continuity import continuity_residual_from_state_frames
-from core.simulation_types import PotentialSpec
-from analysis.emix import make_emix_density
-from analysis.emix import build_Emix_density_from_phi_tau
 
-
-# ============================================================
-# Display helper
-# ============================================================
-
-def gamma_display(
-    arr: np.ndarray,
-    vref: float,
-    gamma: float = 0.5,
-    use_fixed_scale: bool = True,
-):
-    if use_fixed_scale:
-        disp = np.clip(arr / (vref + 1e-30), 0.0, 1.0)
-        return disp ** gamma
-
-    m = float(np.max(arr))
-    if m <= 0:
-        return arr
-    return (arr / m) ** gamma
+from run_io import save_run_bundle
 
 
 # ============================================================
@@ -77,112 +57,10 @@ def estimate_group_velocity(cfg, theory) -> float:
         p0 = float(theory.hbar * cfg.k0x)
         mc2 = float(theory.m_mass * theory.c_light**2)
         E0 = float(np.sqrt((theory.c_light * p0) ** 2 + mc2**2))
-        v_est = float((theory.c_light**2 * p0) / (E0 + 1e-30))
-        return v_est
+        return float((theory.c_light**2 * p0) / (E0 + 1e-30))
 
     return float(cfg.k0x / (cfg.m_mass + 1e-30))
 
-# ============================================================
-# Quantum flow debug plots
-# ============================================================
-
-def debug_plot_quantum_flow(theory, state, grid, title="Quantum flow debug"):
-    """
-    Plot quantum velocity field v = j / rho on top of density.
-    Extremely useful for detecting jet artifacts and numerical issues.
-    """
-
-    rho = theory.density(state)
-    jx, jy, _ = theory.current(state)
-
-    rho_vis = rho[grid.ys, grid.xs]
-    jx_vis = jx[grid.ys, grid.xs]
-    jy_vis = jy[grid.ys, grid.xs]
-
-    eps = 1e-14
-
-    vx = jx_vis / (rho_vis + eps)
-    vy = jy_vis / (rho_vis + eps)
-
-    X = grid.X_vis
-    Y = grid.Y_vis
-
-    plt.figure(figsize=(8,5))
-
-    plt.imshow(
-        np.log10(rho_vis + 1e-20),
-        extent=(grid.x_vis_min, grid.x_vis_max,
-                grid.y_vis_min, grid.y_vis_max),
-        origin="lower",
-        cmap="magma",
-        aspect="auto",
-    )
-
-    step = 10
-
-    plt.quiver(
-        X[::step,::step],
-        Y[::step,::step],
-        vx[::step,::step],
-        vy[::step,::step],
-        color="cyan",
-        scale=30
-    )
-
-    plt.title(title)
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.colorbar(label="log10 density")
-
-    plt.show()
-
-
-def debug_plot_divergence(theory, state, grid, title="Velocity divergence"):
-    """
-    Plot divergence of Bohmian velocity field.
-    Helps visualize compression / expansion regions.
-    """
-
-    rho = theory.density(state)
-    jx, jy, _ = theory.current(state)
-
-    eps = 1e-14
-
-    vx = jx / (rho + eps)
-    vy = jy / (rho + eps)
-
-    dvx_dx = np.gradient(vx, grid.dx, axis=1)
-    dvy_dy = np.gradient(vy, grid.dy, axis=0)
-
-    div = dvx_dx + dvy_dy
-
-    div_vis = div[grid.ys, grid.xs]
-
-    plt.figure(figsize=(8,5))
-
-    vmax = np.percentile(np.abs(div_vis), 99)
-
-    plt.imshow(
-        div_vis,
-        extent=(grid.x_vis_min, grid.x_vis_max,
-                grid.y_vis_min, grid.y_vis_max),
-        origin="lower",
-        cmap="seismic",
-        vmin=-vmax,
-        vmax=vmax,
-        aspect="auto",
-    )
-
-    plt.title(title)
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.colorbar(label="div v")
-
-    plt.show()
-        
-# ============================================================
-# Diagnostic reference helpers
-# ============================================================
 
 def _forward_density_from_state_vis_frames(state_vis_frames: np.ndarray) -> np.ndarray:
     if state_vis_frames.ndim == 3:
@@ -424,7 +302,7 @@ def run_diagnostics(
         argmax_ij = np.unravel_index(np.argmax(fi), fi.shape)
         print(
             f"[DIAG D7/FWD] i={i:4d} t={times[i]:7.3f} "
-            f"sum={np.sum(fi)*grid.dx*grid.dy:.6e} "
+            f"sum={np.sum(fi) * grid.dx * grid.dy:.6e} "
             f"max={np.max(fi):.6e} "
             f"argmax={argmax_ij}"
         )
@@ -433,7 +311,7 @@ def run_diagnostics(
         e_ref = Emix_density_ref[i]
         print(
             f"[DIAG D7/EMIX_DENS_REF] i={i:4d} t={times[i]:7.3f} "
-            f"sum={np.sum(e_ref)*grid.dx*grid.dy:.6e} "
+            f"sum={np.sum(e_ref) * grid.dx * grid.dy:.6e} "
             f"max={np.max(e_ref):.6e}"
         )
 
@@ -448,194 +326,88 @@ def run_diagnostics(
             rr = rho_old_ref[i]
             print(
                 f"[DIAG D7/RHO_OLD_REF] i={i:4d} t={times[i]:7.3f} "
-                f"sum={np.sum(rr)*grid.dx*grid.dy:.6e} "
+                f"sum={np.sum(rr) * grid.dx * grid.dy:.6e} "
                 f"max={np.max(rr):.6e}"
             )
 
     print("\n================ DIAGNOSTIC BLOCK END ==================\n")
 
-# ============================================================
-# Phase + density composite debug
-# ============================================================
 
-def debug_plot_phase_density_composite(
-    state,
+def build_sigma_dependent_products(
+    *,
+    cfg,
+    theory,
     grid,
-    title="Phase + density composite",
-    density_gamma: float = 0.35,
-    density_floor: float = 1e-12,
+    state_vis_frames: np.ndarray,
+    phi_tau_frames: np.ndarray,
+    times: np.ndarray,
+    t_det: float,
+    tau_step: float,
 ):
-    """
-    Quantum composite plot:
-      - hue   = phase arg(psi)
-      - value = density brightness
-      - saturation = 1
+    def _builder(sigmaT: float):
+        Emix = build_Emix_from_phi_tau(
+            phi_tau_frames=phi_tau_frames,
+            times=times,
+            t_det=t_det,
+            sigmaT=sigmaT,
+            tau_step=tau_step,
+            K_JITTER=cfg.K_JITTER,
+        )
 
-    For spinor states, uses total density and first component phase by default.
-    """
+        Emix_density_old = build_Emix_density_from_phi_tau(
+            phi_tau_frames=phi_tau_frames,
+            times=times,
+            t_det=t_det,
+            sigmaT=sigmaT,
+            tau_step=tau_step,
+            K_JITTER=cfg.K_JITTER,
+        )
 
-    if state.ndim == 2:
-        psi_vis = state[grid.ys, grid.xs]
-        rho_vis = np.abs(psi_vis) ** 2
-        phase_vis = np.angle(psi_vis)
+        rho = make_rho(
+            frames_psi=state_vis_frames,
+            Emix=Emix,
+            Emix_density=Emix_density_old,
+            dx=grid.dx,
+            dy=grid.dy,
+            mode=cfg.RHO_MODE,
+            blend_alpha=cfg.RHO_BLEND_ALPHA,
+        )
 
-    elif state.ndim == 3:
-        psi_vis = state[:, grid.ys, grid.xs]
-        rho_vis = np.sum(np.abs(psi_vis) ** 2, axis=0)
+        rx, ry, rs = compute_ridge_xy(
+            frames_psi=state_vis_frames,
+            Emix=Emix,
+            x_vis_1d=grid.x_vis_1d,
+            y_vis_1d=grid.y_vis_1d,
+            mode=cfg.RIDGE_MODE,
+            top_q=cfg.CENTROID_TOP_Q,
+            radius=cfg.LOCALMAX_RADIUS,
+            alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
+        )
 
-        # Use phase of dominant / first component for visualization
-        phase_vis = np.angle(psi_vis[0])
-    else:
-        raise ValueError(f"Unsupported state ndim={state.ndim}")
+        cos_th = speed = ux = uy = div_v = None
+        cos_th, speed, ux, uy, div_v = alignment_and_diagnostics_from_state_frames(
+            theory=theory,
+            state_vis_frames=state_vis_frames,
+            ridge_x=rx,
+            ridge_y=ry,
+            x_vis_1d=grid.x_vis_1d,
+            y_vis_1d=grid.y_vis_1d,
+            dx=grid.dx,
+            dy=grid.dy,
+            enable_divergence=cfg.ENABLE_DIVERGENCE_DIAGNOSTIC,
+            arrow_spatial_avg=cfg.ARROW_SPATIAL_AVG,
+            arrow_avg_radius=cfg.ARROW_AVG_RADIUS,
+            arrow_avg_gauss_sigma=cfg.ARROW_AVG_GAUSS_SIGMA,
+            arrow_temporal_smooth=cfg.ARROW_TEMPORAL_SMOOTH,
+            arrow_smooth_alpha=cfg.ARROW_SMOOTH_ALPHA,
+            align_eps_rho=cfg.ALIGN_EPS_RHO,
+            align_eps_speed=cfg.ALIGN_EPS_SPEED,
+        )
 
-    rho_norm = rho_vis / (np.max(rho_vis) + 1e-30)
-    value = np.clip(rho_norm, 0.0, 1.0) ** density_gamma
+        return rho, Emix, rx, ry, rs, cos_th, speed, ux, uy, div_v
 
-    # Mask very weak regions so random phase there does not dominate
-    weak_mask = rho_norm < density_floor
-    value[weak_mask] = 0.0
+    return _builder
 
-    # phase in [-pi, pi] -> hue in [0,1]
-    hue = (phase_vis + np.pi) / (2.0 * np.pi)
-    sat = np.ones_like(hue)
-
-    hsv = np.stack([hue, sat, value], axis=-1)
-    rgb = hsv_to_rgb(hsv)
-
-    plt.figure(figsize=(8, 5))
-    plt.imshow(
-        rgb,
-        extent=(grid.x_vis_min, grid.x_vis_max, grid.y_vis_min, grid.y_vis_max),
-        origin="lower",
-        aspect="auto",
-    )
-    plt.title(title)
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.show()
-
-def debug_plot_phase_density_composite_with_contours(
-    state,
-    grid,
-    title="Phase + density composite + contours",
-    density_gamma: float = 0.35,
-    density_floor: float = 1e-12,
-):
-    from matplotlib.colors import hsv_to_rgb
-
-    if state.ndim == 2:
-        psi_vis = state[grid.ys, grid.xs]
-        rho_vis = np.abs(psi_vis) ** 2
-        phase_vis = np.angle(psi_vis)
-
-    elif state.ndim == 3:
-        psi_vis = state[:, grid.ys, grid.xs]
-        rho_vis = np.sum(np.abs(psi_vis) ** 2, axis=0)
-        phase_vis = np.angle(psi_vis[0])
-    else:
-        raise ValueError(f"Unsupported state ndim={state.ndim}")
-
-    rho_norm = rho_vis / (np.max(rho_vis) + 1e-30)
-    value = np.clip(rho_norm, 0.0, 1.0) ** density_gamma
-    value[rho_norm < density_floor] = 0.0
-
-    hue = (phase_vis + np.pi) / (2.0 * np.pi)
-    sat = np.ones_like(hue)
-
-    hsv = np.stack([hue, sat, value], axis=-1)
-    rgb = hsv_to_rgb(hsv)
-
-    plt.figure(figsize=(8, 5))
-    plt.imshow(
-        rgb,
-        extent=(grid.x_vis_min, grid.x_vis_max, grid.y_vis_min, grid.y_vis_max),
-        origin="lower",
-        aspect="auto",
-    )
-
-    X = grid.X_vis
-    Y = grid.Y_vis
-
-    # Density contours
-    levels = [0.05, 0.10, 0.20, 0.40, 0.70]
-    plt.contour(
-        X,
-        Y,
-        rho_norm,
-        levels=levels,
-        colors="white",
-        linewidths=0.7,
-        alpha=0.7,
-    )
-
-    plt.title(title)
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.show()
-
-# ============================================================
-# Phase winding map (quantum vortices)
-# ============================================================
-
-# ============================================================
-# Phase winding map (quantum vortices)
-# ============================================================
-
-def debug_plot_phase_winding(state, grid, title="Phase winding map"):
-
-    if state.ndim == 2:
-        psi = state
-    elif state.ndim == 3:
-        psi = state[0]   # spinor tapauksessa ensimmäinen komponentti
-    else:
-        raise ValueError(f"Unsupported state ndim={state.ndim}")
-
-    phase = np.angle(psi)
-
-    # wrapped phase differences in [-pi, pi]
-    dpx = np.diff(phase, axis=1)
-    dpy = np.diff(phase, axis=0)
-
-    dpx = (dpx + np.pi) % (2.0 * np.pi) - np.pi
-    dpy = (dpy + np.pi) % (2.0 * np.pi) - np.pi
-
-    # circulation around each cell
-    # resulting shape: (Ny-1, Nx-1)
-    winding = (
-        dpx[:-1, :]      # top edge
-        + dpy[:, 1:]     # right edge
-        - dpx[1:, :]     # bottom edge
-        - dpy[:, :-1]    # left edge
-    ) / (2.0 * np.pi)
-
-    # grid.ys / grid.xs are slices -> convert carefully
-    y0 = grid.ys.start
-    y1 = grid.ys.stop - 1
-    x0 = grid.xs.start
-    x1 = grid.xs.stop - 1
-
-    winding_vis = winding[y0:y1, x0:x1]
-
-    plt.figure(figsize=(8, 5))
-    plt.imshow(
-        winding_vis,
-        extent=(
-            grid.x_vis_min,
-            grid.x_vis_max - grid.dx,
-            grid.y_vis_min,
-            grid.y_vis_max - grid.dy,
-        ),
-        origin="lower",
-        cmap="seismic",
-        vmin=-1,
-        vmax=1,
-        aspect="auto",
-    )
-    plt.title(title)
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.colorbar(label="phase winding")
-    plt.show()
 
 # ============================================================
 # Main
@@ -705,7 +477,11 @@ def main():
     detector_clicked = False
     det_result_final = None
 
-    print(f"Forward simulation starts... theory={cfg.THEORY_NAME}, detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}")
+    print(
+        f"Forward simulation starts... "
+        f"theory={cfg.THEORY_NAME}, detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
+    )
+
     if cfg.THEORY_NAME == "dirac":
         vx_est, vy_est, sp_est = theory.expected_group_velocity(cfg.k0x, cfg.k0y)
         print(f"[DIRAC V_EST] vx≈{vx_est:.6f}, vy≈{vy_est:.6f}, |v|≈{sp_est:.6f}")
@@ -716,7 +492,6 @@ def main():
         rho = theory.density(state)
         norm_now = norm_prob(rho, grid.dx, grid.dy)
 
-        # detector step on full state
         det_res = detector.step(state, cfg.dt, t=t_now)
         detector_diags.append(det_res.aux if det_res.aux is not None else {})
 
@@ -751,8 +526,7 @@ def main():
                 )
 
         if n < cfg.n_steps:
-            res = theory.step_forward(state, cfg.dt)
-            state = res.state
+            state = theory.step_forward(state, cfg.dt).state
 
     frames_density = np.asarray(frames_density, dtype=float)
     times = np.asarray(times, dtype=float)
@@ -769,53 +543,7 @@ def main():
     print("Forward done.")
 
     # --------------------------------------------------------
-    # Debug flow plots
-    # --------------------------------------------------------
-
-    if cfg.DEBUG_FLOW_FIELD:
-        print("[DEBUG] Plotting quantum flow field...")
-        debug_plot_quantum_flow(
-            theory=theory,
-            state=state,
-            grid=grid,
-            title="Quantum flow field (final state)"
-        )
-
-    if cfg.DEBUG_DIVERGENCE:
-        print("[DEBUG] Plotting velocity divergence...")
-        debug_plot_divergence(
-            theory=theory,
-            state=state,
-            grid=grid,
-            title="Velocity divergence (final state)"
-        )
-
-    if cfg.DEBUG_PHASE_DENSITY:
-        print("[DEBUG] Plotting phase+density composite...")
-        debug_plot_phase_density_composite(
-            state=state,
-            grid=grid,
-            title="Phase + density composite (final state)"
-        )
-
-    if cfg.DEBUG_PHASE_DENSITY_CONTOURS:
-        print("[DEBUG] Plotting phase+density composite with contours...")
-        debug_plot_phase_density_composite_with_contours(
-            state=state,
-            grid=grid,
-            title="Phase + density composite + contours (final state)"
-        )
-                
-    if cfg.DEBUG_PHASE_WINDING:
-        print("[DEBUG] Plotting phase winding map...")
-        debug_plot_phase_winding(
-            state=state,
-            grid=grid,
-            title="Phase winding (final state)"
-        )
-
-    # --------------------------------------------------------
-    # Forward debug checks
+    # 4) Forward debug checks
     # --------------------------------------------------------
     t_final = cfg.n_steps * cfg.dt
     print(f"[TIMECHK] dt={cfg.dt}")
@@ -830,7 +558,7 @@ def main():
     print(f"[TIMECHK] v_est≈{v_est_dbg:.6f}")
     print(f"[TIMECHK] estimated travel≈{x_travel_est:.6f}")
     print(f"[TIMECHK] distance x0->screen≈{dist_to_screen_est:.6f}")
-    print(f"[TIMECHK] travel/distance≈{x_travel_est/(dist_to_screen_est+1e-30):.6f}")
+    print(f"[TIMECHK] travel/distance≈{x_travel_est / (dist_to_screen_est + 1e-30):.6f}")
 
     check_ids = sorted(set([0, Nt // 4, Nt // 2, 3 * Nt // 4, Nt - 1]))
     for i in check_ids:
@@ -846,90 +574,65 @@ def main():
             f"peak=({x_peak:.4f},{y_peak:.4f})"
         )
 
-    if cfg.THEORY_NAME == "dirac":
-        if state_vis_frames is not None:
-            theory.debug_packet_summary(
-                f"vis frame {i}",
-                state_vis_frames[i],
-                X_like=grid.X_vis,
-                Y_like=grid.Y_vis,
-            )
+    if cfg.THEORY_NAME == "dirac" and state_vis_frames is not None:
+        theory.debug_packet_summary(
+            f"vis frame {check_ids[-1]}",
+            state_vis_frames[check_ids[-1]],
+            X_like=grid.X_vis,
+            Y_like=grid.Y_vis,
+        )
 
     # --------------------------------------------------------
-    # Continuity equation debug
+    # 5) Optional continuity debug in free case
     # --------------------------------------------------------
-    if DEBUG_FREE_CASE:
-        if cfg.SAVE_COMPLEX_STATE_FRAMES and state_vis_frames is not None:
+    if DEBUG_FREE_CASE and cfg.SAVE_COMPLEX_STATE_FRAMES and state_vis_frames is not None:
+        rms_mean, rms_max, abs_max = continuity_residual_from_state_frames(
+            theory=theory,
+            state_vis_frames=state_vis_frames,
+            dx=grid.dx,
+            dy=grid.dy,
+            dt=cfg.save_every * cfg.dt,
+        )
 
-            rms_mean, rms_max, abs_max = continuity_residual_from_state_frames(
-                theory=theory,
-                state_vis_frames=state_vis_frames,
-                dx=grid.dx,
-                dy=grid.dy,
-                dt=cfg.save_every * cfg.dt,
-            )
+        print(
+            "[CONTINUITY] "
+            f"RMS_mean≈{rms_mean:.3e}, "
+            f"RMS_max≈{rms_max:.3e}, "
+            f"ABS_max≈{abs_max:.3e}"
+        )
 
-            print(
-                "[CONTINUITY] "
-                f"RMS_mean≈{rms_mean:.3e}, "
-                f"RMS_max≈{rms_max:.3e}, "
-                f"ABS_max≈{abs_max:.3e}"
-            )
+        x_mean = float(np.sum(rho * grid.X) * grid.dx * grid.dy)
+        jx, jy, _ = theory.current(state)
+        jx_tot = float(np.sum(jx) * grid.dx * grid.dy)
+        jy_tot = float(np.sum(jy) * grid.dx * grid.dy)
 
-            x_mean = float(np.sum(rho * grid.X) * grid.dx * grid.dy)
-            jx, jy, _ = theory.current(state)
-            jx_tot = float(np.sum(jx) * grid.dx * grid.dy)
-            jy_tot = float(np.sum(jy) * grid.dx * grid.dy)
+        print(
+            f"[FREEDBG] step={n:5d} t={n * cfg.dt:7.3f} "
+            f"x_mean={x_mean: .4f} jx_tot={jx_tot: .4e} jy_tot={jy_tot: .4e}"
+        )
 
-            print(
-                f"[FREEDBG] step={n:5d} t={n*cfg.dt:7.3f} "
-                f"x_mean={x_mean: .4f} jx_tot={jx_tot: .4e} jy_tot={jy_tot: .4e}"
-            )
-
-            if not np.any(potential.screen_mask_vis):
-                print("[DEBUG] screen_mask_vis empty -> skipping click/backward/Emix analysis.")
-                plt.figure(figsize=(8, 5))
-                if cfg.USE_LOG_OUTPUT:
-                    plt.imshow(
-                        np.log10(frames_density[-1] + 1e-20),
-                        extent=(
-                            grid.x_vis_min, grid.x_vis_max,
-                            grid.y_vis_min, grid.y_vis_max,
-                        ),
-                        origin="lower",
-                        cmap="magma",
-                        aspect="auto",
-                        norm=PowerNorm(gamma=0.35),
-                    )
-                else:
-                    plt.imshow(
-                        frames_density[-1],
-                        extent=(
-                            grid.x_vis_min, grid.x_vis_max,
-                            grid.y_vis_min, grid.y_vis_max,
-                        ),
-                        origin="lower",
-                        cmap="magma",
-                        aspect="auto",
-                        norm=PowerNorm(gamma=0.35),
-                    )
-                plt.colorbar(label="rho")
-                plt.title(f"Forward density only (debug free case), t={times[-1]:.3f}")
-                plt.xlabel("x")
-                plt.ylabel("y")
-                plt.show()
-                return
+        if not np.any(potential.screen_mask_vis):
+            print("[DEBUG] screen_mask_vis empty -> skipping click/backward/Emix analysis.")
+            return
 
     # --------------------------------------------------------
-    # 4) Detection time + click
+    # 6) Detection time + click
     # --------------------------------------------------------
-    # First preference: detector result
     if detector_clicked and det_result_final is not None:
         x_click = float(det_result_final.click_x)
         y_click = float(det_result_final.click_y)
 
-        # snap t_det to nearest saved forward frame for backward library alignment
-        idx_det = int(np.argmin(np.abs(times - float(det_result_final.click_time if det_result_final.click_time is not None else times[-1]))))
+        idx_det = int(
+            np.argmin(
+                np.abs(
+                    times - float(
+                        det_result_final.click_time
+                        if det_result_final.click_time is not None
+                        else times[-1]
+                    )
+                )
+            )
+        )
         t_det = float(times[idx_det])
 
         screen_int = np.array(
@@ -943,7 +646,6 @@ def main():
             f"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
         )
     else:
-        # fallback to old screen/Born-style detection
         idx_det, t_det, x_click, y_click, screen_int = detect_click_from_screen(
             frames_density=frames_density,
             times=times,
@@ -966,12 +668,13 @@ def main():
 
     print(
         f"[SCREEN] max={np.max(screen_int):.6e} "
-        f"argmax_i={np.argmax(screen_int)} t_argmax={times[int(np.argmax(screen_int))]:.6f} "
+        f"argmax_i={np.argmax(screen_int)} "
+        f"t_argmax={times[int(np.argmax(screen_int))]:.6f} "
         f"first={screen_int[0]:.6e} last={screen_int[-1]:.6e}"
     )
 
     # --------------------------------------------------------
-    # 5) Backward library
+    # 7) Backward library
     # --------------------------------------------------------
     print("Backward library: computing phi_tau frames...")
     phi_tau_frames = build_backward_library(
@@ -988,7 +691,7 @@ def main():
     print("Backward library done.")
 
     # --------------------------------------------------------
-    # 5.5) Diagnostic block
+    # 8) Diagnostic block
     # --------------------------------------------------------
     v_est_diag = estimate_group_velocity(cfg, theory)
     L_gap_diag = cfg.screen_center_x - cfg.barrier_center_x
@@ -1014,86 +717,29 @@ def main():
     )
 
     # --------------------------------------------------------
-    # 6) Builder for sigmaT-dependent objects
+    # 9) sigmaT-dependent products
     # --------------------------------------------------------
-    def build_all_for_sigma(sigmaT: float):
-        Emix = build_Emix_from_phi_tau(
-            phi_tau_frames=phi_tau_frames,
-            times=times,
-            t_det=t_det,
-            sigmaT=sigmaT,
-            tau_step=tau_step,
-            K_JITTER=cfg.K_JITTER,
+    if not cfg.SAVE_COMPLEX_STATE_FRAMES or state_vis_frames is None:
+        raise RuntimeError(
+            "This pipeline requires SAVE_COMPLEX_STATE_FRAMES=True "
+            "for amplitude-level Emix/ridge analysis and later visualization."
         )
 
-        Emix_density_old = build_Emix_density_from_phi_tau(
-            phi_tau_frames=phi_tau_frames,
-            times=times,
-            t_det=t_det,
-            sigmaT=sigmaT,
-            tau_step=tau_step,
-            K_JITTER=cfg.K_JITTER,
-        )
+    build_all_for_sigma = build_sigma_dependent_products(
+        cfg=cfg,
+        theory=theory,
+        grid=grid,
+        state_vis_frames=state_vis_frames,
+        phi_tau_frames=phi_tau_frames,
+        times=times,
+        t_det=t_det,
+        tau_step=tau_step,
+    )
 
-        if not cfg.SAVE_COMPLEX_STATE_FRAMES or state_vis_frames is None:
-            raise RuntimeError(
-                "Amplitude-level Emix/ridge analysis requires SAVE_COMPLEX_STATE_FRAMES=True"
-            )
-
-        rho = make_rho(
-            frames_psi=state_vis_frames,
-            Emix=Emix,
-            Emix_density=Emix_density_old,
-            dx=grid.dx,
-            dy=grid.dy,
-            mode=cfg.RHO_MODE,
-            blend_alpha=cfg.RHO_BLEND_ALPHA,
-        )
-
-        rx, ry, rs = compute_ridge_xy(
-            frames_psi=state_vis_frames,
-            Emix=Emix,
-            x_vis_1d=grid.x_vis_1d,
-            y_vis_1d=grid.y_vis_1d,
-            mode=cfg.RIDGE_MODE,
-            top_q=cfg.CENTROID_TOP_Q,
-            radius=cfg.LOCALMAX_RADIUS,
-            alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
-        )
-
-        cos_th = speed = ux = uy = div_v = None
-
-        if state_vis_frames is not None:
-            cos_th, speed, ux, uy, div_v = alignment_and_diagnostics_from_state_frames(
-                theory=theory,
-                state_vis_frames=state_vis_frames,
-                ridge_x=rx,
-                ridge_y=ry,
-                x_vis_1d=grid.x_vis_1d,
-                y_vis_1d=grid.y_vis_1d,
-                dx=grid.dx,
-                dy=grid.dy,
-                enable_divergence=cfg.ENABLE_DIVERGENCE_DIAGNOSTIC,
-                arrow_spatial_avg=cfg.ARROW_SPATIAL_AVG,
-                arrow_avg_radius=cfg.ARROW_AVG_RADIUS,
-                arrow_avg_gauss_sigma=cfg.ARROW_AVG_GAUSS_SIGMA,
-                arrow_temporal_smooth=cfg.ARROW_TEMPORAL_SMOOTH,
-                arrow_smooth_alpha=cfg.ARROW_SMOOTH_ALPHA,
-                align_eps_rho=cfg.ALIGN_EPS_RHO,
-                align_eps_speed=cfg.ALIGN_EPS_SPEED,
-            )
-
-        return rho, Emix, rx, ry, rs, cos_th, speed, ux, uy, div_v
-
-    # --------------------------------------------------------
-    # 7) sigmaT setup
-    # --------------------------------------------------------
     v_est = estimate_group_velocity(cfg, theory)
     L_gap = cfg.screen_center_x - cfg.barrier_center_x
     t_gap = L_gap / (abs(v_est) + 1e-12)
 
-    sigma_min = 0.05 * t_gap
-    sigma_max = 2.00 * t_gap
     sigma_init = 0.60 * t_gap
 
     (
@@ -1123,17 +769,12 @@ def main():
         speed_ref = 1.0
 
     # --------------------------------------------------------
-    # 8) Bohmian precompute
+    # 10) Bohmian precompute
     # --------------------------------------------------------
     bohm_traj_x = bohm_traj_y = bohm_traj_alive = None
     bohm_init_points = []
 
     if cfg.ENABLE_BOHMIAN_OVERLAY:
-        if not cfg.SAVE_COMPLEX_STATE_FRAMES or state_vis_frames is None:
-            raise RuntimeError(
-                "ENABLE_BOHMIAN_OVERLAY requires SAVE_COMPLEX_STATE_FRAMES=True"
-            )
-
         print("Bohmian overlay: computing velocity frames...")
 
         vx_frames, vy_frames, rho_frames = build_velocity_frames_from_state(
@@ -1185,375 +826,9 @@ def main():
         )
 
     # --------------------------------------------------------
-    # Data dump
+    # 11) Summary stats
     # --------------------------------------------------------
-#    np.savez_compressed(
-#        "output.npz",
-#        times=times,
-#        frames_density=frames_density,
-#        state_vis_frames=state_vis_frames,
-#        ridge_x=ridge_x_init,
-#        ridge_y=ridge_y_init,
-#        screen_int=screen_int,
-#        phi_tau_frames=phi_tau_frames,
-#        click_x=x_click,
-#        click_y=y_click,
-#        t_det=t_det,
-#    )
-#    json.dump(config_dict, open("run_meta.json", "w"), indent=2)
-
-    # --------------------------------------------------------
-    # 9) Visualization setup
-    # --------------------------------------------------------
-    extent = (
-        -cfg.VISIBLE_LX / 2,
-        cfg.VISIBLE_LX / 2,
-        -cfg.VISIBLE_LY / 2,
-        cfg.VISIBLE_LY / 2,
-    )
-
-    fig = plt.figure(figsize=(10.8, 7.2))
-    ax = fig.add_axes([0.07, 0.18, 0.86, 0.78])
-
-    im = ax.imshow(
-        gamma_display(
-            rho_init[0],
-            vref=vref,
-            gamma=cfg.GAMMA,
-            use_fixed_scale=cfg.USE_FIXED_DISPLAY_SCALE,
-        ),
-        extent=extent,
-        origin="lower",
-        cmap="magma",
-        interpolation=cfg.IM_INTERPOLATION,
-        norm=PowerNorm(gamma=0.35),
-    )
-
-    ax.axvline(cfg.barrier_center_x, color="white", linestyle="--", alpha=0.6)
-    ax.axvline(cfg.screen_center_x, color="cyan", linestyle="--", alpha=0.4)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-
-    title = ax.set_title(
-        rf"ρ(t): σT={sigma_init:.3f}, t={times[0]:.3f}, "
-        rf"ridge={cfg.RIDGE_MODE}, theory={cfg.THEORY_NAME}, "
-        rf"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
-    )
-
-    ridge_marker, = ax.plot(
-        [ridge_x_init[0]],
-        [ridge_y_init[0]],
-        marker="o",
-        markersize=7,
-        linestyle="None",
-        color="lime",
-        alpha=0.9,
-        label=f"ridge ({cfg.RIDGE_MODE})",
-    )
-
-    click_marker, = ax.plot(
-        [x_click],
-        [y_click],
-        marker="x",
-        markersize=9,
-        linestyle="None",
-        color="yellow",
-        alpha=0.9,
-        label="click",
-    )
-
-    ridge_trail, = ax.plot(
-        [],
-        [],
-        linestyle="-",
-        linewidth=1.5,
-        color="lime",
-        alpha=0.5,
-    )
-
-    flow_quiver = None
-    if cfg.DRAW_FLOW_ARROW and cfg.SAVE_COMPLEX_STATE_FRAMES and (ux_init is not None):
-        flow_quiver = ax.quiver(
-            [ridge_x_init[0]],
-            [ridge_y_init[0]],
-            [0.0],
-            [0.0],
-            angles="xy",
-            scale_units="xy",
-            scale=1.0,
-            color="cyan",
-            alpha=0.9,
-            width=0.006,
-        )
-
-    bohm_lines = []
-    bohm_heads = []
-
-    if cfg.ENABLE_BOHMIAN_OVERLAY and bohm_traj_x is not None:
-        for k in range(bohm_traj_x.shape[0]):
-            line_k, = ax.plot(
-                [],
-                [],
-                linestyle="-",
-                linewidth=cfg.BOHMIAN_LINEWIDTH,
-                color=cfg.BOHMIAN_COLOR,
-                alpha=0.85,
-                label="Bohmian traj" if k == 0 else None,
-            )
-            bohm_lines.append(line_k)
-
-            if cfg.BOHMIAN_SHOW_HEAD:
-                head_k, = ax.plot(
-                    [],
-                    [],
-                    marker="o",
-                    markersize=cfg.BOHMIAN_HEAD_SIZE,
-                    linestyle="None",
-                    color=cfg.BOHMIAN_HEAD_COLOR,
-                    alpha=0.95,
-                )
-            else:
-                head_k = None
-
-            bohm_heads.append(head_k)
-
-    ax.legend(loc="upper right", framealpha=0.35)
-
-    # --------------------------------------------------------
-    # 10) Slider state containers
-    # --------------------------------------------------------
-    ax_sigma = fig.add_axes([0.10, 0.08, 0.80, 0.04])
-    sigma_slider = Slider(
-        ax=ax_sigma,
-        label="sigmaT (time thickness)",
-        valmin=sigma_min,
-        valmax=sigma_max,
-        valinit=sigma_init,
-    )
-
-    rho_current = [rho_init]
-    sigma_current = [sigma_init]
-    ridge_x = [ridge_x_init]
-    ridge_y = [ridge_y_init]
-    ridge_s = [ridge_s_init]
-    cos_th = [cos_th_init]
-    speed = [speed_init]
-    ux = [ux_init]
-    uy = [uy_init]
-    div_v_ridge = [div_v_init]
-
-    arrow_state = {"ux": np.nan, "uy": np.nan, "spd": np.nan}
-
-    # --------------------------------------------------------
-    # 11) Overlay update helpers
-    # --------------------------------------------------------
-    def update_flow_arrow(i: int):
-        if flow_quiver is None or ux[0] is None or speed[0] is None:
-            return
-
-        uxi = ux[0][i]
-        uyi = uy[0][i]
-        spd = speed[0][i]
-
-        valid = (
-            np.isfinite(uxi)
-            and np.isfinite(uyi)
-            and np.isfinite(spd)
-            and (spd > cfg.ALIGN_EPS_SPEED)
-        )
-
-        if not valid:
-            if cfg.ARROW_HIDE_WHEN_INVALID:
-                flow_quiver.set_offsets([[ridge_x[0][i], ridge_y[0][i]]])
-                flow_quiver.set_UVC([0.0], [0.0])
-                return
-
-            if (
-                cfg.ARROW_HOLD_LAST_WHEN_INVALID
-                and np.isfinite(arrow_state["ux"])
-                and np.isfinite(arrow_state["uy"])
-            ):
-                uxi = arrow_state["ux"]
-                uyi = arrow_state["uy"]
-                spd = arrow_state["spd"] if np.isfinite(arrow_state["spd"]) else 0.0
-            else:
-                flow_quiver.set_offsets([[ridge_x[0][i], ridge_y[0][i]]])
-                flow_quiver.set_UVC([0.0], [0.0])
-                return
-
-        arrow_state["ux"] = uxi
-        arrow_state["uy"] = uyi
-        arrow_state["spd"] = spd
-
-        flow_quiver.set_offsets([[ridge_x[0][i], ridge_y[0][i]]])
-
-        L = cfg.ARROW_SCALE * float(
-            np.clip(spd / (speed_ref + 1e-30), 0.0, 2.5)
-        )
-
-        flow_quiver.set_UVC([L * uxi], [L * uyi])
-
-    def update_bohmian_overlay(i: int):
-        if not cfg.ENABLE_BOHMIAN_OVERLAY or bohm_traj_x is None:
-            return
-
-        for k in range(bohm_traj_x.shape[0]):
-            alive = bohm_traj_alive[k]
-
-            if not np.any(alive[: i + 1]):
-                bohm_lines[k].set_data([], [])
-                if bohm_heads[k] is not None:
-                    bohm_heads[k].set_data([], [])
-                continue
-
-            if cfg.BOHMIAN_SHOW_FULL_PATH_EACH_FRAME:
-                j0 = 0
-            else:
-                j0 = max(0, i - cfg.BOHMIAN_TRAIL_LEN + 1)
-
-            mask = alive[j0 : i + 1]
-            xs_seg = bohm_traj_x[k, j0 : i + 1][mask]
-            ys_seg = bohm_traj_y[k, j0 : i + 1][mask]
-            bohm_lines[k].set_data(xs_seg, ys_seg)
-
-            if cfg.BOHMIAN_SHOW_HEAD and bohm_heads[k] is not None:
-                alive_idx = np.where(alive[: i + 1])[0]
-                if alive_idx.size > 0:
-                    ilast = int(alive_idx[-1])
-                    bohm_heads[k].set_data(
-                        [bohm_traj_x[k, ilast]],
-                        [bohm_traj_y[k, ilast]],
-                    )
-                else:
-                    bohm_heads[k].set_data([], [])
-
-    def make_title(i: int):
-        parts = [
-            rf"ρ(t): σT={sigma_current[0]:.3f}",
-            rf"t={times[i]:.3f}",
-            rf"ridge={cfg.RIDGE_MODE}",
-            rf"theory={cfg.THEORY_NAME}",
-            rf"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}",
-            rf"norm≈{norms[i]:.4f}",
-            rf"Γ≈{ridge_s[0][i]:.3e}",
-        ]
-
-        if cos_th[0] is not None and np.isfinite(cos_th[0][i]):
-            parts.append(rf"cosθ≈{cos_th[0][i]:.3f}")
-
-        if (
-            cfg.ENABLE_DIVERGENCE_DIAGNOSTIC
-            and div_v_ridge[0] is not None
-            and np.isfinite(div_v_ridge[0][i])
-        ):
-            parts.append(rf"div v≈{div_v_ridge[0][i]:.3e}")
-
-        if cfg.ENABLE_BOHMIAN_OVERLAY:
-            parts.append("Bohm=RK4" if cfg.BOHMIAN_USE_RK4 else "Bohm=Euler")
-
-        return " | ".join(parts)
-
-    # --------------------------------------------------------
-    # 12) Slider callback
-    # --------------------------------------------------------
-    def on_sigma_change(_val):
-        new_sigma = float(sigma_slider.val)
-        sigma_current[0] = new_sigma
-
-        (
-            rho_new,
-            _Emix,
-            rx,
-            ry,
-            rs,
-            cth,
-            spd,
-            uxx,
-            uyy,
-            divv,
-        ) = build_all_for_sigma(new_sigma)
-
-        rho_current[0] = rho_new
-        ridge_x[0] = rx
-        ridge_y[0] = ry
-        ridge_s[0] = rs
-        cos_th[0] = cth
-        speed[0] = spd
-        ux[0] = uxx
-        uy[0] = uyy
-        div_v_ridge[0] = divv
-
-        i = getattr(on_sigma_change, "last_i", 0)
-
-        im.set_data(
-            gamma_display(
-                rho_current[0][i],
-                vref=vref,
-                gamma=cfg.GAMMA,
-                use_fixed_scale=cfg.USE_FIXED_DISPLAY_SCALE,
-            )
-        )
-
-        ridge_marker.set_data([ridge_x[0][i]], [ridge_y[0][i]])
-
-        if cfg.SHOW_TRAIL:
-            j0 = max(0, i - cfg.TRAIL_LEN + 1)
-            ridge_trail.set_data(
-                ridge_x[0][j0 : i + 1],
-                ridge_y[0][j0 : i + 1],
-            )
-
-        update_flow_arrow(i)
-        update_bohmian_overlay(i)
-        title.set_text(make_title(i))
-        fig.canvas.draw_idle()
-
-    sigma_slider.on_changed(on_sigma_change)
-
-    # --------------------------------------------------------
-    # 13) Animation callback
-    # --------------------------------------------------------
-    def update(i: int):
-        on_sigma_change.last_i = i
-
-        im.set_data(
-            gamma_display(
-                rho_current[0][i],
-                vref=vref,
-                gamma=cfg.GAMMA,
-                use_fixed_scale=cfg.USE_FIXED_DISPLAY_SCALE,
-            )
-        )
-
-        ridge_marker.set_data([ridge_x[0][i]], [ridge_y[0][i]])
-
-        if cfg.SHOW_TRAIL:
-            j0 = max(0, i - cfg.TRAIL_LEN + 1)
-            ridge_trail.set_data(
-                ridge_x[0][j0 : i + 1],
-                ridge_y[0][j0 : i + 1],
-            )
-
-        update_flow_arrow(i)
-        update_bohmian_overlay(i)
-        title.set_text(make_title(i))
-
-        artists = [im, ridge_marker, click_marker, ridge_trail]
-
-        if flow_quiver is not None:
-            artists.append(flow_quiver)
-
-        artists.extend([obj for obj in bohm_lines if obj is not None])
-        artists.extend([obj for obj in bohm_heads if obj is not None])
-
-        return tuple(artists)
-
-    ani = FuncAnimation(fig, update, frames=Nt, interval=40, blit=False)
-
-    # --------------------------------------------------------
-    # 14) Summary stats
-    # --------------------------------------------------------
-    if cfg.PRINT_ALIGNMENT_STATS and cfg.SAVE_COMPLEX_STATE_FRAMES and (cos_th_init is not None):
+    if cfg.PRINT_ALIGNMENT_STATS and cos_th_init is not None:
         valid = np.isfinite(cos_th_init)
         if np.any(valid):
             mean_c = float(np.mean(cos_th_init[valid]))
@@ -1569,7 +844,7 @@ def main():
         else:
             print("[ALIGN] no valid cosθ.")
 
-    if cfg.ENABLE_DIVERGENCE_DIAGNOSTIC and cfg.PRINT_DIVERGENCE_STATS and (div_v_init is not None):
+    if cfg.ENABLE_DIVERGENCE_DIAGNOSTIC and cfg.PRINT_DIVERGENCE_STATS and div_v_init is not None:
         valid = np.isfinite(div_v_init)
         if np.any(valid):
             mean_div = float(np.mean(div_v_init[valid]))
@@ -1585,7 +860,7 @@ def main():
         else:
             print("[DIV] no valid div(v) values.")
 
-    if cfg.ENABLE_BOHMIAN_OVERLAY and cfg.PRINT_BOHMIAN_STATS and (bohm_traj_alive is not None):
+    if cfg.ENABLE_BOHMIAN_OVERLAY and cfg.PRINT_BOHMIAN_STATS and bohm_traj_alive is not None:
         alive_counts = np.sum(bohm_traj_alive, axis=1)
 
         for k in range(bohm_traj_alive.shape[0]):
@@ -1593,8 +868,8 @@ def main():
                 i_last = int(alive_counts[k] - 1)
                 print(
                     f"[BOHM] traj {k}: steps={alive_counts[k]}, "
-                    f"start=({bohm_traj_x[k,0]:.3f},{bohm_traj_y[k,0]:.3f}), "
-                    f"end=({bohm_traj_x[k,i_last]:.3f},{bohm_traj_y[k,i_last]:.3f})"
+                    f"start=({bohm_traj_x[k, 0]:.3f},{bohm_traj_y[k, 0]:.3f}), "
+                    f"end=({bohm_traj_x[k, i_last]:.3f},{bohm_traj_y[k, i_last]:.3f})"
                 )
             else:
                 print(f"[BOHM] traj {k}: no valid steps")
@@ -1609,13 +884,55 @@ def main():
         print("[DETECTOR FINAL] clicked=False (fallback click may have been used)")
 
     # --------------------------------------------------------
-    # 15) Save + show
+    # 12) Save run bundle
     # --------------------------------------------------------
-    ani.save(cfg.OUTPUT_MP4, writer="ffmpeg", fps=25, dpi=150)
-    plt.show()
+    output_prefix = getattr(cfg, "OUTPUT_PREFIX", None)
+    if not output_prefix:
+        output_mp4 = getattr(cfg, "OUTPUT_MP4", "output.mp4")
+        output_prefix = str(Path(output_mp4).with_suffix(""))
+
+    save_run_bundle(
+        output_prefix=output_prefix,
+        cfg=cfg,
+        grid=grid,
+        potential=potential,
+        debug_free_case=DEBUG_FREE_CASE,
+        times=times,
+        frames_density=frames_density,
+        state_vis_frames=state_vis_frames,
+        norms=norms,
+        screen_int=screen_int,
+        phi_tau_frames=phi_tau_frames,
+        x_click=x_click,
+        y_click=y_click,
+        t_det=t_det,
+        idx_det=idx_det,
+        detector_clicked=detector_clicked,
+        sigma_init=sigma_init,
+        ridge_x_init=ridge_x_init,
+        ridge_y_init=ridge_y_init,
+        ridge_s_init=ridge_s_init,
+        cos_th_init=cos_th_init,
+        speed_init=speed_init,
+        ux_init=ux_init,
+        uy_init=uy_init,
+        div_v_init=div_v_init,
+        vref=vref,
+        speed_ref=speed_ref,
+        bohm_traj_x=bohm_traj_x,
+        bohm_traj_y=bohm_traj_y,
+        bohm_traj_alive=bohm_traj_alive,
+        bohm_init_points=bohm_init_points,
+    )
+
+    # --------------------------------------------------------
+    # 13) Final summaries
+    # --------------------------------------------------------
     print("frame0 rho max:", np.max(frames_density[0]))
     print("frame0 Emix density max:", np.max(make_emix_density(Emix_init)[0]))
     print("frame0 overlap rho max:", np.max(rho_init[0]))
+    print("Simulation done.")
+    print("Use visualize.py for animation, slider and debug plots.")
 
 
 if __name__ == "__main__":
