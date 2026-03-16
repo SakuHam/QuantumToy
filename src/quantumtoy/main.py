@@ -12,6 +12,7 @@ from core.simulation_types import PotentialSpec
 from theories.registry import build_theory
 
 from detection.factory import build_detector
+from detection.debug.flux_batch_sampler import FluxBatchSampler
 
 from analysis.emix import (
     detect_click_from_screen,
@@ -36,6 +37,44 @@ from file.run_io import save_run_bundle
 # ============================================================
 # Helpers
 # ============================================================
+
+def estimate_slit_separation_from_masks(grid, potential):
+    """
+    Estimate slit separation d from slit masks.
+
+    Returns
+    -------
+    d : float
+        Distance between slit centers in y-direction.
+    """
+
+    slit1 = potential.slit1_mask
+    slit2 = potential.slit2_mask
+
+    if not np.any(slit1):
+        raise RuntimeError("slit1_mask empty")
+
+    if not np.any(slit2):
+        raise RuntimeError("slit2_mask empty")
+
+    y1 = np.mean(grid.Y[slit1])
+    y2 = np.mean(grid.Y[slit2])
+
+    d = abs(y2 - y1)
+
+    y1_vals = grid.Y[potential.slit1_mask]
+    y2_vals = grid.Y[potential.slit2_mask]
+
+    y1c = np.median(y1_vals)
+    y2c = np.median(y2_vals)
+    d = abs(y2c - y1c)
+
+    a1 = np.max(y1_vals) - np.min(y1_vals)
+    a2 = np.max(y2_vals) - np.min(y2_vals)
+
+    print(f"[SLITS] center1_y={y1:.6f} center2_y={y2:.6f} separation d={d:.6f} slit1 width={a1} slit2 width={a2}")
+
+    return d
 
 def estimate_group_velocity(cfg, theory) -> float:
     """
@@ -446,8 +485,49 @@ def main():
     else:
         potential = build_double_slit_and_caps(grid, cfg)
 
+    estimate_slit_separation_from_masks(grid, potential)
+
     theory = build_theory(cfg, grid, potential)
     detector = build_detector(cfg, grid)
+
+    # --------------------------------------------------------
+    # 1b) Optional cheap batch sampler from one forward run
+    # --------------------------------------------------------
+    enable_flux_batch_sampler = getattr(cfg, "ENABLE_FLUX_BATCH_SAMPLER", True)
+    flux_batch_num_samples = int(getattr(cfg, "FLUX_BATCH_NUM_SAMPLES", 10_000))
+    flux_batch_rng_seed = getattr(cfg, "FLUX_BATCH_RNG_SEED", 12345)
+    flux_batch_sample_sigma_x = float(getattr(cfg, "FLUX_BATCH_SAMPLE_SIGMA_X", 0.0))
+    flux_batch_sample_sigma_y = float(getattr(cfg, "FLUX_BATCH_SAMPLE_SIGMA_Y", 0.0))
+    break_on_detector_click = bool(getattr(cfg, "BREAK_ON_DETECTOR_CLICK", True))
+
+    batch_sampler = None
+    pseudo_clicks = None
+
+    if enable_flux_batch_sampler:
+        det_gate_x = float(getattr(detector, "detector_gate_center_x", cfg.screen_center_x))
+        det_gate_wx = float(getattr(detector, "detector_gate_width", cfg.screen_eval_width))
+        det_gate_y = float(getattr(detector, "detector_gate_center_y", 0.0))
+        det_gate_wy = float(getattr(detector, "detector_gate_width_y", -1.0))
+
+        batch_fast_mode = bool(getattr(cfg, "BATCH_FAST_MODE", False))
+        batch_sampler = FluxBatchSampler(
+            grid=grid,
+            gate_center_x=det_gate_x,
+            gate_width_x=det_gate_wx,
+            gate_center_y=det_gate_y,
+            gate_width_y=det_gate_wy,
+            hbar=float(getattr(cfg, "hbar", 1.0)),
+            mass=float(getattr(cfg, "m_mass", 1.0)),
+            sample_sigma_x=flux_batch_sample_sigma_x,
+            sample_sigma_y=flux_batch_sample_sigma_y,
+            rng_seed=flux_batch_rng_seed,
+        )
+
+        print(
+            "[BATCH] enabled: "
+            f"samples={flux_batch_num_samples}, "
+            f"gate_center_x={det_gate_x}, gate_width_x={det_gate_wx}"
+        )
 
     # --------------------------------------------------------
     # 2) Initial state
@@ -486,22 +566,23 @@ def main():
         vx_est, vy_est, sp_est = theory.expected_group_velocity(cfg.k0x, cfg.k0y)
         print(f"[DIRAC V_EST] vx≈{vx_est:.6f}, vy≈{vy_est:.6f}, |v|≈{sp_est:.6f}")
 
+    actual_last_step = 0
+
     for n in range(cfg.n_steps + 1):
+        actual_last_step = n
         t_now = n * cfg.dt
 
         rho = theory.density(state)
         norm_now = norm_prob(rho, grid.dx, grid.dy)
 
+        if batch_sampler is not None:
+            # Note: this assumes scalar Schrödinger-like state.
+            # Dirac/spinor support would need current built from the specific theory.
+            if state.ndim == 2:
+                batch_sampler.update(state, cfg.dt)
+
         det_res = detector.step(state, cfg.dt, t=t_now)
         detector_diags.append(det_res.aux if det_res.aux is not None else {})
-
-        if det_res.clicked and not detector_clicked:
-            detector_clicked = True
-            det_result_final = det_res
-            print(
-                f"[DETECTOR] clicked at step={n}, t={t_now:.6f}, "
-                f"x={det_res.click_x}, y={det_res.click_y}"
-            )
 
         if n % cfg.save_every == 0:
             frames_density.append(rho[grid.ys, grid.xs].copy())
@@ -525,6 +606,18 @@ def main():
                     f"frames={len(frames_density)}"
                 )
 
+        if det_res.clicked and not detector_clicked:
+            detector_clicked = True
+            det_result_final = det_res
+            print(
+                f"[DETECTOR] clicked at step={n}, t={t_now:.6f}, "
+                f"x={det_res.click_x}, y={det_res.click_y}"
+            )
+
+            if break_on_detector_click:
+                print("[FWD] breaking on detector click.")
+                break
+
         if n < cfg.n_steps:
             state = theory.step_forward(state, cfg.dt).state
 
@@ -542,10 +635,23 @@ def main():
 
     print("Forward done.")
 
+    if batch_sampler is not None:
+        try:
+            pseudo_clicks = batch_sampler.sample_clicks(flux_batch_num_samples)
+            print(
+                "[BATCH] sampled pseudo-clicks: "
+                f"n={len(pseudo_clicks)}, "
+                f"updates={batch_sampler.num_updates}, "
+                f"total_flux={batch_sampler.total_flux_accum:.6e}"
+            )
+        except Exception as e:
+            pseudo_clicks = None
+            print(f"[BATCH] sampling skipped: {e}")
+
     # --------------------------------------------------------
     # 4) Forward debug checks
     # --------------------------------------------------------
-    t_final = cfg.n_steps * cfg.dt
+    t_final = actual_last_step * cfg.dt
     print(f"[TIMECHK] dt={cfg.dt}")
     print(f"[TIMECHK] n_steps={cfg.n_steps}")
     print(f"[TIMECHK] save_every={cfg.save_every}")
@@ -673,6 +779,45 @@ def main():
         f"first={screen_int[0]:.6e} last={screen_int[-1]:.6e}"
     )
 
+    # --------------------------------------------------------
+    # 6b) Fast batch-only exit
+    # --------------------------------------------------------
+    if batch_fast_mode:
+        output_prefix = getattr(cfg, "OUTPUT_PREFIX", None)
+        if not output_prefix:
+            output_mp4 = getattr(cfg, "OUTPUT_MP4", "output.mp4")
+            output_prefix = str(Path(output_mp4).with_suffix(""))
+
+        if batch_sampler is not None:
+            batch_summary_path = f"{output_prefix}_flux_summary.json"
+            batch_clicks_json_path = f"{output_prefix}_pseudo_clicks.json"
+            batch_clicks_jsonl_path = f"{output_prefix}_pseudo_clicks.jsonl"
+
+            batch_sampler.save_summary_json(batch_summary_path)
+
+            if pseudo_clicks is not None:
+                batch_sampler.save_clicks_json(batch_clicks_json_path, pseudo_clicks)
+                batch_sampler.append_clicks_jsonl(
+                    batch_clicks_jsonl_path,
+                    pseudo_clicks,
+                    run_id=str(Path(output_prefix).name),
+                    theory_name=str(cfg.THEORY_NAME),
+                    detector_name=str(getattr(cfg, "DETECTOR_NAME", "unknown")),
+                )
+
+                print(
+                    "[BATCH_FAST_MODE] saved: "
+                    f"{batch_summary_path}, "
+                    f"{batch_clicks_json_path}, "
+                    f"{batch_clicks_jsonl_path}"
+                )
+            else:
+                print(f"[BATCH_FAST_MODE] saved summary only: {batch_summary_path}")
+
+        print("[BATCH_FAST_MODE] Skipping backward/Emix/Bohmian pipeline.")
+        print("Simulation done.")
+        return
+    
     # --------------------------------------------------------
     # 7) Backward library
     # --------------------------------------------------------
@@ -890,6 +1035,35 @@ def main():
     if not output_prefix:
         output_mp4 = getattr(cfg, "OUTPUT_MP4", "output.mp4")
         output_prefix = str(Path(output_mp4).with_suffix(""))
+
+    # --------------------------------------------------------
+    # 12a) Save cheap batch-sampler outputs
+    # --------------------------------------------------------
+    if batch_sampler is not None:
+        batch_summary_path = f"{output_prefix}_flux_summary.json"
+        batch_clicks_json_path = f"{output_prefix}_pseudo_clicks.json"
+        batch_clicks_jsonl_path = f"{output_prefix}_pseudo_clicks.jsonl"
+
+        batch_sampler.save_summary_json(batch_summary_path)
+
+        if pseudo_clicks is not None:
+            batch_sampler.save_clicks_json(batch_clicks_json_path, pseudo_clicks)
+            batch_sampler.append_clicks_jsonl(
+                batch_clicks_jsonl_path,
+                pseudo_clicks,
+                run_id=str(Path(output_prefix).name),
+                theory_name=str(cfg.THEORY_NAME),
+                detector_name=str(getattr(cfg, "DETECTOR_NAME", "unknown")),
+            )
+
+            print(
+                "[BATCH] saved: "
+                f"{batch_summary_path}, "
+                f"{batch_clicks_json_path}, "
+                f"{batch_clicks_jsonl_path}"
+            )
+        else:
+            print(f"[BATCH] saved summary only: {batch_summary_path}")
 
     save_run_bundle(
         output_prefix=output_prefix,

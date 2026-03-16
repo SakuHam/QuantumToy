@@ -70,6 +70,14 @@ class AppConfig:
     DEBUG_PHASE_DENSITY_CONTOURS = False
     DEBUG_PHASE_WINDING = False
 
+    ENABLE_FLUX_BATCH_SAMPLER = True
+    FLUX_BATCH_NUM_SAMPLES = 10000
+    FLUX_BATCH_RNG_SEED = 12345
+    FLUX_BATCH_SAMPLE_SIGMA_X = 0.0
+    FLUX_BATCH_SAMPLE_SIGMA_Y = 0.0
+    BREAK_ON_DETECTOR_CLICK = True
+    BATCH_FAST_MODE = True
+
     # ============================================================
     # Bohmian overlay
     # ============================================================
