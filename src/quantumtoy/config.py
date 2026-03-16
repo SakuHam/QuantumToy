@@ -1,6 +1,56 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import ast
+import os
+from dataclasses import dataclass, field, fields
+
+
+def _parse_env_value(raw: str):
+    """
+    Parse env string into a Python value when possible.
+
+    Examples:
+      "True" -> True
+      "123" -> 123
+      "1.25" -> 1.25
+      "[(1,2), (3,4)]" -> [(1,2), (3,4)]
+
+    Falls back to raw string if parsing fails.
+    """
+    try:
+        return ast.literal_eval(raw)
+    except Exception:
+        low = raw.strip().lower()
+        if low in ("true", "yes", "on"):
+            return True
+        if low in ("false", "no", "off"):
+            return False
+        return raw
+
+
+def _coerce_like_default(value, default):
+    """
+    Coerce parsed env value toward the default field type where reasonable.
+    """
+    if isinstance(default, bool):
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low in ("true", "1", "yes", "on"):
+                return True
+            if low in ("false", "0", "no", "off"):
+                return False
+        return bool(value)
+
+    if isinstance(default, int) and not isinstance(default, bool):
+        return int(value)
+
+    if isinstance(default, float):
+        return float(value)
+
+    if isinstance(default, str):
+        return str(value)
+
+    return value
 
 
 @dataclass
@@ -16,13 +66,12 @@ class AppConfig:
     # ============================================================
     # Detector
     # ============================================================
-
-    DETECTOR_NAME = "emergent"   # tai "emergent"
-    DETECTOR_GATE_CENTER_X = 10.0
-    DETECTOR_GATE_WIDTH = 0.75
-    DETECTOR_CLICK_THRESHOLD = 0.01
-    DETECTOR_MIN_TOTAL_WEIGHT = 1e-6
-    DETECTOR_MIN_PEAK_WEIGHT = 1e-8
+    DETECTOR_NAME: str = "emergent"
+    DETECTOR_GATE_CENTER_X: float = 10.0
+    DETECTOR_GATE_WIDTH: float = 0.75
+    DETECTOR_CLICK_THRESHOLD: float = 0.01
+    DETECTOR_MIN_TOTAL_WEIGHT: float = 1e-6
+    DETECTOR_MIN_PEAK_WEIGHT: float = 1e-8
 
     # ============================================================
     # Ridge
@@ -64,19 +113,19 @@ class AppConfig:
     PRINT_ALIGNMENT_STATS: bool = True
     ENABLE_DIVERGENCE_DIAGNOSTIC: bool = True
     PRINT_DIVERGENCE_STATS: bool = True
-    DEBUG_FLOW_FIELD = False
-    DEBUG_DIVERGENCE = False
-    DEBUG_PHASE_DENSITY = False
-    DEBUG_PHASE_DENSITY_CONTOURS = False
-    DEBUG_PHASE_WINDING = False
+    DEBUG_FLOW_FIELD: bool = False
+    DEBUG_DIVERGENCE: bool = False
+    DEBUG_PHASE_DENSITY: bool = False
+    DEBUG_PHASE_DENSITY_CONTOURS: bool = False
+    DEBUG_PHASE_WINDING: bool = False
 
-    ENABLE_FLUX_BATCH_SAMPLER = True
-    FLUX_BATCH_NUM_SAMPLES = 10000
-    FLUX_BATCH_RNG_SEED = 12345
-    FLUX_BATCH_SAMPLE_SIGMA_X = 0.0
-    FLUX_BATCH_SAMPLE_SIGMA_Y = 0.0
-    BREAK_ON_DETECTOR_CLICK = True
-    BATCH_FAST_MODE = True
+    ENABLE_FLUX_BATCH_SAMPLER: bool = False
+    FLUX_BATCH_NUM_SAMPLES: int = 10000
+    FLUX_BATCH_RNG_SEED: int = 12345
+    FLUX_BATCH_SAMPLE_SIGMA_X: float = 0.0
+    FLUX_BATCH_SAMPLE_SIGMA_Y: float = 0.0
+    BREAK_ON_DETECTOR_CLICK: bool = False
+    BATCH_FAST_MODE: bool = False
 
     # ============================================================
     # Bohmian overlay
@@ -196,34 +245,24 @@ class AppConfig:
     # ============================================================
     # Thick-front optimized / branch competition
     # ============================================================
-
-    # Original thick-front sharpening
     THICK_FRONT_STRENGTH: float = 0.03
     THICK_FRONT_MISALIGNED_DAMP: float = 0.01
     THICK_FRONT_DIAG_WEIGHT: float = 0.5
     THICK_FRONT_DENSITY_WEIGHTED: bool = True
     THICK_FRONT_PHASE_RELAX_STRENGTH: float = 0.0
 
-    # New branch competition / lateral inhibition term
-    # Set > 0 to activate suppression of nearby weaker jets.
-    THICK_FRONT_BRANCH_COMPETITION_STRENGTH: float = 5.00 #0.0
+    THICK_FRONT_BRANCH_COMPETITION_STRENGTH: float = 5.00
     THICK_FRONT_BRANCH_COMPETITION_POWER: float = 1.0
     THICK_FRONT_BRANCH_GATE_POWER: float = 0.0
 
-    # Anisotropic neighborhood weights for branch competition.
-    # Larger Y weight tends to suppress side-by-side vertical jet competition more strongly.
-    THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT: float = 0.25 #0.35
+    THICK_FRONT_BRANCH_COMPETITION_X_WEIGHT: float = 0.25
     THICK_FRONT_BRANCH_COMPETITION_Y_WEIGHT: float = 1.00
-    THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT: float = 0.25 #0.35
+    THICK_FRONT_BRANCH_COMPETITION_DIAG_WEIGHT: float = 0.25
 
-    # gamma_like ~ rho^a * align_pos^b
     THICK_FRONT_BRANCH_DENSITY_POWER: float = 1.0
     THICK_FRONT_BRANCH_ALIGN_POWER: float = 2.0
 
-    # Optional small threshold before competition damping starts
     THICK_FRONT_BRANCH_COMPETITION_THRESHOLD: float = 0.0
-
-    # If True, gamma_like is normalized by frame max before competition
     THICK_FRONT_BRANCH_NORMALIZE_GAMMA: bool = False
 
     # ============================================================
@@ -239,3 +278,66 @@ class AppConfig:
     # Output
     # ============================================================
     OUTPUT_MP4: str = "output.mp4"
+    OUTPUT_PREFIX: str | None = None
+
+    # ------------------------------------------------------------
+    # Runtime
+    # ------------------------------------------------------------
+    def __post_init__(self):
+        self.apply_env_overrides()
+
+    def apply_env_overrides(self):
+        """
+        Override dataclass fields from environment variables.
+
+        Accepted env variable names for a field:
+          - exact field name, e.g. screen_center_x
+          - upper-case field name, e.g. SCREEN_CENTER_X
+        """
+        for f in fields(self):
+            name = f.name
+            current_value = getattr(self, name)
+
+            raw = None
+            used_key = None
+            for key in (name, name.upper()):
+                if key in os.environ:
+                    raw = os.environ[key]
+                    used_key = key
+                    break
+
+            if raw is None:
+                continue
+
+            parsed = _parse_env_value(raw)
+
+            try:
+                coerced = _coerce_like_default(parsed, current_value)
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to apply env override for {name} from {used_key}={raw!r}: {e}"
+                ) from e
+
+            setattr(self, name, coerced)
+            print(f"[CFG OVERRIDE] {name} <- {coerced!r} (from {used_key})")
+
+    def dump_selected(self):
+        keys = [
+            "THEORY_NAME",
+            "DETECTOR_NAME",
+            "screen_center_x",
+            "screen_eval_width",
+            "k0x",
+            "k0y",
+            "OUTPUT_PREFIX",
+            "BATCH_FAST_MODE",
+            "ENABLE_FLUX_BATCH_SAMPLER",
+            "BREAK_ON_DETECTOR_CLICK",
+            "FLUX_BATCH_NUM_SAMPLES",
+            "dt",
+            "n_steps",
+            "save_every",
+        ]
+        print("[CFG] effective values:")
+        for k in keys:
+            print(f"  {k} = {getattr(self, k)!r}")

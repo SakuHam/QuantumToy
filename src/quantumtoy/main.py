@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import time
+
 import numpy as np
 
 from config import AppConfig
@@ -454,6 +456,8 @@ def build_sigma_dependent_products(
 
 def main():
     cfg = AppConfig()
+    cfg.dump_selected()
+    batch_fast_mode = bool(getattr(cfg, "BATCH_FAST_MODE", False))
 
     # --------------------------------------------------------
     # 1) Build grid / potential / theory / detector
@@ -509,7 +513,6 @@ def main():
         det_gate_y = float(getattr(detector, "detector_gate_center_y", 0.0))
         det_gate_wy = float(getattr(detector, "detector_gate_width_y", -1.0))
 
-        batch_fast_mode = bool(getattr(cfg, "BATCH_FAST_MODE", False))
         batch_sampler = FluxBatchSampler(
             grid=grid,
             gate_center_x=det_gate_x,
@@ -566,25 +569,49 @@ def main():
         vx_est, vy_est, sp_est = theory.expected_group_velocity(cfg.k0x, cfg.k0y)
         print(f"[DIRAC V_EST] vx≈{vx_est:.6f}, vy≈{vy_est:.6f}, |v|≈{sp_est:.6f}")
 
+    t_total_start = time.perf_counter()
+
+    t_step = 0.0
+    t_detector = 0.0
+    t_batch = 0.0
+    t_density = 0.0
+
     actual_last_step = 0
 
     for n in range(cfg.n_steps + 1):
+
         actual_last_step = n
         t_now = n * cfg.dt
 
-        rho = theory.density(state)
-        norm_now = norm_prob(rho, grid.dx, grid.dy)
+        # -------------------------
+        # Batch sampler update
+        # -------------------------
+        if batch_sampler is not None and state.ndim == 2:
+            t0 = time.perf_counter()
+            batch_sampler.update(state, cfg.dt)
+            t_batch += time.perf_counter() - t0
 
-        if batch_sampler is not None:
-            # Note: this assumes scalar Schrödinger-like state.
-            # Dirac/spinor support would need current built from the specific theory.
-            if state.ndim == 2:
-                batch_sampler.update(state, cfg.dt)
-
+        # -------------------------
+        # Detector
+        # -------------------------
+        t0 = time.perf_counter()
         det_res = detector.step(state, cfg.dt, t=t_now)
+        t_detector += time.perf_counter() - t0
+
         detector_diags.append(det_res.aux if det_res.aux is not None else {})
 
-        if n % cfg.save_every == 0:
+        need_save = (n % cfg.save_every == 0)
+
+        if need_save:
+
+            # -------------------------
+            # Density + norm
+            # -------------------------
+            t0 = time.perf_counter()
+
+            rho = theory.density(state)
+            norm_now = norm_prob(rho, grid.dx, grid.dy)
+
             frames_density.append(rho[grid.ys, grid.xs].copy())
             times.append(t_now)
             norms.append(norm_now)
@@ -599,6 +626,8 @@ def main():
 
                 state_vis_frames.append(state_vis)
 
+            t_density += time.perf_counter() - t0
+
             if (len(frames_density) % 20) == 0:
                 print(
                     f"[FWD] step {n:5d}/{cfg.n_steps}, "
@@ -606,20 +635,66 @@ def main():
                     f"frames={len(frames_density)}"
                 )
 
+        # -------------------------
+        # Click detection
+        # -------------------------
         if det_res.clicked and not detector_clicked:
+
             detector_clicked = True
             det_result_final = det_res
+
             print(
-                f"[DETECTOR] clicked at step={n}, t={t_now:.6f}, "
-                f"x={det_res.click_x}, y={det_res.click_y}"
+                f"[DETECTOR] clicked at step={n}, "
+                f"t={t_now:.6f}, "
+                f"x={det_res.click_x}, "
+                f"y={det_res.click_y}"
             )
 
             if break_on_detector_click:
                 print("[FWD] breaking on detector click.")
                 break
 
+        # -------------------------
+        # Forward step
+        # -------------------------
         if n < cfg.n_steps:
+
+            t0 = time.perf_counter()
+
             state = theory.step_forward(state, cfg.dt).state
+
+            t_step += time.perf_counter() - t0
+
+    t_total = time.perf_counter() - t_total_start
+
+    print("\n================ PROFILE =================")
+
+    def pct(x):
+        return 100.0 * x / t_total if t_total > 0 else 0.0
+
+    print(f"Total runtime      : {t_total:8.3f} s")
+
+    print(
+        f"step_forward       : {t_step:8.3f} s "
+        f"({pct(t_step):5.1f}%)"
+    )
+
+    print(
+        f"detector.step      : {t_detector:8.3f} s "
+        f"({pct(t_detector):5.1f}%)"
+    )
+
+    print(
+        f"batch_sampler      : {t_batch:8.3f} s "
+        f"({pct(t_batch):5.1f}%)"
+    )
+
+    print(
+        f"density + norm     : {t_density:8.3f} s "
+        f"({pct(t_density):5.1f}%)"
+    )
+
+    print("==========================================\n")
 
     frames_density = np.asarray(frames_density, dtype=float)
     times = np.asarray(times, dtype=float)
