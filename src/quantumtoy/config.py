@@ -17,10 +17,10 @@ class AppConfig:
     # Detector
     # ============================================================
 
-    DETECTOR_NAME = "born"   # tai "emergent"
+    DETECTOR_NAME = "emergent"   # tai "emergent"
     DETECTOR_GATE_CENTER_X = 10.0
     DETECTOR_GATE_WIDTH = 0.75
-    DETECTOR_CLICK_THRESHOLD = 1.0
+    DETECTOR_CLICK_THRESHOLD = 0.01
     DETECTOR_MIN_TOTAL_WEIGHT = 1e-6
     DETECTOR_MIN_PEAK_WEIGHT = 1e-8
 
@@ -168,13 +168,13 @@ class AppConfig:
     # Time stepping
     # ============================================================
     dt: float = 0.003
-    n_steps: int = 1600 #2200
+    n_steps: int = 2200
     save_every: int = 5
 
     # ============================================================
     # Click / backward / Emix
     # ============================================================
-    CLICK_MODE: str = "forced_point"          # "born", "forced_point"
+    CLICK_MODE: str = "born"          # "born", "forced_point"
     FORCE_CLICK_X: float = 10.0
     FORCE_CLICK_Y: float = 2.0
 
