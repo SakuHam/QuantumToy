@@ -9,8 +9,11 @@ from .base import DetectorModel, DetectorStepResult
 @dataclass
 class BornDetector(DetectorModel):
     """
-    Simple detector that samples a click from rho = |psi|^2
-    in a detector-gated region.
+    Simple detector that samples a click from rho in a detector-gated region.
+
+    Supports both:
+      - scalar wavefunction: psi.shape == (Ny, Nx)
+      - 2-component Dirac spinor: psi.shape == (2, Ny, Nx)
 
     This is not emergent dynamics; it is useful as a baseline detector.
     """
@@ -36,6 +39,7 @@ class BornDetector(DetectorModel):
     _gate_cache: np.ndarray | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self):
+        self._validate_params()
         self._rng = np.random.default_rng(self.rng_seed)
 
     def reset(self, **kwargs) -> None:
@@ -49,6 +53,16 @@ class BornDetector(DetectorModel):
 
     def has_clicked(self) -> bool:
         return self._clicked
+
+    def _validate_params(self) -> None:
+        if self.detector_gate_width <= 0.0:
+            raise ValueError("detector_gate_width must be > 0")
+        if self.detector_min_total_weight < 0.0:
+            raise ValueError("detector_min_total_weight must be >= 0")
+        if self.detector_min_peak_weight < 0.0:
+            raise ValueError("detector_min_peak_weight must be >= 0")
+        if self.click_time_mode not in ("first_call", "provided_time"):
+            raise ValueError("click_time_mode must be 'first_call' or 'provided_time'")
 
     def _detector_gate(self) -> np.ndarray:
         if self._gate_cache is not None:
@@ -74,24 +88,82 @@ class BornDetector(DetectorModel):
         self._gate_cache = gate.astype(float)
         return self._gate_cache
 
+    def _compute_rho(self, psi: np.ndarray) -> np.ndarray:
+        """
+        Return a 2D probability density.
+
+        Scalar Schrödinger:
+            rho = |psi|^2
+
+        2-component Dirac:
+            rho = |psi[0]|^2 + |psi[1]|^2
+        """
+        psi = np.asarray(psi)
+
+        if psi.ndim == 2:
+            rho = np.abs(psi) ** 2
+            return rho.astype(float)
+
+        if psi.ndim == 3:
+            if psi.shape[0] != 2:
+                raise ValueError(
+                    f"Dirac psi must have shape (2, Ny, Nx), got {psi.shape}"
+                )
+            rho = np.abs(psi[0]) ** 2 + np.abs(psi[1]) ** 2
+            return rho.astype(float)
+
+        raise ValueError(
+            f"Unsupported psi shape {psi.shape}; expected (Ny, Nx) or (2, Ny, Nx)"
+        )
+
+    def _validate_psi_shape(self, psi: np.ndarray) -> None:
+        psi = np.asarray(psi)
+
+        if psi.ndim == 2:
+            spatial_shape = psi.shape
+        elif psi.ndim == 3:
+            spatial_shape = psi.shape[-2:]
+        else:
+            raise ValueError(
+                f"Unsupported psi shape {psi.shape}; expected (Ny, Nx) or (2, Ny, Nx)"
+            )
+
+        expected = (self.grid.Ny, self.grid.Nx)
+        if spatial_shape != expected:
+            raise ValueError(
+                f"psi spatial shape {spatial_shape} does not match grid shape {expected}; "
+                f"full psi shape was {psi.shape}"
+            )
+
+    def _latched_result(self) -> DetectorStepResult:
+        return DetectorStepResult(
+            clicked=True,
+            click_ix=self._click_ix,
+            click_iy=self._click_iy,
+            click_x=None if self._click_ix is None else float(self.grid.X[self._click_iy, self._click_ix]),
+            click_y=None if self._click_iy is None else float(self.grid.Y[self._click_iy, self._click_ix]),
+            click_time=self._click_time,
+            aux={"mode": "latched"},
+        )
+
     def step(
         self,
         psi: np.ndarray,
         dt: float,
         t: float | None = None,
     ) -> DetectorStepResult:
-        if self._clicked:
-            return DetectorStepResult(
-                clicked=True,
-                click_ix=self._click_ix,
-                click_iy=self._click_iy,
-                click_x=None if self._click_ix is None else float(self.grid.X[self._click_iy, self._click_ix]),
-                click_y=None if self._click_iy is None else float(self.grid.Y[self._click_iy, self._click_ix]),
-                click_time=self._click_time,
-                aux={"mode": "latched"},
-            )
+        if not np.isfinite(dt):
+            raise ValueError(f"dt is not finite: {dt}")
+        if dt <= 0.0:
+            raise ValueError(f"dt must be > 0, got {dt}")
 
-        rho = (np.abs(psi) ** 2).astype(float)
+        psi = np.asarray(psi, dtype=np.complex128)
+        self._validate_psi_shape(psi)
+
+        if self._clicked and self.detector_latch_click:
+            return self._latched_result()
+
+        rho = self._compute_rho(psi)
         gate = self._detector_gate()
         weights = rho * gate
 
@@ -122,7 +194,7 @@ class BornDetector(DetectorModel):
 
         flat = weights.ravel()
         s = float(np.sum(flat))
-        if s <= 0.0:
+        if s <= 0.0 or not np.isfinite(s):
             return DetectorStepResult(
                 clicked=False,
                 aux={
@@ -140,7 +212,11 @@ class BornDetector(DetectorModel):
         self._clicked = True
         self._click_ix = int(ix)
         self._click_iy = int(iy)
-        self._click_time = t
+
+        if self.click_time_mode == "provided_time":
+            self._click_time = None if t is None else float(t)
+        else:
+            self._click_time = 0.0 if t is None else float(t)
 
         return DetectorStepResult(
             clicked=True,

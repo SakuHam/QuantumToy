@@ -9,7 +9,7 @@ import numpy as np
 from config import AppConfig
 from core.grid import build_grid
 from core.potentials import build_double_slit_and_caps
-from core.utils import make_packet, norm_prob
+from core.utils import make_packet, norm_prob, make_packet_scout_main_scalar_seed
 from core.simulation_types import PotentialSpec
 from theories.registry import build_theory
 
@@ -535,14 +535,25 @@ def main():
     # --------------------------------------------------------
     # 2) Initial state
     # --------------------------------------------------------
-    psi0 = make_packet(
-        X=grid.X,
-        Y=grid.Y,
-        x0=cfg.x0,
-        y0=cfg.y0,
-        sigma0=cfg.sigma0,
-        k0x=cfg.k0x,
-        k0y=cfg.k0y,
+#    psi0 = make_packet(
+#        X=grid.X,
+#        Y=grid.Y,
+#        x0=cfg.x0,
+#        y0=cfg.y0,
+#        sigma0=cfg.sigma0,
+#        k0x=cfg.k0x,
+#        k0y=cfg.k0y,
+#    )
+    psi0 = make_packet_scout_main_scalar_seed(
+        grid.X,
+        grid.Y,
+        main_x0=-15.0,
+        scout_x0=-6.0,
+        main_kx=4.0,
+        scout_kx=4.0,
+        scout_amp=0.15,
+        dx=grid.dx,
+        dy=grid.dy,
     )
 
     state = theory.initialize_state(psi0)

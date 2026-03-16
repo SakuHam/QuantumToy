@@ -235,6 +235,30 @@ def mode_has_contours(mode: str) -> bool:
     return mode in ("phase_contours", "ridge_phase_contours")
 
 
+def is_finite_scalar(x) -> bool:
+    try:
+        return np.isfinite(float(x))
+    except Exception:
+        return False
+
+
+def compute_click_frame_idx(times: np.ndarray, t_det) -> int | None:
+    if not is_finite_scalar(t_det):
+        return None
+
+    t_det = float(t_det)
+
+    if len(times) == 0:
+        return None
+
+    if t_det <= float(times[0]):
+        return 0
+    if t_det > float(times[-1]):
+        return None
+
+    return int(np.searchsorted(times, t_det, side="left"))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("npz_path", help="Path to saved .npz run bundle")
@@ -326,6 +350,9 @@ def main():
         grid.y_vis_min,
         grid.y_vis_max,
     )
+
+    click_has_position = is_finite_scalar(x_click) and is_finite_scalar(y_click)
+    click_frame_idx = compute_click_frame_idx(times, t_det)
 
     if state_vis_frames is not None:
         dbg_i = args.debug_frame if args.debug_frame >= 0 else (len(state_vis_frames) - 1)
@@ -531,15 +558,17 @@ def main():
             label=f"ridge ({cfg.RIDGE_MODE})",
         )
 
+        # FIX: create click marker hidden initially
         click_marker, = ax.plot(
-            [x_click],
-            [y_click],
+            [],
+            [],
             marker="x",
             markersize=9,
             linestyle="None",
             color="yellow",
             alpha=0.9,
             label="click",
+            visible=False,
         )
 
         ridge_trail, = ax.plot(
@@ -752,6 +781,17 @@ def main():
                 else:
                     bohm_heads[k].set_data([], [])
 
+    def update_click_marker(panel: dict, i: int):
+        marker = panel["click_marker"]
+
+        if (not click_has_position) or (click_frame_idx is None) or (i < click_frame_idx):
+            marker.set_data([], [])
+            marker.set_visible(False)
+            return
+
+        marker.set_data([float(x_click)], [float(y_click)])
+        marker.set_visible(True)
+
     def make_main_title(i: int, mode: str):
         parts = [
             rf"ρ(t): σT={sigma_current[0]:.3f}",
@@ -805,6 +845,7 @@ def main():
             else:
                 panel["ridge_trail"].set_data([], [])
 
+            update_click_marker(panel, i)
             update_flow_arrow(panel, i)
             update_bohmian_overlay(panel, i)
 

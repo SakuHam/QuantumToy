@@ -15,6 +15,10 @@ class EmergentDetector(DetectorModel):
       - hotspot / branch selection
       - finite click localization resolution
 
+    Supports both:
+      - scalar wavefunction: psi.shape == (Ny, Nx)
+      - 2-component Dirac spinor: psi.shape == (2, Ny, Nx)
+
     Main ideas:
       - Detector state D(x,y) integrates incoming signal
       - Click is not forced to global argmax(D)
@@ -46,6 +50,7 @@ class EmergentDetector(DetectorModel):
     detector_drive_mode: str = "flux_x_positive"  # "flux_x_positive", "flux_x_abs", "rho"
     detector_hbar: float = 1.0
     detector_mass: float = 1.0
+    detector_c_light: float = 1.0
 
     # --------------------------------------------------------
     # Dynamics
@@ -236,6 +241,10 @@ class EmergentDetector(DetectorModel):
             raise ValueError("detector_debug_every_n_steps must be >= 1")
         if self.detector_mass <= 0.0:
             raise ValueError("detector_mass must be > 0")
+        if self.detector_hbar <= 0.0:
+            raise ValueError("detector_hbar must be > 0")
+        if self.detector_c_light <= 0.0:
+            raise ValueError("detector_c_light must be > 0")
         if self.detector_drive_mode not in ("flux_x_positive", "flux_x_abs", "rho"):
             raise ValueError("invalid detector_drive_mode")
         if self.detector_branch_selection_mode not in ("argmax", "sample_hotspots", "sample_patch"):
@@ -256,6 +265,22 @@ class EmergentDetector(DetectorModel):
     # --------------------------------------------------------
     # Internal helpers
     # --------------------------------------------------------
+
+    def _validate_psi_shape(self, psi: np.ndarray):
+        if psi.ndim == 2:
+            spatial_shape = psi.shape
+        elif psi.ndim == 3:
+            spatial_shape = psi.shape[-2:]
+        else:
+            raise ValueError(
+                f"Unsupported psi shape {psi.shape}; expected (Ny, Nx) or (2, Ny, Nx)"
+            )
+
+        if spatial_shape != self._state.shape:
+            raise ValueError(
+                f"psi spatial shape {spatial_shape} does not match detector state shape {self._state.shape}; "
+                f"full psi shape was {psi.shape}"
+            )
 
     def _detector_gate(self) -> np.ndarray:
         if self._gate_cache is not None:
@@ -289,20 +314,77 @@ class EmergentDetector(DetectorModel):
         return inhibition.astype(float)
 
     def _compute_rho(self, psi: np.ndarray) -> np.ndarray:
-        return (np.abs(psi) ** 2).astype(float)
+        """
+        Scalar Schrödinger:
+            rho = |psi|^2
+
+        2-component Dirac:
+            rho = |psi1|^2 + |psi2|^2
+        """
+        if psi.ndim == 2:
+            return (np.abs(psi) ** 2).astype(float)
+
+        if psi.ndim == 3:
+            if psi.shape[0] != 2:
+                raise ValueError(f"Dirac psi must have 2 components, got shape {psi.shape}")
+            psi1, psi2 = psi
+            return (np.abs(psi1) ** 2 + np.abs(psi2) ** 2).astype(float)
+
+        raise ValueError(f"Unsupported psi shape {psi.shape}")
 
     def _compute_jx(self, psi: np.ndarray) -> np.ndarray:
-        dpsi_dx = np.gradient(psi, float(self.grid.dx), axis=1)
-        jx = (float(self.detector_hbar) / float(self.detector_mass)) * np.imag(
-            np.conjugate(psi) * dpsi_dx
-        )
-        return jx.astype(float)
+        """
+        Scalar Schrödinger:
+            jx = (hbar / m) Im(conj(psi) dpsi/dx)
+
+        2-component Dirac (matching DiracTheory.current()):
+            overlap = conj(psi1) * psi2
+            jx = 2 c Re(overlap)
+        """
+        if psi.ndim == 2:
+            dpsi_dx = np.gradient(psi, float(self.grid.dx), axis=1)
+            jx = (float(self.detector_hbar) / float(self.detector_mass)) * np.imag(
+                np.conjugate(psi) * dpsi_dx
+            )
+            return jx.astype(float)
+
+        if psi.ndim == 3:
+            if psi.shape[0] != 2:
+                raise ValueError(f"Dirac psi must have 2 components, got shape {psi.shape}")
+            psi1, psi2 = psi
+            overlap = np.conjugate(psi1) * psi2
+            jx = 2.0 * float(self.detector_c_light) * np.real(overlap)
+            return jx.astype(float)
+
+        raise ValueError(f"Unsupported psi shape {psi.shape}")
+
+    def _effective_phase_field(self, psi: np.ndarray) -> np.ndarray:
+        """
+        A heuristic 2D complex field for local phase-gradient estimation.
+
+        For scalar psi:
+            psi_eff = psi
+
+        For Dirac spinor:
+            use coherent component sum as a heuristic only.
+            This is NOT used for density/current, only for click blur estimate.
+        """
+        if psi.ndim == 2:
+            return psi
+        if psi.ndim == 3:
+            if psi.shape[0] != 2:
+                raise ValueError(f"Dirac psi must have 2 components, got shape {psi.shape}")
+            return psi[0] + psi[1]
+        raise ValueError(f"Unsupported psi shape {psi.shape}")
 
     def _compute_local_kx(self, psi: np.ndarray) -> np.ndarray:
-        phase = np.angle(psi)
+        psi_eff = self._effective_phase_field(psi)
+        phase = np.angle(psi_eff)
         dphi_dx = np.gradient(phase, float(self.grid.dx), axis=1)
-        amp = np.abs(psi)
+
+        amp = np.abs(psi_eff)
         mask = amp > 1e-12
+
         kx = np.zeros_like(dphi_dx, dtype=float)
         kx[mask] = dphi_dx[mask]
         return kx
@@ -401,7 +483,9 @@ class EmergentDetector(DetectorModel):
 
         if self.detector_use_quantum_min_resolution:
             kx_local = abs(float(self._compute_local_kx(psi)[iy, ix]))
-            sigma_q = float(self.detector_quantum_resolution_scale) / max(kx_local, float(self.detector_k_floor))
+            sigma_q = float(self.detector_quantum_resolution_scale) / max(
+                kx_local, float(self.detector_k_floor)
+            )
             sigma_x = max(sigma_x, sigma_q)
             sigma_y = max(sigma_y, sigma_q)
 
@@ -518,7 +602,16 @@ class EmergentDetector(DetectorModel):
             aux=aux,
         )
 
-    def _maybe_debug_print(self, *, t: float | None, dt: float, rho: np.ndarray, gate: np.ndarray, drive: np.ndarray, drive_base: np.ndarray):
+    def _maybe_debug_print(
+        self,
+        *,
+        t: float | None,
+        dt: float,
+        rho: np.ndarray,
+        gate: np.ndarray,
+        drive: np.ndarray,
+        drive_base: np.ndarray,
+    ):
         if not self.detector_debug:
             return
 
@@ -553,8 +646,9 @@ class EmergentDetector(DetectorModel):
             raise ValueError(f"dt is not finite: {dt}")
         if dt <= 0.0:
             raise ValueError(f"dt must be > 0, got {dt}")
-        if psi.shape != self._state.shape:
-            raise ValueError(f"psi shape {psi.shape} does not match detector state shape {self._state.shape}")
+
+        psi = np.asarray(psi, dtype=np.complex128)
+        self._validate_psi_shape(psi)
 
         gate = self._detector_gate()
 
@@ -578,7 +672,11 @@ class EmergentDetector(DetectorModel):
         D_new = self._state + dt * (drive - leak - inhibition) + noise
 
         if self.detector_state_blur_sigma > 0.0:
-            D_new = gaussian_filter(D_new, sigma=float(self.detector_state_blur_sigma), mode="nearest")
+            D_new = gaussian_filter(
+                D_new,
+                sigma=float(self.detector_state_blur_sigma),
+                mode="nearest",
+            )
 
         if self.detector_nonnegative:
             D_new = np.maximum(D_new, 0.0)
