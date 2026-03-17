@@ -20,6 +20,7 @@ def build_detector(cfg, grid):
             detector_gate_center_x=cfg.DETECTOR_GATE_CENTER_X,
             detector_gate_width=cfg.DETECTOR_GATE_WIDTH,
             detector_click_threshold=cfg.DETECTOR_CLICK_THRESHOLD,
+            detector_noise_seed=cfg.DETECTOR_NOISE_SEED,
         )
 
     raise ValueError(f"Unknown detector {cfg.DETECTOR_NAME!r}")

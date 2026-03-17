@@ -72,6 +72,7 @@ class AppConfig:
     DETECTOR_CLICK_THRESHOLD: float = 0.01
     DETECTOR_MIN_TOTAL_WEIGHT: float = 1e-6
     DETECTOR_MIN_PEAK_WEIGHT: float = 1e-8
+    DETECTOR_NOISE_SEED: int = 123
 
     # ============================================================
     # Ridge
