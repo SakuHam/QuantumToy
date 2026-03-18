@@ -39,6 +39,340 @@ RENDER_MODES = (
 )
 
 
+# ============================================================
+# Geometry overlay helpers
+# ============================================================
+
+class _LegacyBarrierComponent:
+    def __init__(self, name, kind, V_real, barrier_core, slit_masks):
+        self.name = name
+        self.kind = kind
+        self.V_real = V_real
+        self.barrier_core = barrier_core
+        self.slit_masks = slit_masks
+
+
+def _cfg_get(cfg, name, default):
+    return getattr(cfg, name, default)
+
+
+def _get_visible_field(grid, arr2d: np.ndarray) -> np.ndarray:
+    return arr2d[grid.ys, grid.xs]
+
+
+def _iter_barrier_components(potential):
+    comps = getattr(potential, "components", None)
+    if comps:
+        return list(comps)
+
+    barrier_core = getattr(potential, "barrier_core", None)
+    slit1_mask = getattr(potential, "slit1_mask", None)
+    slit2_mask = getattr(potential, "slit2_mask", None)
+    V_real = getattr(potential, "V_real", None)
+
+    if barrier_core is None or V_real is None:
+        return []
+
+    return [
+        _LegacyBarrierComponent(
+            name="legacy_barrier",
+            kind="legacy",
+            V_real=V_real,
+            barrier_core=barrier_core,
+            slit_masks={
+                "slit1": slit1_mask if slit1_mask is not None else np.zeros_like(barrier_core, dtype=bool),
+                "slit2": slit2_mask if slit2_mask is not None else np.zeros_like(barrier_core, dtype=bool),
+            },
+        )
+    ]
+
+
+def _component_center_xy(grid, comp):
+    core = comp.barrier_core
+    if core is None or not np.any(core):
+        return None
+    x = float(np.mean(grid.X[core]))
+    y = float(np.mean(grid.Y[core]))
+    return x, y
+
+
+def _draw_component_label(ax, grid, comp, cfg):
+    if not _cfg_get(cfg, "SHOW_COMPONENT_LABELS", False):
+        return None
+
+    center = _component_center_xy(grid, comp)
+    if center is None:
+        return None
+
+    x, y = center
+    txt = ax.text(
+        x,
+        y,
+        comp.name,
+        color="white",
+        fontsize=8,
+        ha="center",
+        va="center",
+        alpha=0.75,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.35, edgecolor="none"),
+    )
+    return txt
+
+
+def _draw_component_mask_mode(ax, grid, comp, extent, cfg):
+    artists = []
+
+    core_vis = _get_visible_field(grid, comp.barrier_core).astype(float)
+    slit_union = np.zeros_like(core_vis, dtype=bool)
+
+    for _, mask in comp.slit_masks.items():
+        if mask is not None:
+            slit_union |= _get_visible_field(grid, mask)
+
+    wall_vis = np.where(core_vis > 0.5, 1.0, 0.0)
+    wall_vis[slit_union] = 0.0
+
+    alpha_base = float(_cfg_get(cfg, "BARRIER_MASK_ALPHA", 0.26))
+    alpha = alpha_base * wall_vis
+
+    im = ax.imshow(
+        np.ones_like(wall_vis),
+        extent=extent,
+        origin="lower",
+        cmap="gray",
+        interpolation="nearest",
+        alpha=alpha,
+        zorder=4,
+    )
+    artists.append(im)
+
+    if np.any(wall_vis > 0.5):
+        try:
+            cs = ax.contour(
+                wall_vis,
+                levels=[0.5],
+                extent=extent,
+                origin="lower",
+                colors=["white"],
+                linewidths=[1.2],
+                alpha=0.9,
+                zorder=6,
+            )
+            artists.extend(cs.collections)
+        except Exception:
+            pass
+
+    txt = _draw_component_label(ax, grid, comp, cfg)
+    if txt is not None:
+        artists.append(txt)
+
+    return artists
+
+
+def _draw_component_potential_mode(ax, grid, comp, extent, cfg):
+    artists = []
+
+    V_vis = _get_visible_field(grid, comp.V_real)
+    vmax = float(np.max(V_vis))
+    if vmax <= 0.0:
+        return artists
+
+    Vn = V_vis / (vmax + 1e-30)
+
+    alpha_min = float(_cfg_get(cfg, "BARRIER_POTENTIAL_ALPHA_MIN", 0.18))
+    alpha_max = float(_cfg_get(cfg, "BARRIER_POTENTIAL_ALPHA_MAX", 0.55))
+    alpha = np.where(Vn > 1e-8, alpha_min + (alpha_max - alpha_min) * Vn, 0.0)
+
+    im = ax.imshow(
+        np.ones_like(Vn),
+        extent=extent,
+        origin="lower",
+        cmap="gray",
+        interpolation="nearest",
+        alpha=alpha,
+        zorder=4,
+    )
+    artists.append(im)
+
+    levels_rel = _cfg_get(cfg, "GEOMETRY_CONTOUR_LEVELS", (0.15, 0.5, 0.85))
+    levels_abs = [float(lv) * vmax for lv in levels_rel if 0.0 < float(lv) < 1.0]
+
+    if levels_abs:
+        try:
+            cs = ax.contour(
+                V_vis,
+                levels=levels_abs,
+                extent=extent,
+                origin="lower",
+                colors=["white"] * len(levels_abs),
+                linewidths=np.linspace(0.8, 1.2, len(levels_abs)),
+                alpha=0.85,
+                zorder=6,
+            )
+            artists.extend(cs.collections)
+        except Exception:
+            pass
+
+    txt = _draw_component_label(ax, grid, comp, cfg)
+    if txt is not None:
+        artists.append(txt)
+
+    return artists
+
+
+def _draw_component_contour_only_mode(ax, grid, comp, extent, cfg):
+    artists = []
+
+    V_vis = _get_visible_field(grid, comp.V_real)
+    vmax = float(np.max(V_vis))
+
+    if vmax > 0.0:
+        try:
+            cs = ax.contour(
+                V_vis,
+                levels=[0.5 * vmax],
+                extent=extent,
+                origin="lower",
+                colors=["white"],
+                linewidths=[1.4],
+                alpha=0.92,
+                zorder=6,
+            )
+            artists.extend(cs.collections)
+        except Exception:
+            pass
+    else:
+        core_vis = _get_visible_field(grid, comp.barrier_core).astype(float)
+        slit_union = np.zeros_like(core_vis, dtype=bool)
+
+        for _, mask in comp.slit_masks.items():
+            if mask is not None:
+                slit_union |= _get_visible_field(grid, mask)
+
+        wall_vis = np.where(core_vis > 0.5, 1.0, 0.0)
+        wall_vis[slit_union] = 0.0
+
+        if np.any(wall_vis > 0.5):
+            try:
+                cs = ax.contour(
+                    wall_vis,
+                    levels=[0.5],
+                    extent=extent,
+                    origin="lower",
+                    colors=["white"],
+                    linewidths=[1.4],
+                    alpha=0.92,
+                    zorder=6,
+                )
+                artists.extend(cs.collections)
+            except Exception:
+                pass
+
+    txt = _draw_component_label(ax, grid, comp, cfg)
+    if txt is not None:
+        artists.append(txt)
+
+    return artists
+
+
+def draw_static_geometry(ax, grid, potential, cfg, extent):
+    """
+    Draw screen/CAP/barrier geometry using structured barrier components when available.
+    Returns a list of static matplotlib artists.
+    """
+    artists = []
+
+    if potential is None:
+        ax.axvline(cfg.barrier_center_x, color="white", linestyle="--", alpha=0.6, linewidth=1.1, zorder=5)
+        ax.axvline(cfg.screen_center_x, color="cyan", linestyle="--", alpha=0.45, linewidth=1.0, zorder=5)
+        return artists
+
+    # Screen overlay
+    if _cfg_get(cfg, "SHOW_SCREEN_OVERLAY", True):
+        screen_vis = potential.screen_mask_vis.astype(float)
+        if np.any(screen_vis > 0.5):
+            alpha_scale = float(_cfg_get(cfg, "SCREEN_ALPHA", 0.16))
+
+            im = ax.imshow(
+                screen_vis,
+                extent=extent,
+                origin="lower",
+                cmap="Blues",
+                interpolation="nearest",
+                alpha=alpha_scale * screen_vis,
+                zorder=3,
+            )
+            artists.append(im)
+
+            try:
+                cs = ax.contour(
+                    screen_vis,
+                    levels=[0.5],
+                    extent=extent,
+                    origin="lower",
+                    colors=["cyan"],
+                    linewidths=[1.0],
+                    alpha=0.70,
+                    zorder=6,
+                )
+                artists.extend(cs.collections)
+            except Exception:
+                pass
+
+    # CAP overlay
+    if _cfg_get(cfg, "SHOW_CAP_OVERLAY", True):
+        W_vis = _get_visible_field(grid, potential.W)
+        wmax = float(np.max(W_vis))
+        if wmax > 0.0:
+            Wn = W_vis / (wmax + 1e-30)
+            alpha_scale = float(_cfg_get(cfg, "CAP_ALPHA", 0.10))
+
+            im = ax.imshow(
+                Wn,
+                extent=extent,
+                origin="lower",
+                cmap="Greens",
+                interpolation="nearest",
+                alpha=alpha_scale * Wn,
+                zorder=2,
+            )
+            artists.append(im)
+
+            try:
+                cs = ax.contour(
+                    Wn,
+                    levels=[0.2, 0.5, 0.8],
+                    extent=extent,
+                    origin="lower",
+                    colors=["lime", "lime", "lime"],
+                    linewidths=[0.5, 0.7, 0.9],
+                    alpha=0.35,
+                    zorder=5,
+                )
+                artists.extend(cs.collections)
+            except Exception:
+                pass
+
+    # Barrier components
+    mode = str(_cfg_get(cfg, "BARRIER_PLOT_MODE", "mask")).lower().strip()
+
+    if mode != "off":
+        for comp in _iter_barrier_components(potential):
+            if mode == "mask":
+                artists.extend(_draw_component_mask_mode(ax, grid, comp, extent, cfg))
+            elif mode == "contour_only":
+                artists.extend(_draw_component_contour_only_mode(ax, grid, comp, extent, cfg))
+            else:
+                artists.extend(_draw_component_potential_mode(ax, grid, comp, extent, cfg))
+
+    return artists
+
+
+# ============================================================
+# General helpers
+# ============================================================
+
 def gamma_display(
     arr: np.ndarray,
     vref: float,
@@ -89,6 +423,7 @@ def build_potential_from_flag(grid, cfg, debug_free_case: bool):
             barrier_core=false_mask.copy(),
             slit1_mask=false_mask.copy(),
             slit2_mask=false_mask.copy(),
+            components=[],
         )
 
     return build_double_slit_and_caps(grid, cfg)
@@ -309,6 +644,28 @@ def main():
 
     cfg = build_cfg_from_meta(meta)
 
+    # Good defaults for new geometry plotting
+    if not hasattr(cfg, "BARRIER_PLOT_MODE"):
+        cfg.BARRIER_PLOT_MODE = "mask"
+    if not hasattr(cfg, "SHOW_SCREEN_OVERLAY"):
+        cfg.SHOW_SCREEN_OVERLAY = True
+    if not hasattr(cfg, "SHOW_CAP_OVERLAY"):
+        cfg.SHOW_CAP_OVERLAY = False
+    if not hasattr(cfg, "SHOW_COMPONENT_LABELS"):
+        cfg.SHOW_COMPONENT_LABELS = False
+    if not hasattr(cfg, "GEOMETRY_CONTOUR_LEVELS"):
+        cfg.GEOMETRY_CONTOUR_LEVELS = (0.15, 0.50, 0.85)
+    if not hasattr(cfg, "BARRIER_MASK_ALPHA"):
+        cfg.BARRIER_MASK_ALPHA = 0.26
+    if not hasattr(cfg, "BARRIER_POTENTIAL_ALPHA_MIN"):
+        cfg.BARRIER_POTENTIAL_ALPHA_MIN = 0.18
+    if not hasattr(cfg, "BARRIER_POTENTIAL_ALPHA_MAX"):
+        cfg.BARRIER_POTENTIAL_ALPHA_MAX = 0.55
+    if not hasattr(cfg, "SCREEN_ALPHA"):
+        cfg.SCREEN_ALPHA = 0.16
+    if not hasattr(cfg, "CAP_ALPHA"):
+        cfg.CAP_ALPHA = 0.10
+
     grid = build_grid(
         visible_lx=cfg.VISIBLE_LX,
         visible_ly=cfg.VISIBLE_LY,
@@ -509,6 +866,7 @@ def main():
                 cmap="magma",
                 interpolation=cfg.IM_INTERPOLATION,
                 norm=PowerNorm(gamma=0.35),
+                zorder=1,
             )
         else:
             im = ax.imshow(
@@ -517,7 +875,16 @@ def main():
                 origin="lower",
                 aspect="equal",
                 interpolation=cfg.IM_INTERPOLATION,
+                zorder=1,
             )
+
+        static_geometry_artists = draw_static_geometry(
+            ax=ax,
+            grid=grid,
+            potential=potential,
+            cfg=cfg,
+            extent=extent,
+        )
 
         contour_artists = []
         if mode_has_contours(mode) and rho_norm0 is not None:
@@ -529,13 +896,15 @@ def main():
                 colors="white",
                 linewidths=0.7,
                 alpha=0.7,
+                zorder=7,
             )
             contour_artists = list(cs.collections)
 
-        ax.axvline(cfg.barrier_center_x, color="white", linestyle="--", alpha=0.6)
-        ax.axvline(cfg.screen_center_x, color="cyan", linestyle="--", alpha=0.4)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
+        ax.set_aspect("equal")
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
 
         if split_view:
             title = ax.set_title(f"{mode} | t={times[0]:.3f} | σT={sigma_init:.3f}")
@@ -556,9 +925,9 @@ def main():
             color="lime",
             alpha=0.9,
             label=f"ridge ({cfg.RIDGE_MODE})",
+            zorder=10,
         )
 
-        # FIX: create click marker hidden initially
         click_marker, = ax.plot(
             [],
             [],
@@ -569,6 +938,7 @@ def main():
             alpha=0.9,
             label="click",
             visible=False,
+            zorder=10,
         )
 
         ridge_trail, = ax.plot(
@@ -578,6 +948,7 @@ def main():
             linewidth=1.5,
             color="lime",
             alpha=0.5,
+            zorder=9,
         )
 
         flow_quiver = None
@@ -593,6 +964,7 @@ def main():
                 color="cyan",
                 alpha=0.9,
                 width=0.006,
+                zorder=11,
             )
 
         bohm_lines = []
@@ -608,6 +980,7 @@ def main():
                     color=cfg.BOHMIAN_COLOR,
                     alpha=0.85,
                     label="Bohmian traj" if k == 0 else None,
+                    zorder=8,
                 )
                 bohm_lines.append(line_k)
 
@@ -620,6 +993,7 @@ def main():
                         linestyle="None",
                         color=cfg.BOHMIAN_HEAD_COLOR,
                         alpha=0.95,
+                        zorder=9,
                     )
                 else:
                     head_k = None
@@ -634,6 +1008,7 @@ def main():
                 "mode": mode,
                 "im": im,
                 "title": title,
+                "static_geometry_artists": static_geometry_artists,
                 "contour_artists": contour_artists,
                 "ridge_marker": ridge_marker,
                 "click_marker": click_marker,
@@ -698,6 +1073,7 @@ def main():
                 colors="white",
                 linewidths=0.7,
                 alpha=0.7,
+                zorder=7,
             )
             panel["contour_artists"] = list(cs.collections)
 
@@ -903,6 +1279,7 @@ def main():
         refresh_titles(i)
 
         for panel in panel_states:
+            artists.extend(panel["static_geometry_artists"])
             artists.append(panel["ridge_marker"])
             artists.append(panel["click_marker"])
             artists.append(panel["ridge_trail"])

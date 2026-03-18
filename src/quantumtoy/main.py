@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-
 import time
 
 import numpy as np
@@ -9,7 +9,8 @@ import numpy as np
 from config import AppConfig
 from core.grid import build_grid
 from core.potentials import build_double_slit_and_caps
-from core.utils import make_packet, norm_prob, make_packet_scout_main_scalar_seed
+from core.packets import PacketFactory
+from core.utils import norm_prob
 from core.simulation_types import PotentialSpec
 from theories.registry import build_theory
 
@@ -34,22 +35,18 @@ from analysis.bohmian import (
 from analysis.debug_continuity import continuity_residual_from_state_frames
 
 from file.run_io import save_run_bundle
+from core.potentials import build_potential
 
 
 # ============================================================
-# Helpers
+# Standalone helpers
 # ============================================================
 
 def estimate_slit_separation_from_masks(grid, potential):
     """
     Estimate slit separation d from slit masks.
-
-    Returns
-    -------
-    d : float
-        Distance between slit centers in y-direction.
+    Returns distance between slit centers in y-direction.
     """
-
     slit1 = potential.slit1_mask
     slit2 = potential.slit2_mask
 
@@ -74,9 +71,13 @@ def estimate_slit_separation_from_masks(grid, potential):
     a1 = np.max(y1_vals) - np.min(y1_vals)
     a2 = np.max(y2_vals) - np.min(y2_vals)
 
-    print(f"[SLITS] center1_y={y1:.6f} center2_y={y2:.6f} separation d={d:.6f} slit1 width={a1} slit2 width={a2}")
+    print(
+        f"[SLITS] center1_y={y1:.6f} center2_y={y2:.6f} "
+        f"separation d={d:.6f} slit1 width={a1} slit2 width={a2}"
+    )
 
     return d
+
 
 def estimate_group_velocity(cfg, theory) -> float:
     """
@@ -207,9 +208,6 @@ def run_diagnostics(
 
     Nt = len(times)
 
-    # --------------------------------------------------------
-    # D1) screen_int reference check
-    # --------------------------------------------------------
     screen_int_ref = np.array(
         [np.sum(frames_density[i][potential.screen_mask_vis]) * grid.dx * grid.dy for i in range(Nt)],
         dtype=float,
@@ -220,9 +218,6 @@ def run_diagnostics(
     assert np.allclose(screen_int, screen_int_ref, rtol=1e-12, atol=1e-12), \
         f"screen_int mismatch: max abs diff = {screen_diff}"
 
-    # --------------------------------------------------------
-    # D2) click sanity
-    # --------------------------------------------------------
     assert potential.screen_mask_vis.shape == frames_density[idx_det].shape, \
         "screen_mask_vis shape mismatch at detection frame"
 
@@ -243,9 +238,6 @@ def run_diagnostics(
     assert dx_screen < (cfg.screen_eval_width + grid.dx), \
         f"x_click={x_click} seems too far from detector screen center {cfg.screen_center_x}"
 
-    # --------------------------------------------------------
-    # D3) backward frame 0 must match initialized click state cropped
-    # --------------------------------------------------------
     phi0_full = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
     if phi0_full.ndim == 2:
         phi0_vis_ref = phi0_full[grid.ys, grid.xs]
@@ -259,9 +251,6 @@ def run_diagnostics(
     assert np.allclose(phi_tau_frames[0], phi0_vis_ref, rtol=1e-12, atol=1e-12), \
         f"phi_tau_frames[0] mismatch: max abs diff = {phi0_diff}"
 
-    # --------------------------------------------------------
-    # D4) backward library first few steps must match direct replay
-    # --------------------------------------------------------
     ncheck = min(5, Nt - 1)
     for i in range(ncheck):
         phi_test = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
@@ -280,9 +269,6 @@ def run_diagnostics(
         assert np.allclose(phi_tau_frames[i + 1], phi_test_vis, rtol=1e-9, atol=1e-9), \
             f"Backward library mismatch at frame {i+1}: max abs diff = {step_diff}"
 
-    # --------------------------------------------------------
-    # D5) Emix density reference check
-    # --------------------------------------------------------
     Emix_density_ref = build_Emix_density_reference(
         phi_tau_frames=phi_tau_frames,
         times=times,
@@ -306,9 +292,6 @@ def run_diagnostics(
     assert np.allclose(Emix_density_new, Emix_density_ref, rtol=1e-10, atol=1e-10), \
         f"Emix_density mismatch: max abs diff = {emix_density_diff}"
 
-    # --------------------------------------------------------
-    # D6) oldstyle rho reference check
-    # --------------------------------------------------------
     if state_vis_frames is not None:
         rho_old_ref = make_rho_density_product_oldstyle_reference(
             state_vis_frames=state_vis_frames,
@@ -331,9 +314,6 @@ def run_diagnostics(
         assert np.allclose(rho_old_new, rho_old_ref, rtol=1e-10, atol=1e-10), \
             f"rho_oldstyle mismatch: max abs diff = {rho_old_diff}"
 
-    # --------------------------------------------------------
-    # D7) checkpoint summaries
-    # --------------------------------------------------------
     check_ids = sorted(set([0, Nt // 2, Nt - 1]))
     for i in check_ids:
         fi = frames_density[i]
@@ -374,413 +354,430 @@ def run_diagnostics(
     print("\n================ DIAGNOSTIC BLOCK END ==================\n")
 
 
-def build_sigma_dependent_products(
-    *,
-    cfg,
-    theory,
-    grid,
-    state_vis_frames: np.ndarray,
-    phi_tau_frames: np.ndarray,
-    times: np.ndarray,
-    t_det: float,
-    tau_step: float,
-):
-    def _builder(sigmaT: float):
-        Emix = build_Emix_from_phi_tau(
-            phi_tau_frames=phi_tau_frames,
-            times=times,
-            t_det=t_det,
-            sigmaT=sigmaT,
-            tau_step=tau_step,
-            K_JITTER=cfg.K_JITTER,
+# ============================================================
+# Runtime data classes
+# ============================================================
+
+@dataclass
+class SimulationSetup:
+    cfg: AppConfig
+    grid: any
+    potential: PotentialSpec
+    theory: any
+    detector: any
+    debug_free_case: bool
+
+
+@dataclass
+class BatchSamplerConfig:
+    enabled: bool
+    num_samples: int
+    rng_seed: int | None
+    sample_sigma_x: float
+    sample_sigma_y: float
+    break_on_detector_click: bool
+
+
+@dataclass
+class BatchSamplerRuntime:
+    sampler: FluxBatchSampler | None = None
+    pseudo_clicks: list[dict] | None = None
+
+
+@dataclass
+class ForwardRunResult:
+    frames_density: np.ndarray
+    state_vis_frames: np.ndarray | None
+    times: np.ndarray
+    norms: np.ndarray
+    detector_diags: list[dict]
+    detector_clicked: bool
+    det_result_final: any
+    actual_last_step: int
+    batch_runtime: BatchSamplerRuntime
+
+
+@dataclass
+class ClickResolution:
+    idx_det: int
+    t_det: float
+    x_click: float
+    y_click: float
+    screen_int: np.ndarray
+    used_detector_click: bool
+
+
+@dataclass
+class SigmaProducts:
+    rho_init: np.ndarray
+    Emix_init: np.ndarray
+    ridge_x_init: np.ndarray
+    ridge_y_init: np.ndarray
+    ridge_s_init: np.ndarray
+    cos_th_init: np.ndarray | None
+    speed_init: np.ndarray | None
+    ux_init: np.ndarray | None
+    uy_init: np.ndarray | None
+    div_v_init: np.ndarray | None
+    sigma_init: float
+    vref: float
+    speed_ref: float
+
+
+@dataclass
+class BohmianResult:
+    bohm_traj_x: np.ndarray | None = None
+    bohm_traj_y: np.ndarray | None = None
+    bohm_traj_alive: np.ndarray | None = None
+    bohm_init_points: list = field(default_factory=list)
+
+
+# ============================================================
+# Main application class
+# ============================================================
+
+class QuantumSimulationApp:
+
+    def __init__(self, cfg: AppConfig):
+        self.cfg = cfg
+
+    # --------------------------------------------------------
+    # Setup
+    # --------------------------------------------------------
+
+    def build_setup(self) -> SimulationSetup:
+        cfg = self.cfg
+        cfg.dump_selected()
+
+        grid = build_grid(
+            visible_lx=cfg.VISIBLE_LX,
+            visible_ly=cfg.VISIBLE_LY,
+            n_visible_x=cfg.N_VISIBLE_X,
+            n_visible_y=cfg.N_VISIBLE_Y,
+            pad_factor=cfg.PAD_FACTOR,
         )
 
-        Emix_density_old = build_Emix_density_from_phi_tau(
-            phi_tau_frames=phi_tau_frames,
-            times=times,
-            t_det=t_det,
-            sigmaT=sigmaT,
-            tau_step=tau_step,
-            K_JITTER=cfg.K_JITTER,
-        )
+        debug_free_case = bool(getattr(cfg, "DEBUG_FREE_CASE", False))
 
-        rho = make_rho(
-            frames_psi=state_vis_frames,
-            Emix=Emix,
-            Emix_density=Emix_density_old,
-            dx=grid.dx,
-            dy=grid.dy,
-            mode=cfg.RHO_MODE,
-            blend_alpha=cfg.RHO_BLEND_ALPHA,
-        )
+        if debug_free_case:
+            zeros = np.zeros_like(grid.X, dtype=float)
+            false_mask = np.zeros_like(grid.X, dtype=bool)
+            false_mask_vis = np.zeros((grid.n_visible_y, grid.n_visible_x), dtype=bool)
 
-        rx, ry, rs = compute_ridge_xy(
-            frames_psi=state_vis_frames,
-            Emix=Emix,
-            x_vis_1d=grid.x_vis_1d,
-            y_vis_1d=grid.y_vis_1d,
-            mode=cfg.RIDGE_MODE,
-            top_q=cfg.CENTROID_TOP_Q,
-            radius=cfg.LOCALMAX_RADIUS,
-            alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
-        )
+            potential = PotentialSpec(
+                V_real=zeros.copy(),
+                W=zeros.copy(),
+                screen_mask_full=false_mask.copy(),
+                screen_mask_vis=false_mask_vis.copy(),
+                barrier_core=false_mask.copy(),
+                slit1_mask=false_mask.copy(),
+                slit2_mask=false_mask.copy(),
+            )
+        else:
+            potential = build_potential(grid, cfg)
+            for comp in potential.components:
+                print(comp.name, comp.kind, comp.V_real.shape)
 
-        cos_th = speed = ux = uy = div_v = None
-        cos_th, speed, ux, uy, div_v = alignment_and_diagnostics_from_state_frames(
+        estimate_slit_separation_from_masks(grid, potential)
+
+        theory = build_theory(cfg, grid, potential)
+        detector = build_detector(cfg, grid)
+
+        return SimulationSetup(
+            cfg=cfg,
+            grid=grid,
+            potential=potential,
             theory=theory,
-            state_vis_frames=state_vis_frames,
-            ridge_x=rx,
-            ridge_y=ry,
-            x_vis_1d=grid.x_vis_1d,
-            y_vis_1d=grid.y_vis_1d,
-            dx=grid.dx,
-            dy=grid.dy,
-            enable_divergence=cfg.ENABLE_DIVERGENCE_DIAGNOSTIC,
-            arrow_spatial_avg=cfg.ARROW_SPATIAL_AVG,
-            arrow_avg_radius=cfg.ARROW_AVG_RADIUS,
-            arrow_avg_gauss_sigma=cfg.ARROW_AVG_GAUSS_SIGMA,
-            arrow_temporal_smooth=cfg.ARROW_TEMPORAL_SMOOTH,
-            arrow_smooth_alpha=cfg.ARROW_SMOOTH_ALPHA,
-            align_eps_rho=cfg.ALIGN_EPS_RHO,
-            align_eps_speed=cfg.ALIGN_EPS_SPEED,
+            detector=detector,
+            debug_free_case=debug_free_case,
         )
 
-        return rho, Emix, rx, ry, rs, cos_th, speed, ux, uy, div_v
-
-    return _builder
-
-
-# ============================================================
-# Main
-# ============================================================
-
-def main():
-    cfg = AppConfig()
-    cfg.dump_selected()
-    batch_fast_mode = bool(getattr(cfg, "BATCH_FAST_MODE", False))
-
     # --------------------------------------------------------
-    # 1) Build grid / potential / theory / detector
+    # Batch sampler
     # --------------------------------------------------------
-    grid = build_grid(
-        visible_lx=cfg.VISIBLE_LX,
-        visible_ly=cfg.VISIBLE_LY,
-        n_visible_x=cfg.N_VISIBLE_X,
-        n_visible_y=cfg.N_VISIBLE_Y,
-        pad_factor=cfg.PAD_FACTOR,
-    )
 
-    DEBUG_FREE_CASE = False
-
-    if DEBUG_FREE_CASE:
-        zeros = np.zeros_like(grid.X, dtype=float)
-        false_mask = np.zeros_like(grid.X, dtype=bool)
-        false_mask_vis = np.zeros((grid.n_visible_y, grid.n_visible_x), dtype=bool)
-
-        potential = PotentialSpec(
-            V_real=zeros.copy(),
-            W=zeros.copy(),
-            screen_mask_full=false_mask.copy(),
-            screen_mask_vis=false_mask_vis.copy(),
-            barrier_core=false_mask.copy(),
-            slit1_mask=false_mask.copy(),
-            slit2_mask=false_mask.copy(),
+    def build_batch_sampler_config(self) -> BatchSamplerConfig:
+        cfg = self.cfg
+        return BatchSamplerConfig(
+            enabled=bool(getattr(cfg, "ENABLE_FLUX_BATCH_SAMPLER", True)),
+            num_samples=int(getattr(cfg, "FLUX_BATCH_NUM_SAMPLES", 10_000)),
+            rng_seed=getattr(cfg, "FLUX_BATCH_RNG_SEED", 12345),
+            sample_sigma_x=float(getattr(cfg, "FLUX_BATCH_SAMPLE_SIGMA_X", 0.0)),
+            sample_sigma_y=float(getattr(cfg, "FLUX_BATCH_SAMPLE_SIGMA_Y", 0.0)),
+            break_on_detector_click=bool(getattr(cfg, "BREAK_ON_DETECTOR_CLICK", True)),
         )
-    else:
-        potential = build_double_slit_and_caps(grid, cfg)
 
-    estimate_slit_separation_from_masks(grid, potential)
+    def maybe_build_batch_sampler(self, setup: SimulationSetup) -> BatchSamplerRuntime:
+        cfg = setup.cfg
+        detector = setup.detector
+        bcfg = self.build_batch_sampler_config()
 
-    theory = build_theory(cfg, grid, potential)
-    detector = build_detector(cfg, grid)
+        runtime = BatchSamplerRuntime()
 
-    # --------------------------------------------------------
-    # 1b) Optional cheap batch sampler from one forward run
-    # --------------------------------------------------------
-    enable_flux_batch_sampler = getattr(cfg, "ENABLE_FLUX_BATCH_SAMPLER", True)
-    flux_batch_num_samples = int(getattr(cfg, "FLUX_BATCH_NUM_SAMPLES", 10_000))
-    flux_batch_rng_seed = getattr(cfg, "FLUX_BATCH_RNG_SEED", 12345)
-    flux_batch_sample_sigma_x = float(getattr(cfg, "FLUX_BATCH_SAMPLE_SIGMA_X", 0.0))
-    flux_batch_sample_sigma_y = float(getattr(cfg, "FLUX_BATCH_SAMPLE_SIGMA_Y", 0.0))
-    break_on_detector_click = bool(getattr(cfg, "BREAK_ON_DETECTOR_CLICK", True))
+        if not bcfg.enabled:
+            return runtime
 
-    batch_sampler = None
-    pseudo_clicks = None
-
-    if enable_flux_batch_sampler:
         det_gate_x = float(getattr(detector, "detector_gate_center_x", cfg.screen_center_x))
         det_gate_wx = float(getattr(detector, "detector_gate_width", cfg.screen_eval_width))
         det_gate_y = float(getattr(detector, "detector_gate_center_y", 0.0))
         det_gate_wy = float(getattr(detector, "detector_gate_width_y", -1.0))
 
-        batch_sampler = FluxBatchSampler(
-            grid=grid,
+        runtime.sampler = FluxBatchSampler(
+            grid=setup.grid,
             gate_center_x=det_gate_x,
             gate_width_x=det_gate_wx,
             gate_center_y=det_gate_y,
             gate_width_y=det_gate_wy,
             hbar=float(getattr(cfg, "hbar", 1.0)),
             mass=float(getattr(cfg, "m_mass", 1.0)),
-            sample_sigma_x=flux_batch_sample_sigma_x,
-            sample_sigma_y=flux_batch_sample_sigma_y,
-            rng_seed=flux_batch_rng_seed,
+            sample_sigma_x=bcfg.sample_sigma_x,
+            sample_sigma_y=bcfg.sample_sigma_y,
+            rng_seed=bcfg.rng_seed,
         )
 
         print(
             "[BATCH] enabled: "
-            f"samples={flux_batch_num_samples}, "
+            f"samples={bcfg.num_samples}, "
             f"gate_center_x={det_gate_x}, gate_width_x={det_gate_wx}"
         )
 
-    # --------------------------------------------------------
-    # 2) Initial state
-    # --------------------------------------------------------
-    psi0 = make_packet(
-        X=grid.X,
-        Y=grid.Y,
-        x0=cfg.x0,
-        y0=cfg.y0,
-        sigma0=cfg.sigma0,
-        k0x=cfg.k0x,
-        k0y=cfg.k0y,
-    )
-#    psi0 = make_packet_scout_main_scalar_seed(
-#        grid.X,
-#        grid.Y,
-#        main_x0=-15.0,
-#        scout_x0=-6.0,
-#        main_kx=4.0,
-#        scout_kx=4.0,
-#        scout_amp=0.15,
-#        dx=grid.dx,
-#        dy=grid.dy,
-#    )
-
-    state = theory.initialize_state(psi0)
-    detector.reset()
+        return runtime
 
     # --------------------------------------------------------
-    # 3) Forward simulation
+    # Forward simulation
     # --------------------------------------------------------
-    frames_density = []
-    state_vis_frames = []
-    times = []
-    norms = []
 
-    detector_diags = []
-    detector_clicked = False
-    det_result_final = None
+    def run_forward(self, setup: SimulationSetup) -> ForwardRunResult:
+        cfg = setup.cfg
+        grid = setup.grid
+        theory = setup.theory
+        detector = setup.detector
 
-    print(
-        f"Forward simulation starts... "
-        f"theory={cfg.THEORY_NAME}, detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
-    )
+        packet = PacketFactory.build_initial_packet(cfg, grid)
+        print(f"[PACKET] initial packet mode={packet.packet_name}")
 
-    if cfg.THEORY_NAME == "dirac":
-        vx_est, vy_est, sp_est = theory.expected_group_velocity(cfg.k0x, cfg.k0y)
-        print(f"[DIRAC V_EST] vx≈{vx_est:.6f}, vy≈{vy_est:.6f}, |v|≈{sp_est:.6f}")
+        state = theory.initialize_state(packet.psi0)
+        detector.reset()
 
-    t_total_start = time.perf_counter()
+        batch_runtime = self.maybe_build_batch_sampler(setup)
+        batch_cfg = self.build_batch_sampler_config()
 
-    t_step = 0.0
-    t_detector = 0.0
-    t_batch = 0.0
-    t_density = 0.0
+        frames_density = []
+        state_vis_frames = []
+        times = []
+        norms = []
 
-    actual_last_step = 0
+        detector_diags = []
+        detector_clicked = False
+        det_result_final = None
 
-    for n in range(cfg.n_steps + 1):
+        print(
+            f"Forward simulation starts... "
+            f"theory={cfg.THEORY_NAME}, "
+            f"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
+        )
 
-        actual_last_step = n
-        t_now = n * cfg.dt
+        if cfg.THEORY_NAME == "dirac":
+            vx_est, vy_est, sp_est = theory.expected_group_velocity(cfg.k0x, cfg.k0y)
+            print(f"[DIRAC V_EST] vx≈{vx_est:.6f}, vy≈{vy_est:.6f}, |v|≈{sp_est:.6f}")
 
-        # -------------------------
-        # Batch sampler update
-        # -------------------------
-        if batch_sampler is not None and state.ndim == 2:
+        t_total_start = time.perf_counter()
+
+        t_step = 0.0
+        t_detector = 0.0
+        t_batch = 0.0
+        t_density = 0.0
+
+        actual_last_step = 0
+
+        for n in range(cfg.n_steps + 1):
+            actual_last_step = n
+            t_now = n * cfg.dt
+
+            if batch_runtime.sampler is not None and state.ndim == 2:
+                t0 = time.perf_counter()
+                batch_runtime.sampler.update(state, cfg.dt)
+                t_batch += time.perf_counter() - t0
+
             t0 = time.perf_counter()
-            batch_sampler.update(state, cfg.dt)
-            t_batch += time.perf_counter() - t0
+            det_res = detector.step(state, cfg.dt, t=t_now)
+            t_detector += time.perf_counter() - t0
 
-        # -------------------------
-        # Detector
-        # -------------------------
-        t0 = time.perf_counter()
-        det_res = detector.step(state, cfg.dt, t=t_now)
-        t_detector += time.perf_counter() - t0
+            detector_diags.append(det_res.aux if det_res.aux is not None else {})
 
-        detector_diags.append(det_res.aux if det_res.aux is not None else {})
+            need_save = (n % cfg.save_every == 0)
+            if need_save:
+                t0 = time.perf_counter()
 
-        need_save = (n % cfg.save_every == 0)
+                rho = theory.density(state)
+                norm_now = norm_prob(rho, grid.dx, grid.dy)
 
-        if need_save:
+                frames_density.append(rho[grid.ys, grid.xs].copy())
+                times.append(t_now)
+                norms.append(norm_now)
 
-            # -------------------------
-            # Density + norm
-            # -------------------------
-            t0 = time.perf_counter()
+                if cfg.SAVE_COMPLEX_STATE_FRAMES:
+                    if state.ndim == 2:
+                        state_vis = state[grid.ys, grid.xs].copy()
+                    elif state.ndim == 3:
+                        state_vis = state[:, grid.ys, grid.xs].copy()
+                    else:
+                        raise ValueError(f"Unsupported state ndim={state.ndim}")
 
-            rho = theory.density(state)
-            norm_now = norm_prob(rho, grid.dx, grid.dy)
+                    state_vis_frames.append(state_vis)
 
-            frames_density.append(rho[grid.ys, grid.xs].copy())
-            times.append(t_now)
-            norms.append(norm_now)
+                t_density += time.perf_counter() - t0
 
-            if cfg.SAVE_COMPLEX_STATE_FRAMES:
-                if state.ndim == 2:
-                    state_vis = state[grid.ys, grid.xs].copy()
-                elif state.ndim == 3:
-                    state_vis = state[:, grid.ys, grid.xs].copy()
-                else:
-                    raise ValueError(f"Unsupported state ndim={state.ndim}")
+                if (len(frames_density) % 20) == 0:
+                    print(
+                        f"[FWD] step {n:5d}/{cfg.n_steps}, "
+                        f"t={times[-1]:7.3f}, norm≈{norm_now:.6f}, "
+                        f"frames={len(frames_density)}"
+                    )
 
-                state_vis_frames.append(state_vis)
+            if det_res.clicked and not detector_clicked:
+                detector_clicked = True
+                det_result_final = det_res
 
-            t_density += time.perf_counter() - t0
-
-            if (len(frames_density) % 20) == 0:
                 print(
-                    f"[FWD] step {n:5d}/{cfg.n_steps}, "
-                    f"t={times[-1]:7.3f}, norm≈{norm_now:.6f}, "
-                    f"frames={len(frames_density)}"
+                    f"[DETECTOR] clicked at step={n}, "
+                    f"t={t_now:.6f}, "
+                    f"x={det_res.click_x}, "
+                    f"y={det_res.click_y}"
                 )
 
-        # -------------------------
-        # Click detection
-        # -------------------------
-        if det_res.clicked and not detector_clicked:
+                if batch_cfg.break_on_detector_click:
+                    print("[FWD] breaking on detector click.")
+                    break
 
-            detector_clicked = True
-            det_result_final = det_res
+            if n < cfg.n_steps:
+                t0 = time.perf_counter()
+                state = theory.step_forward(state, cfg.dt).state
+                t_step += time.perf_counter() - t0
 
-            print(
-                f"[DETECTOR] clicked at step={n}, "
-                f"t={t_now:.6f}, "
-                f"x={det_res.click_x}, "
-                f"y={det_res.click_y}"
-            )
+        t_total = time.perf_counter() - t_total_start
 
-            if break_on_detector_click:
-                print("[FWD] breaking on detector click.")
-                break
+        print("\n================ PROFILE =================")
 
-        # -------------------------
-        # Forward step
-        # -------------------------
-        if n < cfg.n_steps:
+        def pct(x):
+            return 100.0 * x / t_total if t_total > 0 else 0.0
 
-            t0 = time.perf_counter()
+        print(f"Total runtime      : {t_total:8.3f} s")
+        print(f"step_forward       : {t_step:8.3f} s ({pct(t_step):5.1f}%)")
+        print(f"detector.step      : {t_detector:8.3f} s ({pct(t_detector):5.1f}%)")
+        print(f"batch_sampler      : {t_batch:8.3f} s ({pct(t_batch):5.1f}%)")
+        print(f"density + norm     : {t_density:8.3f} s ({pct(t_density):5.1f}%)")
+        print("==========================================\n")
 
-            state = theory.step_forward(state, cfg.dt).state
+        frames_density = np.asarray(frames_density, dtype=float)
+        times = np.asarray(times, dtype=float)
+        norms = np.asarray(norms, dtype=float)
 
-            t_step += time.perf_counter() - t0
+        if cfg.SAVE_COMPLEX_STATE_FRAMES:
+            state_vis_frames = np.asarray(state_vis_frames)
+        else:
+            state_vis_frames = None
 
-    t_total = time.perf_counter() - t_total_start
+        print("Forward done.")
 
-    print("\n================ PROFILE =================")
+        if batch_runtime.sampler is not None:
+            try:
+                batch_runtime.pseudo_clicks = batch_runtime.sampler.sample_clicks(batch_cfg.num_samples)
+                print(
+                    "[BATCH] sampled pseudo-clicks: "
+                    f"n={len(batch_runtime.pseudo_clicks)}, "
+                    f"updates={batch_runtime.sampler.num_updates}, "
+                    f"total_flux={batch_runtime.sampler.total_flux_accum:.6e}"
+                )
+            except Exception as e:
+                batch_runtime.pseudo_clicks = None
+                print(f"[BATCH] sampling skipped: {e}")
 
-    def pct(x):
-        return 100.0 * x / t_total if t_total > 0 else 0.0
-
-    print(f"Total runtime      : {t_total:8.3f} s")
-
-    print(
-        f"step_forward       : {t_step:8.3f} s "
-        f"({pct(t_step):5.1f}%)"
-    )
-
-    print(
-        f"detector.step      : {t_detector:8.3f} s "
-        f"({pct(t_detector):5.1f}%)"
-    )
-
-    print(
-        f"batch_sampler      : {t_batch:8.3f} s "
-        f"({pct(t_batch):5.1f}%)"
-    )
-
-    print(
-        f"density + norm     : {t_density:8.3f} s "
-        f"({pct(t_density):5.1f}%)"
-    )
-
-    print("==========================================\n")
-
-    frames_density = np.asarray(frames_density, dtype=float)
-    times = np.asarray(times, dtype=float)
-    norms = np.asarray(norms, dtype=float)
-
-    if cfg.SAVE_COMPLEX_STATE_FRAMES:
-        state_vis_frames = np.asarray(state_vis_frames)
-    else:
-        state_vis_frames = None
-
-    Nt = len(times)
-    tau_step = cfg.save_every * cfg.dt
-
-    print("Forward done.")
-
-    if batch_sampler is not None:
-        try:
-            pseudo_clicks = batch_sampler.sample_clicks(flux_batch_num_samples)
-            print(
-                "[BATCH] sampled pseudo-clicks: "
-                f"n={len(pseudo_clicks)}, "
-                f"updates={batch_sampler.num_updates}, "
-                f"total_flux={batch_sampler.total_flux_accum:.6e}"
-            )
-        except Exception as e:
-            pseudo_clicks = None
-            print(f"[BATCH] sampling skipped: {e}")
-
-    # --------------------------------------------------------
-    # 4) Forward debug checks
-    # --------------------------------------------------------
-    t_final = actual_last_step * cfg.dt
-    print(f"[TIMECHK] dt={cfg.dt}")
-    print(f"[TIMECHK] n_steps={cfg.n_steps}")
-    print(f"[TIMECHK] save_every={cfg.save_every}")
-    print(f"[TIMECHK] t_final={t_final:.6f}")
-
-    v_est_dbg = estimate_group_velocity(cfg, theory)
-    x_travel_est = abs(v_est_dbg) * t_final
-    dist_to_screen_est = abs(cfg.screen_center_x - cfg.x0)
-
-    print(f"[TIMECHK] v_est≈{v_est_dbg:.6f}")
-    print(f"[TIMECHK] estimated travel≈{x_travel_est:.6f}")
-    print(f"[TIMECHK] distance x0->screen≈{dist_to_screen_est:.6f}")
-    print(f"[TIMECHK] travel/distance≈{x_travel_est / (dist_to_screen_est + 1e-30):.6f}")
-
-    check_ids = sorted(set([0, Nt // 4, Nt // 2, 3 * Nt // 4, Nt - 1]))
-    for i in check_ids:
-        fi = frames_density[i]
-        iy, ix = np.unravel_index(np.argmax(fi), fi.shape)
-        x_peak = grid.X_vis[iy, ix]
-        y_peak = grid.Y_vis[iy, ix]
-        mass_vis = np.sum(fi) * grid.dx * grid.dy
-        print(
-            f"[FWDCHK] i={i:4d} t={times[i]:8.4f} "
-            f"mass_vis={mass_vis:.6e} "
-            f"max={np.max(fi):.6e} "
-            f"peak=({x_peak:.4f},{y_peak:.4f})"
-        )
-
-    if cfg.THEORY_NAME == "dirac" and state_vis_frames is not None:
-        theory.debug_packet_summary(
-            f"vis frame {check_ids[-1]}",
-            state_vis_frames[check_ids[-1]],
-            X_like=grid.X_vis,
-            Y_like=grid.Y_vis,
+        return ForwardRunResult(
+            frames_density=frames_density,
+            state_vis_frames=state_vis_frames,
+            times=times,
+            norms=norms,
+            detector_diags=detector_diags,
+            detector_clicked=detector_clicked,
+            det_result_final=det_result_final,
+            actual_last_step=actual_last_step,
+            batch_runtime=batch_runtime,
         )
 
     # --------------------------------------------------------
-    # 5) Optional continuity debug in free case
+    # Forward debug
     # --------------------------------------------------------
-    if DEBUG_FREE_CASE and cfg.SAVE_COMPLEX_STATE_FRAMES and state_vis_frames is not None:
+
+    def print_forward_debug_checks(self, setup: SimulationSetup, forward: ForwardRunResult):
+        cfg = setup.cfg
+        grid = setup.grid
+        theory = setup.theory
+
+        frames_density = forward.frames_density
+        times = forward.times
+
+        t_final = forward.actual_last_step * cfg.dt
+        print(f"[TIMECHK] dt={cfg.dt}")
+        print(f"[TIMECHK] n_steps={cfg.n_steps}")
+        print(f"[TIMECHK] save_every={cfg.save_every}")
+        print(f"[TIMECHK] t_final={t_final:.6f}")
+
+        v_est_dbg = estimate_group_velocity(cfg, theory)
+        x_travel_est = abs(v_est_dbg) * t_final
+        dist_to_screen_est = abs(cfg.screen_center_x - cfg.x0)
+
+        print(f"[TIMECHK] v_est≈{v_est_dbg:.6f}")
+        print(f"[TIMECHK] estimated travel≈{x_travel_est:.6f}")
+        print(f"[TIMECHK] distance x0->screen≈{dist_to_screen_est:.6f}")
+        print(f"[TIMECHK] travel/distance≈{x_travel_est / (dist_to_screen_est + 1e-30):.6f}")
+
+        Nt = len(times)
+        check_ids = sorted(set([0, Nt // 4, Nt // 2, 3 * Nt // 4, Nt - 1]))
+
+        for i in check_ids:
+            fi = frames_density[i]
+            iy, ix = np.unravel_index(np.argmax(fi), fi.shape)
+            x_peak = grid.X_vis[iy, ix]
+            y_peak = grid.Y_vis[iy, ix]
+            mass_vis = np.sum(fi) * grid.dx * grid.dy
+            print(
+                f"[FWDCHK] i={i:4d} t={times[i]:8.4f} "
+                f"mass_vis={mass_vis:.6e} "
+                f"max={np.max(fi):.6e} "
+                f"peak=({x_peak:.4f},{y_peak:.4f})"
+            )
+
+        if cfg.THEORY_NAME == "dirac" and forward.state_vis_frames is not None:
+            theory.debug_packet_summary(
+                f"vis frame {check_ids[-1]}",
+                forward.state_vis_frames[check_ids[-1]],
+                X_like=grid.X_vis,
+                Y_like=grid.Y_vis,
+            )
+
+    # --------------------------------------------------------
+    # Optional continuity debug
+    # --------------------------------------------------------
+
+    def maybe_run_free_case_debug(self, setup: SimulationSetup, forward: ForwardRunResult):
+        cfg = setup.cfg
+        grid = setup.grid
+        theory = setup.theory
+        potential = setup.potential
+
+        if not setup.debug_free_case:
+            return
+
+        if not cfg.SAVE_COMPLEX_STATE_FRAMES:
+            return
+
+        if forward.state_vis_frames is None:
+            return
+
         rms_mean, rms_max, abs_max = continuity_residual_from_state_frames(
             theory=theory,
-            state_vis_frames=state_vis_frames,
+            state_vis_frames=forward.state_vis_frames,
             dx=grid.dx,
             dy=grid.dy,
             dt=cfg.save_every * cfg.dt,
@@ -793,51 +790,59 @@ def main():
             f"ABS_max≈{abs_max:.3e}"
         )
 
-        x_mean = float(np.sum(rho * grid.X) * grid.dx * grid.dy)
-        jx, jy, _ = theory.current(state)
-        jx_tot = float(np.sum(jx) * grid.dx * grid.dy)
-        jy_tot = float(np.sum(jy) * grid.dx * grid.dy)
-
-        print(
-            f"[FREEDBG] step={n:5d} t={n * cfg.dt:7.3f} "
-            f"x_mean={x_mean: .4f} jx_tot={jx_tot: .4e} jy_tot={jy_tot: .4e}"
-        )
-
         if not np.any(potential.screen_mask_vis):
             print("[DEBUG] screen_mask_vis empty -> skipping click/backward/Emix analysis.")
-            return
 
     # --------------------------------------------------------
-    # 6) Detection time + click
+    # Click resolution
     # --------------------------------------------------------
-    if detector_clicked and det_result_final is not None:
-        x_click = float(det_result_final.click_x)
-        y_click = float(det_result_final.click_y)
 
-        idx_det = int(
-            np.argmin(
-                np.abs(
-                    times - float(
-                        det_result_final.click_time
-                        if det_result_final.click_time is not None
-                        else times[-1]
+    def resolve_click(self, setup: SimulationSetup, forward: ForwardRunResult) -> ClickResolution:
+        cfg = setup.cfg
+        grid = setup.grid
+        potential = setup.potential
+
+        frames_density = forward.frames_density
+        times = forward.times
+        Nt = len(times)
+
+        if forward.detector_clicked and forward.det_result_final is not None:
+            x_click = float(forward.det_result_final.click_x)
+            y_click = float(forward.det_result_final.click_y)
+
+            idx_det = int(
+                np.argmin(
+                    np.abs(
+                        times - float(
+                            forward.det_result_final.click_time
+                            if forward.det_result_final.click_time is not None
+                            else times[-1]
+                        )
                     )
                 )
             )
-        )
-        t_det = float(times[idx_det])
+            t_det = float(times[idx_det])
 
-        screen_int = np.array(
-            [np.sum(frames_density[i][potential.screen_mask_vis]) * grid.dx * grid.dy for i in range(Nt)],
-            dtype=float,
-        )
+            screen_int = np.array(
+                [np.sum(frames_density[i][potential.screen_mask_vis]) * grid.dx * grid.dy for i in range(Nt)],
+                dtype=float,
+            )
 
-        print(
-            f"[CLICK] detector-driven click: "
-            f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f}), "
-            f"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
-        )
-    else:
+            print(
+                f"[CLICK] detector-driven click: "
+                f"t_det≈{t_det:.3f}, click=({x_click:.3f}, {y_click:.3f}), "
+                f"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
+            )
+
+            return ClickResolution(
+                idx_det=idx_det,
+                t_det=t_det,
+                x_click=x_click,
+                y_click=y_click,
+                screen_int=screen_int,
+                used_detector_click=True,
+            )
+
         idx_det, t_det, x_click, y_click, screen_int = detect_click_from_screen(
             frames_density=frames_density,
             times=times,
@@ -858,34 +863,44 @@ def main():
             f"click_mode={cfg.CLICK_MODE}"
         )
 
-    print(
-        f"[SCREEN] max={np.max(screen_int):.6e} "
-        f"argmax_i={np.argmax(screen_int)} "
-        f"t_argmax={times[int(np.argmax(screen_int))]:.6f} "
-        f"first={screen_int[0]:.6e} last={screen_int[-1]:.6e}"
-    )
+        return ClickResolution(
+            idx_det=idx_det,
+            t_det=t_det,
+            x_click=x_click,
+            y_click=y_click,
+            screen_int=screen_int,
+            used_detector_click=False,
+        )
 
     # --------------------------------------------------------
-    # 6b) Fast batch-only exit
+    # Fast batch-only exit
     # --------------------------------------------------------
-    if batch_fast_mode:
+
+    def maybe_run_batch_fast_exit(self, setup: SimulationSetup, forward: ForwardRunResult) -> bool:
+        cfg = setup.cfg
+
+        batch_fast_mode = bool(getattr(cfg, "BATCH_FAST_MODE", False))
+        if not batch_fast_mode:
+            return False
+
         output_prefix = getattr(cfg, "OUTPUT_PREFIX", None)
         if not output_prefix:
             output_mp4 = getattr(cfg, "OUTPUT_MP4", "output.mp4")
             output_prefix = str(Path(output_mp4).with_suffix(""))
 
-        if batch_sampler is not None:
+        batch_runtime = forward.batch_runtime
+        if batch_runtime.sampler is not None:
             batch_summary_path = f"{output_prefix}_flux_summary.json"
             batch_clicks_json_path = f"{output_prefix}_pseudo_clicks.json"
             batch_clicks_jsonl_path = f"{output_prefix}_pseudo_clicks.jsonl"
 
-            batch_sampler.save_summary_json(batch_summary_path)
+            batch_runtime.sampler.save_summary_json(batch_summary_path)
 
-            if pseudo_clicks is not None:
-                batch_sampler.save_clicks_json(batch_clicks_json_path, pseudo_clicks)
-                batch_sampler.append_clicks_jsonl(
+            if batch_runtime.pseudo_clicks is not None:
+                batch_runtime.sampler.save_clicks_json(batch_clicks_json_path, batch_runtime.pseudo_clicks)
+                batch_runtime.sampler.append_clicks_jsonl(
                     batch_clicks_jsonl_path,
-                    pseudo_clicks,
+                    batch_runtime.pseudo_clicks,
                     run_id=str(Path(output_prefix).name),
                     theory_name=str(cfg.THEORY_NAME),
                     detector_name=str(getattr(cfg, "DETECTOR_NAME", "unknown")),
@@ -902,115 +917,189 @@ def main():
 
         print("[BATCH_FAST_MODE] Skipping backward/Emix/Bohmian pipeline.")
         print("Simulation done.")
-        return
-    
-    # --------------------------------------------------------
-    # 7) Backward library
-    # --------------------------------------------------------
-    print("Backward library: computing phi_tau frames...")
-    phi_tau_frames = build_backward_library(
-        theory=theory,
-        grid=grid,
-        times=times,
-        tau_step=tau_step,
-        x_click=x_click,
-        y_click=y_click,
-        sigma_click=cfg.sigma_click,
-        save_every=cfg.save_every,
-        print_every_frames=20,
-    )
-    print("Backward library done.")
+        return True
 
     # --------------------------------------------------------
-    # 8) Diagnostic block
+    # Sigma products
     # --------------------------------------------------------
-    v_est_diag = estimate_group_velocity(cfg, theory)
-    L_gap_diag = cfg.screen_center_x - cfg.barrier_center_x
-    t_gap_diag = L_gap_diag / (abs(v_est_diag) + 1e-12)
-    sigma_diag = 0.60 * t_gap_diag
 
-    run_diagnostics(
-        cfg=cfg,
-        grid=grid,
-        theory=theory,
-        potential=potential,
-        frames_density=frames_density,
-        state_vis_frames=state_vis_frames,
-        times=times,
-        tau_step=tau_step,
-        idx_det=idx_det,
-        t_det=t_det,
-        x_click=x_click,
-        y_click=y_click,
-        screen_int=screen_int,
-        phi_tau_frames=phi_tau_frames,
-        sigma_diag=sigma_diag,
-    )
+    def build_sigma_dependent_products_builder(
+        self,
+        *,
+        theory,
+        grid,
+        state_vis_frames: np.ndarray,
+        phi_tau_frames: np.ndarray,
+        times: np.ndarray,
+        t_det: float,
+        tau_step: float,
+    ):
+        cfg = self.cfg
 
-    # --------------------------------------------------------
-    # 9) sigmaT-dependent products
-    # --------------------------------------------------------
-    if not cfg.SAVE_COMPLEX_STATE_FRAMES or state_vis_frames is None:
-        raise RuntimeError(
-            "This pipeline requires SAVE_COMPLEX_STATE_FRAMES=True "
-            "for amplitude-level Emix/ridge analysis and later visualization."
+        def _builder(sigmaT: float):
+            Emix = build_Emix_from_phi_tau(
+                phi_tau_frames=phi_tau_frames,
+                times=times,
+                t_det=t_det,
+                sigmaT=sigmaT,
+                tau_step=tau_step,
+                K_JITTER=cfg.K_JITTER,
+            )
+
+            Emix_density_old = build_Emix_density_from_phi_tau(
+                phi_tau_frames=phi_tau_frames,
+                times=times,
+                t_det=t_det,
+                sigmaT=sigmaT,
+                tau_step=tau_step,
+                K_JITTER=cfg.K_JITTER,
+            )
+
+            rho = make_rho(
+                frames_psi=state_vis_frames,
+                Emix=Emix,
+                Emix_density=Emix_density_old,
+                dx=grid.dx,
+                dy=grid.dy,
+                mode=cfg.RHO_MODE,
+                blend_alpha=cfg.RHO_BLEND_ALPHA,
+            )
+
+            rx, ry, rs = compute_ridge_xy(
+                frames_psi=state_vis_frames,
+                Emix=Emix,
+                x_vis_1d=grid.x_vis_1d,
+                y_vis_1d=grid.y_vis_1d,
+                mode=cfg.RIDGE_MODE,
+                top_q=cfg.CENTROID_TOP_Q,
+                radius=cfg.LOCALMAX_RADIUS,
+                alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
+            )
+
+            cos_th, speed, ux, uy, div_v = alignment_and_diagnostics_from_state_frames(
+                theory=theory,
+                state_vis_frames=state_vis_frames,
+                ridge_x=rx,
+                ridge_y=ry,
+                x_vis_1d=grid.x_vis_1d,
+                y_vis_1d=grid.y_vis_1d,
+                dx=grid.dx,
+                dy=grid.dy,
+                enable_divergence=cfg.ENABLE_DIVERGENCE_DIAGNOSTIC,
+                arrow_spatial_avg=cfg.ARROW_SPATIAL_AVG,
+                arrow_avg_radius=cfg.ARROW_AVG_RADIUS,
+                arrow_avg_gauss_sigma=cfg.ARROW_AVG_GAUSS_SIGMA,
+                arrow_temporal_smooth=cfg.ARROW_TEMPORAL_SMOOTH,
+                arrow_smooth_alpha=cfg.ARROW_SMOOTH_ALPHA,
+                align_eps_rho=cfg.ALIGN_EPS_RHO,
+                align_eps_speed=cfg.ALIGN_EPS_SPEED,
+            )
+
+            return rho, Emix, rx, ry, rs, cos_th, speed, ux, uy, div_v
+
+        return _builder
+
+    def build_sigma_products(
+        self,
+        setup: SimulationSetup,
+        forward: ForwardRunResult,
+        phi_tau_frames: np.ndarray,
+        click: ClickResolution,
+    ) -> SigmaProducts:
+        cfg = setup.cfg
+        theory = setup.theory
+        grid = setup.grid
+
+        if not cfg.SAVE_COMPLEX_STATE_FRAMES or forward.state_vis_frames is None:
+            raise RuntimeError(
+                "This pipeline requires SAVE_COMPLEX_STATE_FRAMES=True "
+                "for amplitude-level Emix/ridge analysis and later visualization."
+            )
+
+        tau_step = cfg.save_every * cfg.dt
+
+        build_all_for_sigma = self.build_sigma_dependent_products_builder(
+            theory=theory,
+            grid=grid,
+            state_vis_frames=forward.state_vis_frames,
+            phi_tau_frames=phi_tau_frames,
+            times=forward.times,
+            t_det=click.t_det,
+            tau_step=tau_step,
         )
 
-    build_all_for_sigma = build_sigma_dependent_products(
-        cfg=cfg,
-        theory=theory,
-        grid=grid,
-        state_vis_frames=state_vis_frames,
-        phi_tau_frames=phi_tau_frames,
-        times=times,
-        t_det=t_det,
-        tau_step=tau_step,
-    )
+        v_est = estimate_group_velocity(cfg, theory)
+        L_gap = cfg.screen_center_x - cfg.barrier_center_x
+        t_gap = L_gap / (abs(v_est) + 1e-12)
+        sigma_init = 0.60 * t_gap
 
-    v_est = estimate_group_velocity(cfg, theory)
-    L_gap = cfg.screen_center_x - cfg.barrier_center_x
-    t_gap = L_gap / (abs(v_est) + 1e-12)
+        (
+            rho_init,
+            Emix_init,
+            ridge_x_init,
+            ridge_y_init,
+            ridge_s_init,
+            cos_th_init,
+            speed_init,
+            ux_init,
+            uy_init,
+            div_v_init,
+        ) = build_all_for_sigma(sigma_init)
 
-    sigma_init = 0.60 * t_gap
-
-    (
-        rho_init,
-        Emix_init,
-        ridge_x_init,
-        ridge_y_init,
-        ridge_s_init,
-        cos_th_init,
-        speed_init,
-        ux_init,
-        uy_init,
-        div_v_init,
-    ) = build_all_for_sigma(sigma_init)
-
-    if cfg.USE_FIXED_DISPLAY_SCALE:
-        vref = float(np.quantile(rho_init, cfg.DISPLAY_Q))
-        if vref <= 0:
+        if cfg.USE_FIXED_DISPLAY_SCALE:
+            vref = float(np.quantile(rho_init, cfg.DISPLAY_Q))
+            if vref <= 0:
+                vref = 1.0
+        else:
             vref = 1.0
-    else:
-        vref = 1.0
 
-    if speed_init is not None:
-        vv = speed_init[np.isfinite(speed_init)]
-        speed_ref = float(np.quantile(vv, 0.80)) if vv.size > 0 else 1.0
-    else:
-        speed_ref = 1.0
+        if speed_init is not None:
+            vv = speed_init[np.isfinite(speed_init)]
+            speed_ref = float(np.quantile(vv, 0.80)) if vv.size > 0 else 1.0
+        else:
+            speed_ref = 1.0
+
+        return SigmaProducts(
+            rho_init=rho_init,
+            Emix_init=Emix_init,
+            ridge_x_init=ridge_x_init,
+            ridge_y_init=ridge_y_init,
+            ridge_s_init=ridge_s_init,
+            cos_th_init=cos_th_init,
+            speed_init=speed_init,
+            ux_init=ux_init,
+            uy_init=uy_init,
+            div_v_init=div_v_init,
+            sigma_init=sigma_init,
+            vref=vref,
+            speed_ref=speed_ref,
+        )
 
     # --------------------------------------------------------
-    # 10) Bohmian precompute
+    # Bohmian
     # --------------------------------------------------------
-    bohm_traj_x = bohm_traj_y = bohm_traj_alive = None
-    bohm_init_points = []
 
-    if cfg.ENABLE_BOHMIAN_OVERLAY:
+    def build_bohmian_overlay(
+        self,
+        setup: SimulationSetup,
+        forward: ForwardRunResult,
+        sigma_products: SigmaProducts,
+    ) -> BohmianResult:
+        cfg = setup.cfg
+        grid = setup.grid
+        theory = setup.theory
+
+        if not cfg.ENABLE_BOHMIAN_OVERLAY:
+            return BohmianResult()
+
+        if forward.state_vis_frames is None:
+            return BohmianResult()
+
         print("Bohmian overlay: computing velocity frames...")
 
         vx_frames, vy_frames, rho_frames = build_velocity_frames_from_state(
             theory=theory,
-            state_vis_frames=state_vis_frames,
+            state_vis_frames=forward.state_vis_frames,
             eps_rho=cfg.ALIGN_EPS_RHO,
         )
 
@@ -1018,11 +1107,11 @@ def main():
             mode=cfg.BOHMIAN_INIT_MODE,
             ntraj=cfg.BOHMIAN_N_TRAJ,
             custom_points=cfg.BOHMIAN_CUSTOM_POINTS,
-            ridge_x0=ridge_x_init[0],
-            ridge_y0=ridge_y_init[0],
+            ridge_x0=sigma_products.ridge_x_init[0],
+            ridge_y0=sigma_products.ridge_y_init[0],
             x0_packet=cfg.x0,
             y0_packet=cfg.y0,
-            psi0_vis=state_vis_frames[0],
+            psi0_vis=forward.state_vis_frames[0],
             x_vis_1d=grid.x_vis_1d,
             y_vis_1d=grid.y_vis_1d,
             jitter=cfg.BOHMIAN_INIT_JITTER,
@@ -1039,8 +1128,8 @@ def main():
             vx_frames=vx_frames,
             vy_frames=vy_frames,
             rho_frames=rho_frames,
-            times=times,
-            tau_step=tau_step,
+            times=forward.times,
+            tau_step=cfg.save_every * cfg.dt,
             x_vis_1d=grid.x_vis_1d,
             y_vis_1d=grid.y_vis_1d,
             dx=grid.dx,
@@ -1056,87 +1145,117 @@ def main():
             use_rk4=cfg.BOHMIAN_USE_RK4,
         )
 
+        return BohmianResult(
+            bohm_traj_x=bohm_traj_x,
+            bohm_traj_y=bohm_traj_y,
+            bohm_traj_alive=bohm_traj_alive,
+            bohm_init_points=bohm_init_points,
+        )
+
     # --------------------------------------------------------
-    # 11) Summary stats
+    # Stats
     # --------------------------------------------------------
-    if cfg.PRINT_ALIGNMENT_STATS and cos_th_init is not None:
-        valid = np.isfinite(cos_th_init)
-        if np.any(valid):
-            mean_c = float(np.mean(cos_th_init[valid]))
-            med_c = float(np.median(cos_th_init[valid]))
-            frac_pos = float(np.mean(cos_th_init[valid] > 0.0))
-            frac_hi = float(np.mean(cos_th_init[valid] > 0.7))
-            print(
-                f"[ALIGN] mean cosθ≈{mean_c:.3f}, "
-                f"median≈{med_c:.3f}, "
-                f"frac(cosθ>0)≈{frac_pos:.3f}, "
-                f"frac(cosθ>0.7)≈{frac_hi:.3f}"
-            )
-        else:
-            print("[ALIGN] no valid cosθ.")
 
-    if cfg.ENABLE_DIVERGENCE_DIAGNOSTIC and cfg.PRINT_DIVERGENCE_STATS and div_v_init is not None:
-        valid = np.isfinite(div_v_init)
-        if np.any(valid):
-            mean_div = float(np.mean(div_v_init[valid]))
-            med_div = float(np.median(div_v_init[valid]))
-            frac_neg = float(np.mean(div_v_init[valid] < 0.0))
-            frac_pos = float(np.mean(div_v_init[valid] > 0.0))
-            print(
-                f"[DIV] mean div(v)≈{mean_div:.3e}, "
-                f"median≈{med_div:.3e}, "
-                f"frac(<0)≈{frac_neg:.3f}, "
-                f"frac(>0)≈{frac_pos:.3f}"
-            )
-        else:
-            print("[DIV] no valid div(v) values.")
+    def print_summary_stats(
+        self,
+        setup: SimulationSetup,
+        forward: ForwardRunResult,
+        sigma_products: SigmaProducts,
+        bohm: BohmianResult,
+    ):
+        cfg = setup.cfg
 
-    if cfg.ENABLE_BOHMIAN_OVERLAY and cfg.PRINT_BOHMIAN_STATS and bohm_traj_alive is not None:
-        alive_counts = np.sum(bohm_traj_alive, axis=1)
-
-        for k in range(bohm_traj_alive.shape[0]):
-            if alive_counts[k] > 0:
-                i_last = int(alive_counts[k] - 1)
+        if cfg.PRINT_ALIGNMENT_STATS and sigma_products.cos_th_init is not None:
+            valid = np.isfinite(sigma_products.cos_th_init)
+            if np.any(valid):
+                mean_c = float(np.mean(sigma_products.cos_th_init[valid]))
+                med_c = float(np.median(sigma_products.cos_th_init[valid]))
+                frac_pos = float(np.mean(sigma_products.cos_th_init[valid] > 0.0))
+                frac_hi = float(np.mean(sigma_products.cos_th_init[valid] > 0.7))
                 print(
-                    f"[BOHM] traj {k}: steps={alive_counts[k]}, "
-                    f"start=({bohm_traj_x[k, 0]:.3f},{bohm_traj_y[k, 0]:.3f}), "
-                    f"end=({bohm_traj_x[k, i_last]:.3f},{bohm_traj_y[k, i_last]:.3f})"
+                    f"[ALIGN] mean cosθ≈{mean_c:.3f}, "
+                    f"median≈{med_c:.3f}, "
+                    f"frac(cosθ>0)≈{frac_pos:.3f}, "
+                    f"frac(cosθ>0.7)≈{frac_hi:.3f}"
                 )
             else:
-                print(f"[BOHM] traj {k}: no valid steps")
+                print("[ALIGN] no valid cosθ.")
 
-    if detector_clicked and det_result_final is not None:
-        print(
-            f"[DETECTOR FINAL] clicked=True "
-            f"x={det_result_final.click_x}, y={det_result_final.click_y}, "
-            f"t={det_result_final.click_time}"
-        )
-    else:
-        print("[DETECTOR FINAL] clicked=False (fallback click may have been used)")
+        if (
+            cfg.ENABLE_DIVERGENCE_DIAGNOSTIC
+            and cfg.PRINT_DIVERGENCE_STATS
+            and sigma_products.div_v_init is not None
+        ):
+            valid = np.isfinite(sigma_products.div_v_init)
+            if np.any(valid):
+                mean_div = float(np.mean(sigma_products.div_v_init[valid]))
+                med_div = float(np.median(sigma_products.div_v_init[valid]))
+                frac_neg = float(np.mean(sigma_products.div_v_init[valid] < 0.0))
+                frac_pos = float(np.mean(sigma_products.div_v_init[valid] > 0.0))
+                print(
+                    f"[DIV] mean div(v)≈{mean_div:.3e}, "
+                    f"median≈{med_div:.3e}, "
+                    f"frac(<0)≈{frac_neg:.3f}, "
+                    f"frac(>0)≈{frac_pos:.3f}"
+                )
+            else:
+                print("[DIV] no valid div(v) values.")
+
+        if cfg.ENABLE_BOHMIAN_OVERLAY and cfg.PRINT_BOHMIAN_STATS and bohm.bohm_traj_alive is not None:
+            alive_counts = np.sum(bohm.bohm_traj_alive, axis=1)
+
+            for k in range(bohm.bohm_traj_alive.shape[0]):
+                if alive_counts[k] > 0:
+                    i_last = int(alive_counts[k] - 1)
+                    print(
+                        f"[BOHM] traj {k}: steps={alive_counts[k]}, "
+                        f"start=({bohm.bohm_traj_x[k, 0]:.3f},{bohm.bohm_traj_y[k, 0]:.3f}), "
+                        f"end=({bohm.bohm_traj_x[k, i_last]:.3f},{bohm.bohm_traj_y[k, i_last]:.3f})"
+                    )
+                else:
+                    print(f"[BOHM] traj {k}: no valid steps")
+
+        if forward.detector_clicked and forward.det_result_final is not None:
+            print(
+                f"[DETECTOR FINAL] clicked=True "
+                f"x={forward.det_result_final.click_x}, y={forward.det_result_final.click_y}, "
+                f"t={forward.det_result_final.click_time}"
+            )
+        else:
+            print("[DETECTOR FINAL] clicked=False (fallback click may have been used)")
 
     # --------------------------------------------------------
-    # 12) Save run bundle
+    # Save outputs
     # --------------------------------------------------------
-    output_prefix = getattr(cfg, "OUTPUT_PREFIX", None)
-    if not output_prefix:
+
+    def get_output_prefix(self) -> str:
+        cfg = self.cfg
+        output_prefix = getattr(cfg, "OUTPUT_PREFIX", None)
+        if output_prefix:
+            return str(output_prefix)
+
         output_mp4 = getattr(cfg, "OUTPUT_MP4", "output.mp4")
-        output_prefix = str(Path(output_mp4).with_suffix(""))
+        return str(Path(output_mp4).with_suffix(""))
 
-    # --------------------------------------------------------
-    # 12a) Save cheap batch-sampler outputs
-    # --------------------------------------------------------
-    if batch_sampler is not None:
+    def save_batch_outputs_if_any(self, forward: ForwardRunResult):
+        cfg = self.cfg
+        output_prefix = self.get_output_prefix()
+        batch_runtime = forward.batch_runtime
+
+        if batch_runtime.sampler is None:
+            return
+
         batch_summary_path = f"{output_prefix}_flux_summary.json"
         batch_clicks_json_path = f"{output_prefix}_pseudo_clicks.json"
         batch_clicks_jsonl_path = f"{output_prefix}_pseudo_clicks.jsonl"
 
-        batch_sampler.save_summary_json(batch_summary_path)
+        batch_runtime.sampler.save_summary_json(batch_summary_path)
 
-        if pseudo_clicks is not None:
-            batch_sampler.save_clicks_json(batch_clicks_json_path, pseudo_clicks)
-            batch_sampler.append_clicks_jsonl(
+        if batch_runtime.pseudo_clicks is not None:
+            batch_runtime.sampler.save_clicks_json(batch_clicks_json_path, batch_runtime.pseudo_clicks)
+            batch_runtime.sampler.append_clicks_jsonl(
                 batch_clicks_jsonl_path,
-                pseudo_clicks,
+                batch_runtime.pseudo_clicks,
                 run_id=str(Path(output_prefix).name),
                 theory_name=str(cfg.THEORY_NAME),
                 detector_name=str(getattr(cfg, "DETECTOR_NAME", "unknown")),
@@ -1151,48 +1270,155 @@ def main():
         else:
             print(f"[BATCH] saved summary only: {batch_summary_path}")
 
-    save_run_bundle(
-        output_prefix=output_prefix,
-        cfg=cfg,
-        grid=grid,
-        potential=potential,
-        debug_free_case=DEBUG_FREE_CASE,
-        times=times,
-        frames_density=frames_density,
-        state_vis_frames=state_vis_frames,
-        norms=norms,
-        screen_int=screen_int,
-        phi_tau_frames=phi_tau_frames,
-        x_click=x_click,
-        y_click=y_click,
-        t_det=t_det,
-        idx_det=idx_det,
-        detector_clicked=detector_clicked,
-        sigma_init=sigma_init,
-        ridge_x_init=ridge_x_init,
-        ridge_y_init=ridge_y_init,
-        ridge_s_init=ridge_s_init,
-        cos_th_init=cos_th_init,
-        speed_init=speed_init,
-        ux_init=ux_init,
-        uy_init=uy_init,
-        div_v_init=div_v_init,
-        vref=vref,
-        speed_ref=speed_ref,
-        bohm_traj_x=bohm_traj_x,
-        bohm_traj_y=bohm_traj_y,
-        bohm_traj_alive=bohm_traj_alive,
-        bohm_init_points=bohm_init_points,
-    )
+    def save_run_outputs(
+        self,
+        setup: SimulationSetup,
+        forward: ForwardRunResult,
+        click: ClickResolution,
+        phi_tau_frames: np.ndarray,
+        sigma_products: SigmaProducts,
+        bohm: BohmianResult,
+    ):
+        self.save_batch_outputs_if_any(forward)
+
+        save_run_bundle(
+            output_prefix=self.get_output_prefix(),
+            cfg=setup.cfg,
+            grid=setup.grid,
+            potential=setup.potential,
+            debug_free_case=setup.debug_free_case,
+            times=forward.times,
+            frames_density=forward.frames_density,
+            state_vis_frames=forward.state_vis_frames,
+            norms=forward.norms,
+            screen_int=click.screen_int,
+            phi_tau_frames=phi_tau_frames,
+            x_click=click.x_click,
+            y_click=click.y_click,
+            t_det=click.t_det,
+            idx_det=click.idx_det,
+            detector_clicked=forward.detector_clicked,
+            sigma_init=sigma_products.sigma_init,
+            ridge_x_init=sigma_products.ridge_x_init,
+            ridge_y_init=sigma_products.ridge_y_init,
+            ridge_s_init=sigma_products.ridge_s_init,
+            cos_th_init=sigma_products.cos_th_init,
+            speed_init=sigma_products.speed_init,
+            ux_init=sigma_products.ux_init,
+            uy_init=sigma_products.uy_init,
+            div_v_init=sigma_products.div_v_init,
+            vref=sigma_products.vref,
+            speed_ref=sigma_products.speed_ref,
+            bohm_traj_x=bohm.bohm_traj_x,
+            bohm_traj_y=bohm.bohm_traj_y,
+            bohm_traj_alive=bohm.bohm_traj_alive,
+            bohm_init_points=bohm.bohm_init_points,
+        )
 
     # --------------------------------------------------------
-    # 13) Final summaries
+    # Full run
     # --------------------------------------------------------
-    print("frame0 rho max:", np.max(frames_density[0]))
-    print("frame0 Emix density max:", np.max(make_emix_density(Emix_init)[0]))
-    print("frame0 overlap rho max:", np.max(rho_init[0]))
-    print("Simulation done.")
-    print("Use visualize.py for animation, slider and debug plots.")
+
+    def run(self):
+        setup = self.build_setup()
+        forward = self.run_forward(setup)
+
+        self.print_forward_debug_checks(setup, forward)
+        self.maybe_run_free_case_debug(setup, forward)
+
+        click = self.resolve_click(setup, forward)
+
+        print(
+            f"[SCREEN] max={np.max(click.screen_int):.6e} "
+            f"argmax_i={np.argmax(click.screen_int)} "
+            f"t_argmax={forward.times[int(np.argmax(click.screen_int))]:.6f} "
+            f"first={click.screen_int[0]:.6e} last={click.screen_int[-1]:.6e}"
+        )
+
+        if self.maybe_run_batch_fast_exit(setup, forward):
+            return
+
+        print("Backward library: computing phi_tau frames...")
+        phi_tau_frames = build_backward_library(
+            theory=setup.theory,
+            grid=setup.grid,
+            times=forward.times,
+            tau_step=self.cfg.save_every * self.cfg.dt,
+            x_click=click.x_click,
+            y_click=click.y_click,
+            sigma_click=self.cfg.sigma_click,
+            save_every=self.cfg.save_every,
+            print_every_frames=20,
+        )
+        print("Backward library done.")
+
+        v_est_diag = estimate_group_velocity(self.cfg, setup.theory)
+        L_gap_diag = self.cfg.screen_center_x - self.cfg.barrier_center_x
+        t_gap_diag = L_gap_diag / (abs(v_est_diag) + 1e-12)
+        sigma_diag = 0.60 * t_gap_diag
+
+        run_diagnostics(
+            cfg=self.cfg,
+            grid=setup.grid,
+            theory=setup.theory,
+            potential=setup.potential,
+            frames_density=forward.frames_density,
+            state_vis_frames=forward.state_vis_frames,
+            times=forward.times,
+            tau_step=self.cfg.save_every * self.cfg.dt,
+            idx_det=click.idx_det,
+            t_det=click.t_det,
+            x_click=click.x_click,
+            y_click=click.y_click,
+            screen_int=click.screen_int,
+            phi_tau_frames=phi_tau_frames,
+            sigma_diag=sigma_diag,
+        )
+
+        sigma_products = self.build_sigma_products(
+            setup=setup,
+            forward=forward,
+            phi_tau_frames=phi_tau_frames,
+            click=click,
+        )
+
+        bohm = self.build_bohmian_overlay(
+            setup=setup,
+            forward=forward,
+            sigma_products=sigma_products,
+        )
+
+        self.print_summary_stats(
+            setup=setup,
+            forward=forward,
+            sigma_products=sigma_products,
+            bohm=bohm,
+        )
+
+        self.save_run_outputs(
+            setup=setup,
+            forward=forward,
+            click=click,
+            phi_tau_frames=phi_tau_frames,
+            sigma_products=sigma_products,
+            bohm=bohm,
+        )
+
+        print("frame0 rho max:", np.max(forward.frames_density[0]))
+        print("frame0 Emix density max:", np.max(make_emix_density(sigma_products.Emix_init)[0]))
+        print("frame0 overlap rho max:", np.max(sigma_products.rho_init[0]))
+        print("Simulation done.")
+        print("Use visualize.py for animation, slider and debug plots.")
+
+
+# ============================================================
+# Entry point
+# ============================================================
+
+def main():
+    cfg = AppConfig()
+    app = QuantumSimulationApp(cfg)
+    app.run()
 
 
 if __name__ == "__main__":
