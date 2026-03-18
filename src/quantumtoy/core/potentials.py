@@ -152,6 +152,7 @@ def build_double_slit_and_caps(grid, cfg) -> PotentialSpec:
     # --------------------------------------------------------
     # Barrier + slits
     # --------------------------------------------------------
+    # Existing downstream double slit
     barrier_core = np.abs(X - barrier_center_x) < (barrier_thickness / 2.0)
     slit1_mask = np.abs(Y - slit_center_offset) < slit_half_height
     slit2_mask = np.abs(Y + slit_center_offset) < slit_half_height
@@ -163,10 +164,34 @@ def build_double_slit_and_caps(grid, cfg) -> PotentialSpec:
     _assert(np.issubdtype(slit1_mask.dtype, np.bool_), "slit1_mask must be boolean")
     _assert(np.issubdtype(slit2_mask.dtype, np.bool_), "slit2_mask must be boolean")
 
+    # --------------------------------------------------------
+    # NEW: upstream single slit (hardcoded quick test)
+    # --------------------------------------------------------
+    USE_UPSTREAM_SINGLE_SLIT = True
+
+    # Put the single slit to the left of the current double slit.
+    # Tune these three numbers for quick experiments.
+    single_slit_center_x = barrier_center_x - 1.325
+    single_slit_thickness = barrier_thickness
+    single_slit_half_height = 1.4
+
+    single_barrier_core = np.abs(X - single_slit_center_x) < (single_slit_thickness / 2.0)
+    single_slit_mask = np.abs(Y) < single_slit_half_height
+
+    _assert_array_shape(single_barrier_core, (grid.Ny, grid.Nx), "single_barrier_core")
+    _assert_array_shape(single_slit_mask, (grid.Ny, grid.Nx), "single_slit_mask")
+    _assert(np.issubdtype(single_barrier_core.dtype, np.bool_), "single_barrier_core must be boolean")
+    _assert(np.issubdtype(single_slit_mask.dtype, np.bool_), "single_slit_mask must be boolean")
+
     if BARRIER_SMOOTH <= 0.0:
         barrier_mask = barrier_core.copy()
         barrier_mask[slit1_mask] = False
         barrier_mask[slit2_mask] = False
+
+        if USE_UPSTREAM_SINGLE_SLIT:
+            single_barrier_mask = single_barrier_core.copy()
+            single_barrier_mask[single_slit_mask] = False
+            barrier_mask |= single_barrier_mask
 
         _assert_array_shape(barrier_mask, (grid.Ny, grid.Nx), "barrier_mask")
         _assert(np.issubdtype(barrier_mask.dtype, np.bool_), "barrier_mask must be boolean")
@@ -174,6 +199,7 @@ def build_double_slit_and_caps(grid, cfg) -> PotentialSpec:
         V_real = np.zeros_like(X, dtype=float)
         V_real[barrier_mask] = V_barrier
     else:
+        # Smooth downstream double slit wall
         dist = np.abs(X - barrier_center_x) - (barrier_thickness / 2.0)
         _assert_array_shape(dist, (grid.Ny, grid.Nx), "dist")
         _assert_finite_array(dist, "dist")
@@ -186,7 +212,25 @@ def build_double_slit_and_caps(grid, cfg) -> PotentialSpec:
 
         wall[slit1_mask] = 0.0
         wall[slit2_mask] = 0.0
+
         V_real = V_barrier * wall
+
+        # NEW: add smooth upstream single slit wall
+        if USE_UPSTREAM_SINGLE_SLIT:
+            dist_single = np.abs(X - single_slit_center_x) - (single_slit_thickness / 2.0)
+            _assert_array_shape(dist_single, (grid.Ny, grid.Nx), "dist_single")
+            _assert_finite_array(dist_single, "dist_single")
+
+            wall_single = 1.0 / (1.0 + np.exp(dist_single / BARRIER_SMOOTH))
+            _assert_array_shape(wall_single, (grid.Ny, grid.Nx), "wall_single")
+            _assert_finite_array(wall_single, "wall_single")
+            _assert(np.all(wall_single >= 0.0), "wall_single contains negative values")
+            _assert(np.all(wall_single <= 1.0 + 1e-12), "wall_single exceeds 1 unexpectedly")
+
+            wall_single[single_slit_mask] = 0.0
+
+            V_real += V_barrier * wall_single
+            V_real = np.minimum(V_real, V_barrier)
 
     _assert_array_shape(V_real, (grid.Ny, grid.Nx), "V_real")
     _assert_finite_array(V_real, "V_real")
@@ -246,11 +290,12 @@ def build_double_slit_and_caps(grid, cfg) -> PotentialSpec:
     # --------------------------------------------------------
     # Extra structural sanity checks
     # --------------------------------------------------------
-    # Slit masks should only affect y structure, but they are full-grid masks.
     _assert(np.any(barrier_core), "barrier_core is empty; barrier may be outside the grid")
     _assert(np.any(screen_mask_full), "screen_mask_full is empty; detector screen may be outside the grid")
 
-    # In hard-wall mode, slit areas inside the barrier should have zero barrier potential.
+    if USE_UPSTREAM_SINGLE_SLIT:
+        _assert(np.any(single_barrier_core), "single_barrier_core is empty; upstream single slit barrier may be outside the grid")
+
     if BARRIER_SMOOTH <= 0.0:
         barrier_region_slits = barrier_core & (slit1_mask | slit2_mask)
         if np.any(barrier_region_slits):
@@ -259,7 +304,14 @@ def build_double_slit_and_caps(grid, cfg) -> PotentialSpec:
                 "Hard-wall slit region inside barrier must have V_real=0",
             )
 
-    # In all modes, V_real should never exceed barrier height by much.
+        if USE_UPSTREAM_SINGLE_SLIT:
+            single_barrier_region_slit = single_barrier_core & single_slit_mask
+            if np.any(single_barrier_region_slit):
+                _assert(
+                    np.allclose(V_real[single_barrier_region_slit], 0.0),
+                    "Hard-wall upstream single slit region inside barrier must have V_real=0",
+                )
+
     _assert(
         float(np.max(V_real)) <= V_barrier + 1e-10,
         f"V_real max {np.max(V_real)} exceeds V_barrier={V_barrier}",
