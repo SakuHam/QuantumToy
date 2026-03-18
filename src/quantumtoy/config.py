@@ -75,6 +75,13 @@ class AppConfig:
     DETECTOR_NOISE_SEED: int = 123
 
     # ============================================================
+    # Barriers
+    # ============================================================
+    BARRIER_EDGE_MODE = "hard"              # "hard" | "sharp_smooth" | "smooth"
+    BARRIER_SMOOTH = 0.20
+    BARRIER_SHARP_SMOOTH = 0.04
+
+    # ============================================================
     # Ridge
     # ============================================================
     RIDGE_MODE: str = "centroid_top"

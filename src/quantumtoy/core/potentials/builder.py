@@ -66,6 +66,9 @@ class PotentialBuilder:
         )
 
         barrier_system = CompositeBarrierSystem(V_clip_max=V_barrier)
+        barrier_edge_mode = str(getattr(cfg, "BARRIER_EDGE_MODE", "smooth")).lower().strip()
+        barrier_sharp_smooth = float(getattr(cfg, "BARRIER_SHARP_SMOOTH", max(1e-12, 0.25 * BARRIER_SMOOTH)))
+
 
         use_upstream_single_slit = bool(getattr(cfg, "USE_UPSTREAM_SINGLE_SLIT", False))
         if use_upstream_single_slit:
@@ -85,6 +88,8 @@ class PotentialBuilder:
                     slit_half_height=single_slit_half_height,
                     V_barrier=V_barrier,
                     barrier_smooth=BARRIER_SMOOTH,
+                    sharp_smooth_width=barrier_sharp_smooth,
+                    edge_mode=barrier_edge_mode,
                     name="upstream_single_slit",
                 )
             )
@@ -97,6 +102,8 @@ class PotentialBuilder:
                 slit_half_height=slit_half_height,
                 V_barrier=V_barrier,
                 barrier_smooth=BARRIER_SMOOTH,
+                sharp_smooth_width=barrier_sharp_smooth,
+                edge_mode=barrier_edge_mode,
                 name="downstream_double_slit",
             )
         )
@@ -143,6 +150,7 @@ class PotentialBuilder:
                 kind=comp.kind,
                 V_real=comp.V_real,
                 barrier_core=comp.barrier_core,
+                wall_mask=comp.wall_mask,
                 slit_masks=comp.slit_masks,
             )
             for comp in barrier_result.components

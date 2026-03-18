@@ -44,11 +44,12 @@ RENDER_MODES = (
 # ============================================================
 
 class _LegacyBarrierComponent:
-    def __init__(self, name, kind, V_real, barrier_core, slit_masks):
+    def __init__(self, name, kind, V_real, barrier_core, wall_mask, slit_masks):
         self.name = name
         self.kind = kind
         self.V_real = V_real
         self.barrier_core = barrier_core
+        self.wall_mask = wall_mask
         self.slit_masks = slit_masks
 
 
@@ -58,6 +59,14 @@ def _cfg_get(cfg, name, default):
 
 def _get_visible_field(grid, arr2d: np.ndarray) -> np.ndarray:
     return arr2d[grid.ys, grid.xs]
+
+
+def _build_wall_mask_from_legacy(grid, barrier_core, slit_masks):
+    wall_mask = barrier_core.copy()
+    for _, mask in slit_masks.items():
+        if mask is not None:
+            wall_mask &= (~mask)
+    return wall_mask
 
 
 def _iter_barrier_components(potential):
@@ -73,24 +82,35 @@ def _iter_barrier_components(potential):
     if barrier_core is None or V_real is None:
         return []
 
+    slit_masks = {
+        "slit1": slit1_mask if slit1_mask is not None else np.zeros_like(barrier_core, dtype=bool),
+        "slit2": slit2_mask if slit2_mask is not None else np.zeros_like(barrier_core, dtype=bool),
+    }
+
+    wall_mask = _build_wall_mask_from_legacy(None, barrier_core, slit_masks)
+
     return [
         _LegacyBarrierComponent(
             name="legacy_barrier",
             kind="legacy",
             V_real=V_real,
             barrier_core=barrier_core,
-            slit_masks={
-                "slit1": slit1_mask if slit1_mask is not None else np.zeros_like(barrier_core, dtype=bool),
-                "slit2": slit2_mask if slit2_mask is not None else np.zeros_like(barrier_core, dtype=bool),
-            },
+            wall_mask=wall_mask,
+            slit_masks=slit_masks,
         )
     ]
 
 
 def _component_center_xy(grid, comp):
-    core = comp.barrier_core
+    core = getattr(comp, "barrier_core", None)
     if core is None or not np.any(core):
-        return None
+        wall_mask = getattr(comp, "wall_mask", None)
+        if wall_mask is None or not np.any(wall_mask):
+            return None
+        x = float(np.mean(grid.X[wall_mask]))
+        y = float(np.mean(grid.Y[wall_mask]))
+        return x, y
+
     x = float(np.mean(grid.X[core]))
     y = float(np.mean(grid.Y[core]))
     return x, y
@@ -120,18 +140,34 @@ def _draw_component_label(ax, grid, comp, cfg):
     return txt
 
 
-def _draw_component_mask_mode(ax, grid, comp, extent, cfg):
-    artists = []
+def _get_component_wall_vis(grid, comp):
+    wall_mask = getattr(comp, "wall_mask", None)
+    if wall_mask is not None:
+        return _get_visible_field(grid, wall_mask).astype(float)
 
-    core_vis = _get_visible_field(grid, comp.barrier_core).astype(float)
+    core = getattr(comp, "barrier_core", None)
+    if core is None:
+        return None
+
+    core_vis = _get_visible_field(grid, core).astype(float)
     slit_union = np.zeros_like(core_vis, dtype=bool)
 
-    for _, mask in comp.slit_masks.items():
+    slit_masks = getattr(comp, "slit_masks", {})
+    for _, mask in slit_masks.items():
         if mask is not None:
             slit_union |= _get_visible_field(grid, mask)
 
     wall_vis = np.where(core_vis > 0.5, 1.0, 0.0)
     wall_vis[slit_union] = 0.0
+    return wall_vis
+
+
+def _draw_component_mask_mode(ax, grid, comp, extent, cfg):
+    artists = []
+
+    wall_vis = _get_component_wall_vis(grid, comp)
+    if wall_vis is None:
+        return artists
 
     alpha_base = float(_cfg_get(cfg, "BARRIER_MASK_ALPHA", 0.26))
     alpha = alpha_base * wall_vis
@@ -171,21 +207,23 @@ def _draw_component_mask_mode(ax, grid, comp, extent, cfg):
 
 
 def _draw_component_potential_mode(ax, grid, comp, extent, cfg):
+    """
+    Potential mode now uses wall_mask geometry for solid shape, but still
+    overlays contours from V_real if desired. This avoids wide smooth tails
+    appearing as giant blocks.
+    """
     artists = []
 
-    V_vis = _get_visible_field(grid, comp.V_real)
-    vmax = float(np.max(V_vis))
-    if vmax <= 0.0:
+    wall_vis = _get_component_wall_vis(grid, comp)
+    if wall_vis is None:
         return artists
-
-    Vn = V_vis / (vmax + 1e-30)
 
     alpha_min = float(_cfg_get(cfg, "BARRIER_POTENTIAL_ALPHA_MIN", 0.18))
     alpha_max = float(_cfg_get(cfg, "BARRIER_POTENTIAL_ALPHA_MAX", 0.55))
-    alpha = np.where(Vn > 1e-8, alpha_min + (alpha_max - alpha_min) * Vn, 0.0)
+    alpha = np.where(wall_vis > 0.5, alpha_max, 0.0)
 
     im = ax.imshow(
-        np.ones_like(Vn),
+        np.ones_like(wall_vis),
         extent=extent,
         origin="lower",
         cmap="gray",
@@ -195,22 +233,45 @@ def _draw_component_potential_mode(ax, grid, comp, extent, cfg):
     )
     artists.append(im)
 
-    levels_rel = _cfg_get(cfg, "GEOMETRY_CONTOUR_LEVELS", (0.15, 0.5, 0.85))
-    levels_abs = [float(lv) * vmax for lv in levels_rel if 0.0 < float(lv) < 1.0]
+    V_real = getattr(comp, "V_real", None)
+    if V_real is not None:
+        V_vis = _get_visible_field(grid, V_real)
+        vmax = float(np.max(V_vis))
 
-    if levels_abs:
+        if vmax > 0.0:
+            levels_rel = _cfg_get(cfg, "GEOMETRY_CONTOUR_LEVELS", (0.15, 0.5, 0.85))
+            levels_abs = [float(lv) * vmax for lv in levels_rel if 0.0 < float(lv) < 1.0]
+
+            if levels_abs:
+                try:
+                    cs = ax.contour(
+                        V_vis,
+                        levels=levels_abs,
+                        extent=extent,
+                        origin="lower",
+                        colors=["white"] * len(levels_abs),
+                        linewidths=np.linspace(0.8, 1.2, len(levels_abs)),
+                        alpha=0.65,
+                        zorder=6,
+                    )
+                    artists.extend(cs.collections)
+                except Exception:
+                    pass
+
+    # Hard wall outline on top
+    if np.any(wall_vis > 0.5):
         try:
-            cs = ax.contour(
-                V_vis,
-                levels=levels_abs,
+            cs2 = ax.contour(
+                wall_vis,
+                levels=[0.5],
                 extent=extent,
                 origin="lower",
-                colors=["white"] * len(levels_abs),
-                linewidths=np.linspace(0.8, 1.2, len(levels_abs)),
-                alpha=0.85,
-                zorder=6,
+                colors=["white"],
+                linewidths=[1.4],
+                alpha=0.95,
+                zorder=7,
             )
-            artists.extend(cs.collections)
+            artists.extend(cs2.collections)
         except Exception:
             pass
 
@@ -224,14 +285,15 @@ def _draw_component_potential_mode(ax, grid, comp, extent, cfg):
 def _draw_component_contour_only_mode(ax, grid, comp, extent, cfg):
     artists = []
 
-    V_vis = _get_visible_field(grid, comp.V_real)
-    vmax = float(np.max(V_vis))
+    wall_vis = _get_component_wall_vis(grid, comp)
+    if wall_vis is None:
+        return artists
 
-    if vmax > 0.0:
+    if np.any(wall_vis > 0.5):
         try:
             cs = ax.contour(
-                V_vis,
-                levels=[0.5 * vmax],
+                wall_vis,
+                levels=[0.5],
                 extent=extent,
                 origin="lower",
                 colors=["white"],
@@ -242,32 +304,6 @@ def _draw_component_contour_only_mode(ax, grid, comp, extent, cfg):
             artists.extend(cs.collections)
         except Exception:
             pass
-    else:
-        core_vis = _get_visible_field(grid, comp.barrier_core).astype(float)
-        slit_union = np.zeros_like(core_vis, dtype=bool)
-
-        for _, mask in comp.slit_masks.items():
-            if mask is not None:
-                slit_union |= _get_visible_field(grid, mask)
-
-        wall_vis = np.where(core_vis > 0.5, 1.0, 0.0)
-        wall_vis[slit_union] = 0.0
-
-        if np.any(wall_vis > 0.5):
-            try:
-                cs = ax.contour(
-                    wall_vis,
-                    levels=[0.5],
-                    extent=extent,
-                    origin="lower",
-                    colors=["white"],
-                    linewidths=[1.4],
-                    alpha=0.92,
-                    zorder=6,
-                )
-                artists.extend(cs.collections)
-            except Exception:
-                pass
 
     txt = _draw_component_label(ax, grid, comp, cfg)
     if txt is not None:
@@ -279,6 +315,7 @@ def _draw_component_contour_only_mode(ax, grid, comp, extent, cfg):
 def draw_static_geometry(ax, grid, potential, cfg, extent):
     """
     Draw screen/CAP/barrier geometry using structured barrier components when available.
+    Uses wall_mask for solid barrier visualization.
     Returns a list of static matplotlib artists.
     """
     artists = []
@@ -288,7 +325,6 @@ def draw_static_geometry(ax, grid, potential, cfg, extent):
         ax.axvline(cfg.screen_center_x, color="cyan", linestyle="--", alpha=0.45, linewidth=1.0, zorder=5)
         return artists
 
-    # Screen overlay
     if _cfg_get(cfg, "SHOW_SCREEN_OVERLAY", True):
         screen_vis = potential.screen_mask_vis.astype(float)
         if np.any(screen_vis > 0.5):
@@ -320,7 +356,6 @@ def draw_static_geometry(ax, grid, potential, cfg, extent):
             except Exception:
                 pass
 
-    # CAP overlay
     if _cfg_get(cfg, "SHOW_CAP_OVERLAY", True):
         W_vis = _get_visible_field(grid, potential.W)
         wmax = float(np.max(W_vis))
@@ -354,8 +389,7 @@ def draw_static_geometry(ax, grid, potential, cfg, extent):
             except Exception:
                 pass
 
-    # Barrier components
-    mode = str(_cfg_get(cfg, "BARRIER_PLOT_MODE", "mask")).lower().strip()
+    mode = str(_cfg_get(cfg, "BARRIER_PLOT_MODE", "potential")).lower().strip()
 
     if mode != "off":
         for comp in _iter_barrier_components(potential):
@@ -644,7 +678,6 @@ def main():
 
     cfg = build_cfg_from_meta(meta)
 
-    # Good defaults for new geometry plotting
     if not hasattr(cfg, "BARRIER_PLOT_MODE"):
         cfg.BARRIER_PLOT_MODE = "mask"
     if not hasattr(cfg, "SHOW_SCREEN_OVERLAY"):

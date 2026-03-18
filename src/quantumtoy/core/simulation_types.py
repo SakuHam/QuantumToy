@@ -68,6 +68,7 @@ class BarrierComponentSpec:
     kind: str
     V_real: np.ndarray
     barrier_core: np.ndarray
+    wall_mask: np.ndarray
     slit_masks: dict[str, np.ndarray] = field(default_factory=dict)
 
 
