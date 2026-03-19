@@ -28,6 +28,8 @@ from viz.visual_debug import (
     debug_plot_phase_density_composite_vis,
     debug_plot_phase_density_composite_with_contours_vis,
     debug_plot_phase_winding_vis,
+    debug_plot_scalar_field_vis,
+    debug_plot_metric_fields_vis,    
 )
 
 RENDER_MODES = (
@@ -671,6 +673,11 @@ def main():
         help="Contour levels for contour render modes",
     )
 
+    parser.add_argument("--debug-metric", action="store_true")
+    parser.add_argument("--debug-metric-alpha", action="store_true")
+    parser.add_argument("--debug-metric-a", action="store_true")
+    parser.add_argument("--debug-metric-v", action="store_true")
+
     args = parser.parse_args()
 
     bundle = load_run_bundle(args.npz_path, args.meta)
@@ -714,6 +721,54 @@ def main():
     )
     theory = build_theory(cfg, grid, potential)
 
+    extent = (
+        grid.x_vis_min,
+        grid.x_vis_max,
+        grid.y_vis_min,
+        grid.y_vis_max,
+    )
+
+    if hasattr(theory, "alpha_metric") and hasattr(theory, "a_metric") and hasattr(theory, "V_metric"):
+        alpha_vis = theory.alpha_metric[grid.ys, grid.xs]
+        a_vis = theory.a_metric[grid.ys, grid.xs]
+        V_metric_vis = theory.V_metric[grid.ys, grid.xs]
+
+        if args.debug_metric:
+            debug_plot_metric_fields_vis(
+                alpha_vis=alpha_vis,
+                a_vis=a_vis,
+                V_metric_vis=V_metric_vis,
+                extent=extent,
+                title_prefix=f"{cfg.THEORY_NAME}",
+            )
+
+        if args.debug_metric_alpha:
+            debug_plot_scalar_field_vis(
+                field_vis=alpha_vis,
+                extent=extent,
+                title=f"{cfg.THEORY_NAME}: alpha_metric",
+                cmap="viridis",
+                colorbar_label="alpha",
+            )
+
+        if args.debug_metric_a:
+            debug_plot_scalar_field_vis(
+                field_vis=a_vis,
+                extent=extent,
+                title=f"{cfg.THEORY_NAME}: a_metric",
+                cmap="plasma",
+                colorbar_label="a(x,y)",
+            )
+
+        if args.debug_metric_v:
+            debug_plot_scalar_field_vis(
+                field_vis=V_metric_vis,
+                extent=extent,
+                title=f"{cfg.THEORY_NAME}: V_metric",
+                cmap="magma",
+                colorbar_label="V_metric",
+            )
+            
     times = bundle["times"]
     state_vis_frames = bundle["state_vis_frames"]
     norms = bundle["norms"]
@@ -733,13 +788,6 @@ def main():
 
     Nt = len(times)
     tau_step = cfg.save_every * cfg.dt
-
-    extent = (
-        grid.x_vis_min,
-        grid.x_vis_max,
-        grid.y_vis_min,
-        grid.y_vis_max,
-    )
 
     click_has_position = is_finite_scalar(x_click) and is_finite_scalar(y_click)
     click_frame_idx = compute_click_frame_idx(times, t_det)

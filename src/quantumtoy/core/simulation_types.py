@@ -67,6 +67,18 @@ class BarrierComponentSpec:
     name: str
     kind: str
     V_real: np.ndarray
+    W: np.ndarray
+    barrier_core: np.ndarray
+    wall_mask: np.ndarray
+    slit_masks: dict[str, np.ndarray] = field(default_factory=dict)
+
+
+@dataclass
+class PotentialComponentSpec:
+    name: str
+    kind: str
+    V_real: np.ndarray
+    W: np.ndarray
     barrier_core: np.ndarray
     wall_mask: np.ndarray
     slit_masks: dict[str, np.ndarray] = field(default_factory=dict)
@@ -74,35 +86,24 @@ class BarrierComponentSpec:
 
 @dataclass
 class PotentialSpec:
-    """
-    Full potential specification used by theory / analysis / visualization.
-
-    Backward compatibility:
-    - barrier_core, slit1_mask, slit2_mask are kept for older code paths.
-    - components contains the full modern barrier structure.
-    """
     V_real: np.ndarray
     W: np.ndarray
     screen_mask_full: np.ndarray
     screen_mask_vis: np.ndarray
 
-    # Legacy compatibility fields
+    # legacy compatibility fields
     barrier_core: np.ndarray
     slit1_mask: np.ndarray
     slit2_mask: np.ndarray
 
-    # New structured barrier representation
-    components: list[BarrierComponentSpec] = field(default_factory=list)
+    # new structured representation
+    components: list[PotentialComponentSpec] = field(default_factory=list)
 
-    def get_component(self, name: str) -> BarrierComponentSpec:
+    def get_component(self, name: str) -> PotentialComponentSpec:
         for comp in self.components:
             if comp.name == name:
                 return comp
-        raise KeyError(f"No barrier component named {name!r}")
+        raise KeyError(f"No potential component named {name!r}")
 
-    def find_components_by_kind(self, kind: str) -> list[BarrierComponentSpec]:
+    def find_components_by_kind(self, kind: str) -> list[PotentialComponentSpec]:
         return [comp for comp in self.components if comp.kind == kind]
-    
-    def visible_component_field(self, grid, name: str) -> np.ndarray:
-        comp = self.get_component(name)
-        return comp.V_real[grid.ys, grid.xs]

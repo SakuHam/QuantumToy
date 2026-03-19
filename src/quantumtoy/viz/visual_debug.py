@@ -141,3 +141,63 @@ def debug_plot_phase_winding_vis(
     plt.ylabel("y")
     plt.colorbar(label="phase winding")
     plt.show()
+
+def debug_plot_scalar_field_vis(
+    field_vis: np.ndarray,
+    extent,
+    title: str,
+    cmap: str = "viridis",
+    colorbar_label: str | None = None,
+):
+    fig, ax = plt.subplots(figsize=(8.6, 6.4))
+
+    im = ax.imshow(
+        field_vis,
+        extent=extent,
+        origin="lower",
+        cmap=cmap,
+        aspect="equal",
+    )
+
+    ax.set_title(title)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+
+    cbar = fig.colorbar(im, ax=ax)
+    if colorbar_label is not None:
+        cbar.set_label(colorbar_label)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def debug_plot_metric_fields_vis(
+    alpha_vis: np.ndarray,
+    a_vis: np.ndarray,
+    V_metric_vis: np.ndarray,
+    extent,
+    title_prefix: str = "Metric fields",
+):
+    fig, axes = plt.subplots(1, 3, figsize=(16.0, 5.2))
+
+    panels = [
+        (alpha_vis, "alpha_metric", "viridis"),
+        (a_vis, "a_metric", "plasma"),
+        (V_metric_vis, "V_metric", "magma"),
+    ]
+
+    for ax, (field, title, cmap) in zip(axes, panels):
+        im = ax.imshow(
+            field,
+            extent=extent,
+            origin="lower",
+            cmap=cmap,
+            aspect="equal",
+        )
+        ax.set_title(f"{title_prefix}: {title}")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        fig.colorbar(im, ax=ax)
+
+    plt.tight_layout()
+    plt.show()

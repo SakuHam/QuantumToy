@@ -58,10 +58,25 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "schrodinger"
+    THEORY_NAME: str = "metric_aware_schrodinger"
 
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
+
+    # ============================================================
+    # Metrics
+    # ============================================================
+    METRIC_CENTER_X = 4.0
+    METRIC_CENTER_Y = 2.0
+    SCHWARZSCHILD_RADIUS = 1.2
+    METRIC_SOFTENING = 0.35
+    MIN_LAPSE = 0.08
+
+    METRIC_MODE = "lapse"
+    USE_METRIC_POTENTIAL = False
+    METRIC_POTENTIAL_STRENGTH = 2.0
+
+    METRIC_INTEGRATOR = "rk4"
 
     # ============================================================
     # Detector
@@ -80,6 +95,31 @@ class AppConfig:
     BARRIER_EDGE_MODE = "hard"              # "hard" | "sharp_smooth" | "smooth"
     BARRIER_SMOOTH = 0.20
     BARRIER_SHARP_SMOOTH = 0.04
+
+    USE_SIMPLE_BARRIER = False
+    simple_barrier_center_x = 2.0
+    simple_barrier_center_y = 2.0
+    simple_barrier_half_height = 1.2
+
+    USE_MICRO_BLACK_HOLE = False
+    micro_bh_center_x = 4.0
+    micro_bh_center_y = 2.0
+    micro_bh_sigma_V = 0.6
+    micro_bh_sigma_W = 0.25
+    micro_bh_V_strength = 4.0
+    micro_bh_W_strength = 1.5
+
+    USE_HYBRID_BLACK_HOLE = True
+    hybrid_bh_center_x = 4.0
+    hybrid_bh_center_y = 2.0
+    hybrid_bh_sigma_V = 1.0
+    hybrid_bh_V_strength = 1.0
+    hybrid_bh_horizon_radius = 1.15
+    hybrid_bh_horizon_width = 0.35
+    hybrid_bh_W_horizon = 2.8
+    hybrid_bh_core_radius = 0.65
+    hybrid_bh_W_core = 1.8
+
 
     # ============================================================
     # Ridge
@@ -228,6 +268,7 @@ class AppConfig:
     k0y: float = 0.0
     x0: float = -15.0
     y0: float = 0.0
+    INITIAL_PACKET_MODE: str = "scout_main_scalar"
 
     # ============================================================
     # Time stepping

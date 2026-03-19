@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .base import BarrierComponent
+from .base import PotentialComponent
 from ..validation import (
     _assert,
     _assert_array_shape,
@@ -11,15 +11,6 @@ from ..validation import (
 
 
 class DoubleSlitBarrier:
-    """
-    Double-slit barrier with selectable edge model.
-
-    edge_mode:
-        - "hard"
-        - "sharp_smooth"
-        - "smooth"
-    """
-
     VALID_EDGE_MODES = ("hard", "sharp_smooth", "smooth")
 
     def __init__(
@@ -75,7 +66,7 @@ class DoubleSlitBarrier:
         wall[slit2_mask] = 0.0
         return self.V_barrier * wall
 
-    def build(self, X: np.ndarray, Y: np.ndarray) -> BarrierComponent:
+    def build(self, X: np.ndarray, Y: np.ndarray) -> PotentialComponent:
         barrier_core = np.abs(X - self.center_x) < (self.thickness / 2.0)
         slit1_mask = np.abs(Y - self.slit_center_offset) < self.slit_half_height
         slit2_mask = np.abs(Y + self.slit_center_offset) < self.slit_half_height
@@ -89,28 +80,22 @@ class DoubleSlitBarrier:
         if self.edge_mode == "hard":
             V_real = self._build_hard(X, wall_mask)
         elif self.edge_mode == "sharp_smooth":
-            V_real = self._build_smooth_like(
-                X,
-                slit1_mask,
-                slit2_mask,
-                self.sharp_smooth_width,
-            )
+            V_real = self._build_smooth_like(X, slit1_mask, slit2_mask, self.sharp_smooth_width)
         elif self.edge_mode == "smooth":
-            V_real = self._build_smooth_like(
-                X,
-                slit1_mask,
-                slit2_mask,
-                self.barrier_smooth,
-            )
+            V_real = self._build_smooth_like(X, slit1_mask, slit2_mask, self.barrier_smooth)
         else:
             raise AssertionError(f"Unhandled edge_mode={self.edge_mode!r}")
 
-        _assert_finite_array(V_real, "double.V_real")
+        W = np.zeros_like(X, dtype=float)
 
-        return BarrierComponent(
+        _assert_finite_array(V_real, "double.V_real")
+        _assert_finite_array(W, "double.W")
+
+        return PotentialComponent(
             name=self.name,
             kind="double_slit",
             V_real=V_real,
+            W=W,
             barrier_core=barrier_core,
             wall_mask=wall_mask,
             slit_masks={

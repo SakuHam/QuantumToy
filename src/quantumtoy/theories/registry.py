@@ -10,7 +10,7 @@ from theories.dirac import DiracTheory
 from theories.dirac_thick_front import DiracThickFrontTheory
 from theories.thick_front_world_line import ThickFrontWorldLineTheory
 from theories.thick_front_measurement_guided import ThickFrontMeasurementGuidedTheory
-
+from theories.metric_aware_schrodinger import MetricAwareSchrodingerTheory
 
 # ============================================================
 # Validation helpers
@@ -116,6 +116,29 @@ def build_theory(cfg, grid, potential):
             hbar=hbar,
             kappa_meas=kappa_meas,
             rng_seed=meas_rng_seed,
+        )
+
+    elif cfg.THEORY_NAME == "metric_aware_schrodinger":
+        return MetricAwareSchrodingerTheory(
+            grid=grid,
+            potential=potential,
+            m_mass=cfg.m_mass,
+            hbar=cfg.hbar,
+
+            metric_center_x=getattr(cfg, "METRIC_CENTER_X", 0.0),
+            metric_center_y=getattr(cfg, "METRIC_CENTER_Y", 0.0),
+            schwarzschild_radius=getattr(cfg, "SCHWARZSCHILD_RADIUS", 1.0),
+            metric_softening=getattr(cfg, "METRIC_SOFTENING", 0.25),
+            min_lapse=getattr(cfg, "MIN_LAPSE", 0.08),
+
+            metric_mode=getattr(cfg, "METRIC_MODE", "lapse"),
+            use_metric_potential=getattr(cfg, "USE_METRIC_POTENTIAL", True),
+            metric_potential_strength=getattr(cfg, "METRIC_POTENTIAL_STRENGTH", 2.0),
+
+            integrator=getattr(cfg, "METRIC_INTEGRATOR", "rk4"),
+
+            debug_checks=getattr(cfg, "DEBUG_CHECKS", True),
+            debug_packet_stats=getattr(cfg, "DEBUG_PACKET_STATS", True),
         )
 
     elif theory_name == "thick_front":
