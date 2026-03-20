@@ -28,16 +28,389 @@ from viz.visual_debug import (
     debug_plot_phase_density_composite_vis,
     debug_plot_phase_density_composite_with_contours_vis,
     debug_plot_phase_winding_vis,
+    debug_plot_scalar_field_vis,
+    debug_plot_metric_fields_vis,    
 )
 
 RENDER_MODES = (
-    "density",
+    "density",                  # current visible rho (current pipeline)
+    "forward_density",          # |psi_fwd|^2 only
+    "backward_density",         # |phi_tau|^2 only
+    "overlap_density",          # |psi_fwd * conj(Emix)|^2 style amplitude
     "phase",
     "phase_contours",
     "ridge_phase",
     "ridge_phase_contours",
 )
 
+
+# ============================================================
+# Geometry overlay helpers
+# ============================================================
+
+class _LegacyBarrierComponent:
+    def __init__(self, name, kind, V_real, barrier_core, wall_mask, slit_masks):
+        self.name = name
+        self.kind = kind
+        self.V_real = V_real
+        self.barrier_core = barrier_core
+        self.wall_mask = wall_mask
+        self.slit_masks = slit_masks
+
+
+def _cfg_get(cfg, name, default):
+    return getattr(cfg, name, default)
+
+
+def _get_visible_field(grid, arr2d: np.ndarray) -> np.ndarray:
+    return arr2d[grid.ys, grid.xs]
+
+
+def _build_wall_mask_from_legacy(grid, barrier_core, slit_masks):
+    wall_mask = barrier_core.copy()
+    for _, mask in slit_masks.items():
+        if mask is not None:
+            wall_mask &= (~mask)
+    return wall_mask
+
+
+def _iter_barrier_components(potential):
+    comps = getattr(potential, "components", None)
+    if comps:
+        return list(comps)
+
+    barrier_core = getattr(potential, "barrier_core", None)
+    slit1_mask = getattr(potential, "slit1_mask", None)
+    slit2_mask = getattr(potential, "slit2_mask", None)
+    V_real = getattr(potential, "V_real", None)
+
+    if barrier_core is None or V_real is None:
+        return []
+
+    slit_masks = {
+        "slit1": slit1_mask if slit1_mask is not None else np.zeros_like(barrier_core, dtype=bool),
+        "slit2": slit2_mask if slit2_mask is not None else np.zeros_like(barrier_core, dtype=bool),
+    }
+
+    wall_mask = _build_wall_mask_from_legacy(None, barrier_core, slit_masks)
+
+    return [
+        _LegacyBarrierComponent(
+            name="legacy_barrier",
+            kind="legacy",
+            V_real=V_real,
+            barrier_core=barrier_core,
+            wall_mask=wall_mask,
+            slit_masks=slit_masks,
+        )
+    ]
+
+
+def _component_center_xy(grid, comp):
+    core = getattr(comp, "barrier_core", None)
+    if core is None or not np.any(core):
+        wall_mask = getattr(comp, "wall_mask", None)
+        if wall_mask is None or not np.any(wall_mask):
+            return None
+        x = float(np.mean(grid.X[wall_mask]))
+        y = float(np.mean(grid.Y[wall_mask]))
+        return x, y
+
+    x = float(np.mean(grid.X[core]))
+    y = float(np.mean(grid.Y[core]))
+    return x, y
+
+
+def _draw_component_label(ax, grid, comp, cfg):
+    if not _cfg_get(cfg, "SHOW_COMPONENT_LABELS", False):
+        return None
+
+    center = _component_center_xy(grid, comp)
+    if center is None:
+        return None
+
+    x, y = center
+    txt = ax.text(
+        x,
+        y,
+        comp.name,
+        color="white",
+        fontsize=8,
+        ha="center",
+        va="center",
+        alpha=0.75,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.35, edgecolor="none"),
+    )
+    return txt
+
+
+def _get_component_wall_vis(grid, comp):
+    wall_mask = getattr(comp, "wall_mask", None)
+    if wall_mask is not None:
+        return _get_visible_field(grid, wall_mask).astype(float)
+
+    core = getattr(comp, "barrier_core", None)
+    if core is None:
+        return None
+
+    core_vis = _get_visible_field(grid, core).astype(float)
+    slit_union = np.zeros_like(core_vis, dtype=bool)
+
+    slit_masks = getattr(comp, "slit_masks", {})
+    for _, mask in slit_masks.items():
+        if mask is not None:
+            slit_union |= _get_visible_field(grid, mask)
+
+    wall_vis = np.where(core_vis > 0.5, 1.0, 0.0)
+    wall_vis[slit_union] = 0.0
+    return wall_vis
+
+
+def _draw_component_mask_mode(ax, grid, comp, extent, cfg):
+    artists = []
+
+    wall_vis = _get_component_wall_vis(grid, comp)
+    if wall_vis is None:
+        return artists
+
+    alpha_base = float(_cfg_get(cfg, "BARRIER_MASK_ALPHA", 0.26))
+    alpha = alpha_base * wall_vis
+
+    im = ax.imshow(
+        np.ones_like(wall_vis),
+        extent=extent,
+        origin="lower",
+        cmap="gray",
+        interpolation="nearest",
+        alpha=alpha,
+        zorder=4,
+    )
+    artists.append(im)
+
+    if np.any(wall_vis > 0.5):
+        try:
+            cs = ax.contour(
+                wall_vis,
+                levels=[0.5],
+                extent=extent,
+                origin="lower",
+                colors=["white"],
+                linewidths=[1.2],
+                alpha=0.9,
+                zorder=6,
+            )
+            artists.extend(cs.collections)
+        except Exception:
+            pass
+
+    txt = _draw_component_label(ax, grid, comp, cfg)
+    if txt is not None:
+        artists.append(txt)
+
+    return artists
+
+
+def _draw_component_potential_mode(ax, grid, comp, extent, cfg):
+    """
+    Potential mode now uses wall_mask geometry for solid shape, but still
+    overlays contours from V_real if desired. This avoids wide smooth tails
+    appearing as giant blocks.
+    """
+    artists = []
+
+    wall_vis = _get_component_wall_vis(grid, comp)
+    if wall_vis is None:
+        return artists
+
+    alpha_min = float(_cfg_get(cfg, "BARRIER_POTENTIAL_ALPHA_MIN", 0.18))
+    alpha_max = float(_cfg_get(cfg, "BARRIER_POTENTIAL_ALPHA_MAX", 0.55))
+    alpha = np.where(wall_vis > 0.5, alpha_max, 0.0)
+
+    im = ax.imshow(
+        np.ones_like(wall_vis),
+        extent=extent,
+        origin="lower",
+        cmap="gray",
+        interpolation="nearest",
+        alpha=alpha,
+        zorder=4,
+    )
+    artists.append(im)
+
+    V_real = getattr(comp, "V_real", None)
+    if V_real is not None:
+        V_vis = _get_visible_field(grid, V_real)
+        vmax = float(np.max(V_vis))
+
+        if vmax > 0.0:
+            levels_rel = _cfg_get(cfg, "GEOMETRY_CONTOUR_LEVELS", (0.15, 0.5, 0.85))
+            levels_abs = [float(lv) * vmax for lv in levels_rel if 0.0 < float(lv) < 1.0]
+
+            if levels_abs:
+                try:
+                    cs = ax.contour(
+                        V_vis,
+                        levels=levels_abs,
+                        extent=extent,
+                        origin="lower",
+                        colors=["white"] * len(levels_abs),
+                        linewidths=np.linspace(0.8, 1.2, len(levels_abs)),
+                        alpha=0.65,
+                        zorder=6,
+                    )
+                    artists.extend(cs.collections)
+                except Exception:
+                    pass
+
+    # Hard wall outline on top
+    if np.any(wall_vis > 0.5):
+        try:
+            cs2 = ax.contour(
+                wall_vis,
+                levels=[0.5],
+                extent=extent,
+                origin="lower",
+                colors=["white"],
+                linewidths=[1.4],
+                alpha=0.95,
+                zorder=7,
+            )
+            artists.extend(cs2.collections)
+        except Exception:
+            pass
+
+    txt = _draw_component_label(ax, grid, comp, cfg)
+    if txt is not None:
+        artists.append(txt)
+
+    return artists
+
+
+def _draw_component_contour_only_mode(ax, grid, comp, extent, cfg):
+    artists = []
+
+    wall_vis = _get_component_wall_vis(grid, comp)
+    if wall_vis is None:
+        return artists
+
+    if np.any(wall_vis > 0.5):
+        try:
+            cs = ax.contour(
+                wall_vis,
+                levels=[0.5],
+                extent=extent,
+                origin="lower",
+                colors=["white"],
+                linewidths=[1.4],
+                alpha=0.92,
+                zorder=6,
+            )
+            artists.extend(cs.collections)
+        except Exception:
+            pass
+
+    txt = _draw_component_label(ax, grid, comp, cfg)
+    if txt is not None:
+        artists.append(txt)
+
+    return artists
+
+
+def draw_static_geometry(ax, grid, potential, cfg, extent):
+    """
+    Draw screen/CAP/barrier geometry using structured barrier components when available.
+    Uses wall_mask for solid barrier visualization.
+    Returns a list of static matplotlib artists.
+    """
+    artists = []
+
+    if potential is None:
+        ax.axvline(cfg.barrier_center_x, color="white", linestyle="--", alpha=0.6, linewidth=1.1, zorder=5)
+        ax.axvline(cfg.screen_center_x, color="cyan", linestyle="--", alpha=0.45, linewidth=1.0, zorder=5)
+        return artists
+
+    if _cfg_get(cfg, "SHOW_SCREEN_OVERLAY", True):
+        screen_vis = potential.screen_mask_vis.astype(float)
+        if np.any(screen_vis > 0.5):
+            alpha_scale = float(_cfg_get(cfg, "SCREEN_ALPHA", 0.16))
+
+            im = ax.imshow(
+                screen_vis,
+                extent=extent,
+                origin="lower",
+                cmap="Blues",
+                interpolation="nearest",
+                alpha=alpha_scale * screen_vis,
+                zorder=3,
+            )
+            artists.append(im)
+
+            try:
+                cs = ax.contour(
+                    screen_vis,
+                    levels=[0.5],
+                    extent=extent,
+                    origin="lower",
+                    colors=["cyan"],
+                    linewidths=[1.0],
+                    alpha=0.70,
+                    zorder=6,
+                )
+                artists.extend(cs.collections)
+            except Exception:
+                pass
+
+    if _cfg_get(cfg, "SHOW_CAP_OVERLAY", True):
+        W_vis = _get_visible_field(grid, potential.W)
+        wmax = float(np.max(W_vis))
+        if wmax > 0.0:
+            Wn = W_vis / (wmax + 1e-30)
+            alpha_scale = float(_cfg_get(cfg, "CAP_ALPHA", 0.10))
+
+            im = ax.imshow(
+                Wn,
+                extent=extent,
+                origin="lower",
+                cmap="Greens",
+                interpolation="nearest",
+                alpha=alpha_scale * Wn,
+                zorder=2,
+            )
+            artists.append(im)
+
+            try:
+                cs = ax.contour(
+                    Wn,
+                    levels=[0.2, 0.5, 0.8],
+                    extent=extent,
+                    origin="lower",
+                    colors=["lime", "lime", "lime"],
+                    linewidths=[0.5, 0.7, 0.9],
+                    alpha=0.35,
+                    zorder=5,
+                )
+                artists.extend(cs.collections)
+            except Exception:
+                pass
+
+    mode = str(_cfg_get(cfg, "BARRIER_PLOT_MODE", "potential")).lower().strip()
+
+    if mode != "off":
+        for comp in _iter_barrier_components(potential):
+            if mode == "mask":
+                artists.extend(_draw_component_mask_mode(ax, grid, comp, extent, cfg))
+            elif mode == "contour_only":
+                artists.extend(_draw_component_contour_only_mode(ax, grid, comp, extent, cfg))
+            else:
+                artists.extend(_draw_component_potential_mode(ax, grid, comp, extent, cfg))
+
+    return artists
+
+
+# ============================================================
+# General helpers
+# ============================================================
 
 def gamma_display(
     arr: np.ndarray,
@@ -89,6 +462,7 @@ def build_potential_from_flag(grid, cfg, debug_free_case: bool):
             barrier_core=false_mask.copy(),
             slit1_mask=false_mask.copy(),
             slit2_mask=false_mask.copy(),
+            components=[],
         )
 
     return build_double_slit_and_caps(grid, cfg)
@@ -109,6 +483,28 @@ def phase_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
         return np.angle(state_vis[0])
     raise ValueError(f"Unsupported state_vis ndim={state_vis.ndim}")
 
+def forward_density_frames_from_state_vis(state_vis_frames: np.ndarray) -> np.ndarray:
+    if state_vis_frames.ndim == 3:
+        return (np.abs(state_vis_frames) ** 2).astype(float)
+    if state_vis_frames.ndim == 4:
+        return np.sum(np.abs(state_vis_frames) ** 2, axis=1).astype(float)
+    raise ValueError(f"Unsupported state_vis_frames ndim={state_vis_frames.ndim}")
+
+
+def backward_density_frames_from_emix(emix_frames: np.ndarray) -> np.ndarray:
+    if emix_frames.ndim == 3:
+        return (np.abs(emix_frames) ** 2).astype(float)
+    if emix_frames.ndim == 4:
+        return np.sum(np.abs(emix_frames) ** 2, axis=1).astype(float)
+    raise ValueError(f"Unsupported emix_frames ndim={emix_frames.ndim}")
+
+
+def overlap_density_frames(
+    state_vis_frames: np.ndarray,
+    emix_frames: np.ndarray,
+) -> np.ndarray:
+    z = make_overlap_complex_frames(state_vis_frames, emix_frames)
+    return (np.abs(z) ** 2).astype(float)
 
 def make_phase_density_rgb(
     state_vis: np.ndarray,
@@ -172,6 +568,9 @@ def build_render_image(
     mode: str,
     i: int,
     rho_current: np.ndarray,
+    forward_density_current: np.ndarray | None,
+    backward_density_current: np.ndarray | None,
+    overlap_density_current: np.ndarray | None,
     state_vis_frames: np.ndarray | None,
     ridge_complex_current: np.ndarray | None,
     vref: float,
@@ -183,6 +582,39 @@ def build_render_image(
             vref=vref,
             gamma=cfg.GAMMA,
             use_fixed_scale=cfg.USE_FIXED_DISPLAY_SCALE,
+        )
+        return img, None, "density"
+
+    if mode == "forward_density":
+        if forward_density_current is None:
+            raise RuntimeError("forward_density render mode requires forward density frames")
+        img = gamma_display(
+            forward_density_current[i],
+            vref=max(float(np.max(forward_density_current[0])), 1e-30),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode == "backward_density":
+        if backward_density_current is None:
+            raise RuntimeError("backward_density render mode requires backward density frames")
+        img = gamma_display(
+            backward_density_current[i],
+            vref=max(float(np.max(backward_density_current[0])), 1e-30),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode == "overlap_density":
+        if overlap_density_current is None:
+            raise RuntimeError("overlap_density render mode requires overlap density frames")
+        img = gamma_display(
+            overlap_density_current[i],
+            vref=max(float(np.max(overlap_density_current[0])), 1e-30),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
         )
         return img, None, "density"
 
@@ -235,6 +667,30 @@ def mode_has_contours(mode: str) -> bool:
     return mode in ("phase_contours", "ridge_phase_contours")
 
 
+def is_finite_scalar(x) -> bool:
+    try:
+        return np.isfinite(float(x))
+    except Exception:
+        return False
+
+
+def compute_click_frame_idx(times: np.ndarray, t_det) -> int | None:
+    if not is_finite_scalar(t_det):
+        return None
+
+    t_det = float(t_det)
+
+    if len(times) == 0:
+        return None
+
+    if t_det <= float(times[0]):
+        return 0
+    if t_det > float(times[-1]):
+        return None
+
+    return int(np.searchsorted(times, t_det, side="left"))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("npz_path", help="Path to saved .npz run bundle")
@@ -278,12 +734,51 @@ def main():
         help="Contour levels for contour render modes",
     )
 
+    parser.add_argument(
+        "--ridge-source",
+        choices=("overlap", "forward"),
+        default="overlap",
+        help="Use overlap-based ridge (current behavior) or forward-density-only ridge",
+    )
+
+    parser.add_argument(
+        "--show-ridge-source-label",
+        action="store_true",
+        help="Append ridge source to plot titles",
+    )
+
+    parser.add_argument("--debug-metric", action="store_true")
+    parser.add_argument("--debug-metric-alpha", action="store_true")
+    parser.add_argument("--debug-metric-a", action="store_true")
+    parser.add_argument("--debug-metric-v", action="store_true")
+
     args = parser.parse_args()
 
     bundle = load_run_bundle(args.npz_path, args.meta)
     meta = bundle["meta"]
 
     cfg = build_cfg_from_meta(meta)
+
+    if not hasattr(cfg, "BARRIER_PLOT_MODE"):
+        cfg.BARRIER_PLOT_MODE = "mask"
+    if not hasattr(cfg, "SHOW_SCREEN_OVERLAY"):
+        cfg.SHOW_SCREEN_OVERLAY = True
+    if not hasattr(cfg, "SHOW_CAP_OVERLAY"):
+        cfg.SHOW_CAP_OVERLAY = False
+    if not hasattr(cfg, "SHOW_COMPONENT_LABELS"):
+        cfg.SHOW_COMPONENT_LABELS = False
+    if not hasattr(cfg, "GEOMETRY_CONTOUR_LEVELS"):
+        cfg.GEOMETRY_CONTOUR_LEVELS = (0.15, 0.50, 0.85)
+    if not hasattr(cfg, "BARRIER_MASK_ALPHA"):
+        cfg.BARRIER_MASK_ALPHA = 0.26
+    if not hasattr(cfg, "BARRIER_POTENTIAL_ALPHA_MIN"):
+        cfg.BARRIER_POTENTIAL_ALPHA_MIN = 0.18
+    if not hasattr(cfg, "BARRIER_POTENTIAL_ALPHA_MAX"):
+        cfg.BARRIER_POTENTIAL_ALPHA_MAX = 0.55
+    if not hasattr(cfg, "SCREEN_ALPHA"):
+        cfg.SCREEN_ALPHA = 0.16
+    if not hasattr(cfg, "CAP_ALPHA"):
+        cfg.CAP_ALPHA = 0.10
 
     grid = build_grid(
         visible_lx=cfg.VISIBLE_LX,
@@ -300,6 +795,54 @@ def main():
     )
     theory = build_theory(cfg, grid, potential)
 
+    extent = (
+        grid.x_vis_min,
+        grid.x_vis_max,
+        grid.y_vis_min,
+        grid.y_vis_max,
+    )
+
+    if hasattr(theory, "alpha_metric") and hasattr(theory, "a_metric") and hasattr(theory, "V_metric"):
+        alpha_vis = theory.alpha_metric[grid.ys, grid.xs]
+        a_vis = theory.a_metric[grid.ys, grid.xs]
+        V_metric_vis = theory.V_metric[grid.ys, grid.xs]
+
+        if args.debug_metric:
+            debug_plot_metric_fields_vis(
+                alpha_vis=alpha_vis,
+                a_vis=a_vis,
+                V_metric_vis=V_metric_vis,
+                extent=extent,
+                title_prefix=f"{cfg.THEORY_NAME}",
+            )
+
+        if args.debug_metric_alpha:
+            debug_plot_scalar_field_vis(
+                field_vis=alpha_vis,
+                extent=extent,
+                title=f"{cfg.THEORY_NAME}: alpha_metric",
+                cmap="viridis",
+                colorbar_label="alpha",
+            )
+
+        if args.debug_metric_a:
+            debug_plot_scalar_field_vis(
+                field_vis=a_vis,
+                extent=extent,
+                title=f"{cfg.THEORY_NAME}: a_metric",
+                cmap="plasma",
+                colorbar_label="a(x,y)",
+            )
+
+        if args.debug_metric_v:
+            debug_plot_scalar_field_vis(
+                field_vis=V_metric_vis,
+                extent=extent,
+                title=f"{cfg.THEORY_NAME}: V_metric",
+                cmap="magma",
+                colorbar_label="V_metric",
+            )
+            
     times = bundle["times"]
     state_vis_frames = bundle["state_vis_frames"]
     norms = bundle["norms"]
@@ -320,12 +863,8 @@ def main():
     Nt = len(times)
     tau_step = cfg.save_every * cfg.dt
 
-    extent = (
-        grid.x_vis_min,
-        grid.x_vis_max,
-        grid.y_vis_min,
-        grid.y_vis_max,
-    )
+    click_has_position = is_finite_scalar(x_click) and is_finite_scalar(y_click)
+    click_frame_idx = compute_click_frame_idx(times, t_det)
 
     if state_vis_frames is not None:
         dbg_i = args.debug_frame if args.debug_frame >= 0 else (len(state_vis_frames) - 1)
@@ -389,16 +928,32 @@ def main():
             blend_alpha=cfg.RHO_BLEND_ALPHA,
         )
 
-        rx, ry, rs = compute_ridge_xy(
-            frames_psi=state_vis_frames,
-            Emix=Emix,
-            x_vis_1d=grid.x_vis_1d,
-            y_vis_1d=grid.y_vis_1d,
-            mode=cfg.RIDGE_MODE,
-            top_q=cfg.CENTROID_TOP_Q,
-            radius=cfg.LOCALMAX_RADIUS,
-            alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
-        )
+        ridge_source = args.ridge_source
+
+        if ridge_source == "overlap":
+            rx, ry, rs = compute_ridge_xy(
+                frames_psi=state_vis_frames,
+                Emix=Emix,
+                x_vis_1d=grid.x_vis_1d,
+                y_vis_1d=grid.y_vis_1d,
+                mode=cfg.RIDGE_MODE,
+                top_q=cfg.CENTROID_TOP_Q,
+                radius=cfg.LOCALMAX_RADIUS,
+                alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
+            )
+        elif ridge_source == "forward":
+            rx, ry, rs = compute_ridge_xy(
+                frames_psi=state_vis_frames,
+                Emix=None,
+                x_vis_1d=grid.x_vis_1d,
+                y_vis_1d=grid.y_vis_1d,
+                mode=cfg.RIDGE_MODE,
+                top_q=cfg.CENTROID_TOP_Q,
+                radius=cfg.LOCALMAX_RADIUS,
+                alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
+            )
+        else:
+            raise ValueError(f"Unsupported ridge_source={ridge_source!r}")
 
         cos_th = speed = ux = uy = div_v = None
 
@@ -445,6 +1000,10 @@ def main():
 
     ridge_complex_init = make_overlap_complex_frames(state_vis_frames, emix_init)
 
+    forward_density_init = forward_density_frames_from_state_vis(state_vis_frames)
+    backward_density_init = backward_density_frames_from_emix(emix_init)
+    overlap_density_init = overlap_density_frames(state_vis_frames, emix_init)
+
     split_view = bool(args.split_view)
     left_mode = args.left_mode if split_view else args.render_mode
     right_mode = args.right_mode if split_view else None
@@ -468,6 +1027,9 @@ def main():
             mode=mode,
             i=0,
             rho_current=rho_init,
+            forward_density_current=forward_density_init,
+            backward_density_current=backward_density_init,
+            overlap_density_current=overlap_density_init,
             state_vis_frames=state_vis_frames,
             ridge_complex_current=ridge_complex_init,
             vref=vref,
@@ -482,6 +1044,7 @@ def main():
                 cmap="magma",
                 interpolation=cfg.IM_INTERPOLATION,
                 norm=PowerNorm(gamma=0.35),
+                zorder=1,
             )
         else:
             im = ax.imshow(
@@ -490,7 +1053,16 @@ def main():
                 origin="lower",
                 aspect="equal",
                 interpolation=cfg.IM_INTERPOLATION,
+                zorder=1,
             )
+
+        static_geometry_artists = draw_static_geometry(
+            ax=ax,
+            grid=grid,
+            potential=potential,
+            cfg=cfg,
+            extent=extent,
+        )
 
         contour_artists = []
         if mode_has_contours(mode) and rho_norm0 is not None:
@@ -502,13 +1074,15 @@ def main():
                 colors="white",
                 linewidths=0.7,
                 alpha=0.7,
+                zorder=7,
             )
             contour_artists = list(cs.collections)
 
-        ax.axvline(cfg.barrier_center_x, color="white", linestyle="--", alpha=0.6)
-        ax.axvline(cfg.screen_center_x, color="cyan", linestyle="--", alpha=0.4)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
+        ax.set_aspect("equal")
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
 
         if split_view:
             title = ax.set_title(f"{mode} | t={times[0]:.3f} | σT={sigma_init:.3f}")
@@ -529,17 +1103,20 @@ def main():
             color="lime",
             alpha=0.9,
             label=f"ridge ({cfg.RIDGE_MODE})",
+            zorder=10,
         )
 
         click_marker, = ax.plot(
-            [x_click],
-            [y_click],
+            [],
+            [],
             marker="x",
             markersize=9,
             linestyle="None",
             color="yellow",
             alpha=0.9,
             label="click",
+            visible=False,
+            zorder=10,
         )
 
         ridge_trail, = ax.plot(
@@ -549,6 +1126,7 @@ def main():
             linewidth=1.5,
             color="lime",
             alpha=0.5,
+            zorder=9,
         )
 
         flow_quiver = None
@@ -564,6 +1142,7 @@ def main():
                 color="cyan",
                 alpha=0.9,
                 width=0.006,
+                zorder=11,
             )
 
         bohm_lines = []
@@ -579,6 +1158,7 @@ def main():
                     color=cfg.BOHMIAN_COLOR,
                     alpha=0.85,
                     label="Bohmian traj" if k == 0 else None,
+                    zorder=8,
                 )
                 bohm_lines.append(line_k)
 
@@ -591,6 +1171,7 @@ def main():
                         linestyle="None",
                         color=cfg.BOHMIAN_HEAD_COLOR,
                         alpha=0.95,
+                        zorder=9,
                     )
                 else:
                     head_k = None
@@ -605,6 +1186,7 @@ def main():
                 "mode": mode,
                 "im": im,
                 "title": title,
+                "static_geometry_artists": static_geometry_artists,
                 "contour_artists": contour_artists,
                 "ridge_marker": ridge_marker,
                 "click_marker": click_marker,
@@ -628,6 +1210,11 @@ def main():
     rho_current = [rho_init]
     emix_current = [emix_init]
     ridge_complex_current = [ridge_complex_init]
+
+    forward_density_current = [forward_density_init]
+    backward_density_current = [backward_density_init]
+    overlap_density_current = [overlap_density_init]
+
     sigma_current = [sigma_init]
     ridge_x = [ridge_x_init]
     ridge_y = [ridge_y_init]
@@ -652,6 +1239,9 @@ def main():
             mode=mode,
             i=i,
             rho_current=rho_current[0],
+            forward_density_current=forward_density_current[0],
+            backward_density_current=backward_density_current[0],
+            overlap_density_current=overlap_density_current[0],
             state_vis_frames=state_vis_frames,
             ridge_complex_current=ridge_complex_current[0],
             vref=vref,
@@ -669,6 +1259,7 @@ def main():
                 colors="white",
                 linewidths=0.7,
                 alpha=0.7,
+                zorder=7,
             )
             panel["contour_artists"] = list(cs.collections)
 
@@ -752,6 +1343,17 @@ def main():
                 else:
                     bohm_heads[k].set_data([], [])
 
+    def update_click_marker(panel: dict, i: int):
+        marker = panel["click_marker"]
+
+        if (not click_has_position) or (click_frame_idx is None) or (i < click_frame_idx):
+            marker.set_data([], [])
+            marker.set_visible(False)
+            return
+
+        marker.set_data([float(x_click)], [float(y_click)])
+        marker.set_visible(True)
+
     def make_main_title(i: int, mode: str):
         parts = [
             rf"ρ(t): σT={sigma_current[0]:.3f}",
@@ -763,6 +1365,9 @@ def main():
             rf"norm≈{norms[i]:.4f}",
             rf"Γ≈{ridge_s[0][i]:.3e}",
         ]
+
+        if args.show_ridge_source_label:
+            parts.append(rf"ridge_src={args.ridge_source}")
 
         if cos_th[0] is not None and np.isfinite(cos_th[0][i]):
             parts.append(rf"cosθ≈{cos_th[0][i]:.3f}")
@@ -805,6 +1410,7 @@ def main():
             else:
                 panel["ridge_trail"].set_data([], [])
 
+            update_click_marker(panel, i)
             update_flow_arrow(panel, i)
             update_bohmian_overlay(panel, i)
 
@@ -828,6 +1434,10 @@ def main():
         rho_current[0] = rho_new
         emix_current[0] = emix_new
         ridge_complex_current[0] = make_overlap_complex_frames(state_vis_frames, emix_new)
+
+        forward_density_current[0] = forward_density_frames_from_state_vis(state_vis_frames)
+        backward_density_current[0] = backward_density_frames_from_emix(emix_new)
+        overlap_density_current[0] = overlap_density_frames(state_vis_frames, emix_new)
 
         ridge_x[0] = rx
         ridge_y[0] = ry
@@ -862,6 +1472,7 @@ def main():
         refresh_titles(i)
 
         for panel in panel_states:
+            artists.extend(panel["static_geometry_artists"])
             artists.append(panel["ridge_marker"])
             artists.append(panel["click_marker"])
             artists.append(panel["ridge_trail"])

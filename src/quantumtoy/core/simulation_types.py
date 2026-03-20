@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 
 
@@ -38,11 +38,72 @@ class GridSpec:
 
 
 @dataclass
+class BarrierComponentSpec:
+    """
+    Serializable / runtime-friendly barrier component description.
+
+    name:
+        Human-readable component name, e.g.:
+        - "upstream_single_slit"
+        - "downstream_double_slit"
+
+    kind:
+        Barrier family/type, e.g.:
+        - "single_slit"
+        - "double_slit"
+
+    V_real:
+        This component's real potential contribution on the full grid.
+
+    barrier_core:
+        Geometric core mask of the wall region before slit carving.
+
+    slit_masks:
+        Dictionary of slit aperture masks, full-grid shape.
+        Examples:
+        - {"slit": mask}
+        - {"slit1": mask1, "slit2": mask2}
+    """
+    name: str
+    kind: str
+    V_real: np.ndarray
+    W: np.ndarray
+    barrier_core: np.ndarray
+    wall_mask: np.ndarray
+    slit_masks: dict[str, np.ndarray] = field(default_factory=dict)
+
+
+@dataclass
+class PotentialComponentSpec:
+    name: str
+    kind: str
+    V_real: np.ndarray
+    W: np.ndarray
+    barrier_core: np.ndarray
+    wall_mask: np.ndarray
+    slit_masks: dict[str, np.ndarray] = field(default_factory=dict)
+
+
+@dataclass
 class PotentialSpec:
     V_real: np.ndarray
     W: np.ndarray
     screen_mask_full: np.ndarray
     screen_mask_vis: np.ndarray
+
+    # legacy compatibility fields
     barrier_core: np.ndarray
     slit1_mask: np.ndarray
     slit2_mask: np.ndarray
+
+    # new structured representation
+    components: list[PotentialComponentSpec] = field(default_factory=list)
+
+    def get_component(self, name: str) -> PotentialComponentSpec:
+        for comp in self.components:
+            if comp.name == name:
+                return comp
+        raise KeyError(f"No potential component named {name!r}")
+
+    def find_components_by_kind(self, kind: str) -> list[PotentialComponentSpec]:
+        return [comp for comp in self.components if comp.kind == kind]

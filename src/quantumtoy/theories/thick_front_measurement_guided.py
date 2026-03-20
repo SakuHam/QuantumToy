@@ -132,7 +132,7 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
     # Debug / printing
     # --------------------------------------------------------
 
-    measurement_debug_print: bool = False
+    measurement_debug_print: bool = True
 
     # --------------------------------------------------------
     # Internal state
@@ -631,7 +631,14 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
         local_strength = None
 
         if self.front_branch_competition_strength > 0.0:
-            gamma_like, neighbor_max, competition_raw, competition_gate = self._branch_competition_field(
+            (
+                gamma_like,
+                neighbor_max,
+                competition_raw,
+                competition_gate,
+                _,
+                _,
+            ) = self._branch_competition_field(
                 rho=rho_tmp,
                 align_real=align_real_tmp,
             )
@@ -698,7 +705,7 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
             prob_after_gain = self._state_probability(psi_tmp)
 
             if self.front_branch_competition_strength > 0.0:
-                gamma_like, neighbor_max, competition_raw, competition_gate = self._branch_competition_field(
+                gamma_like, neighbor_max, competition_raw, competition_gate, _, _ = self._branch_competition_field(
                     rho=rho_tmp,
                     align_real=align_real_tmp,
                 )
@@ -768,7 +775,7 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
                 prob_after_gain = self._state_probability(psi_tmp)
 
                 if self.front_branch_competition_strength > 0.0:
-                    gamma_like, neighbor_max, competition_raw, competition_gate = self._branch_competition_field(
+                    gamma_like, neighbor_max, competition_raw, competition_gate, _, _ = self._branch_competition_field(
                         rho=rho_tmp,
                         align_real=align_real_tmp,
                     )
