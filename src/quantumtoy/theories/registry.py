@@ -11,6 +11,8 @@ from theories.dirac_thick_front import DiracThickFrontTheory
 from theories.thick_front_world_line import ThickFrontWorldLineTheory
 from theories.thick_front_measurement_guided import ThickFrontMeasurementGuidedTheory
 from theories.metric_aware_schrodinger import MetricAwareSchrodingerTheory
+from theories.tensor_metric_aware_schrodinger import TensorMetricAwareSchrodingerTheory
+from theories.rotating_tensor_metric_aware_schrodinger import RotatingTensorMetricAwareSchrodingerTheory
 
 # ============================================================
 # Validation helpers
@@ -141,6 +143,71 @@ def build_theory(cfg, grid, potential):
             debug_packet_stats=getattr(cfg, "DEBUG_PACKET_STATS", True),
         )
 
+    elif cfg.THEORY_NAME == "tensor_metric_aware_schrodinger":
+        return TensorMetricAwareSchrodingerTheory(
+            grid=grid,
+            potential=potential,
+            m_mass=cfg.m_mass,
+            hbar=cfg.hbar,
+
+            metric_center_x=getattr(cfg, "METRIC_CENTER_X", 0.0),
+            metric_center_y=getattr(cfg, "METRIC_CENTER_Y", 0.0),
+            schwarzschild_radius=getattr(cfg, "SCHWARZSCHILD_RADIUS", 1.0),
+            metric_softening=getattr(cfg, "METRIC_SOFTENING", 0.35),
+            min_lapse=getattr(cfg, "MIN_LAPSE", 0.08),
+
+            metric_mode=getattr(cfg, "METRIC_MODE", "conformal_lapse"),
+            use_metric_potential=getattr(cfg, "USE_METRIC_POTENTIAL", False),
+            metric_potential_strength=getattr(cfg, "METRIC_POTENTIAL_STRENGTH", 0.0),
+
+            integrator=getattr(cfg, "METRIC_INTEGRATOR", "rk4"),
+
+            debug_checks=getattr(cfg, "DEBUG_CHECKS", True),
+            debug_packet_stats=getattr(cfg, "DEBUG_PACKET_STATS", True),
+        )
+
+    elif cfg.THEORY_NAME == "rotating_tensor_metric_aware_schrodinger":
+        return RotatingTensorMetricAwareSchrodingerTheory(
+            grid=grid,
+            potential=potential,
+            m_mass=cfg.m_mass,
+            hbar=cfg.hbar,
+
+            metric_center_x=getattr(cfg, "METRIC_CENTER_X", 0.0),
+            metric_center_y=getattr(cfg, "METRIC_CENTER_Y", 0.0),
+            schwarzschild_radius=getattr(cfg, "SCHWARZSCHILD_RADIUS", 1.0),
+            metric_softening=getattr(cfg, "METRIC_SOFTENING", 0.35),
+            min_lapse=getattr(cfg, "MIN_LAPSE", 0.08),
+
+            metric_mode=getattr(cfg, "METRIC_MODE", "conformal_lapse"),
+            use_metric_potential=getattr(cfg, "USE_METRIC_POTENTIAL", False),
+            metric_potential_strength=getattr(cfg, "METRIC_POTENTIAL_STRENGTH", 0.0),
+
+            integrator=getattr(cfg, "METRIC_INTEGRATOR", "rk4"),
+
+            tangential_boost=getattr(cfg, "TANGENTIAL_BOOST", 0.8),
+            radial_suppression=getattr(cfg, "RADIAL_SUPPRESSION", 0.6),
+            orbit_sigma=getattr(cfg, "ORBIT_SIGMA", 2.0),
+
+            rotation_strength=getattr(cfg, "ROTATION_STRENGTH", 0.10),
+            rotation_mode=getattr(cfg, "ROTATION_MODE", "gaussian"),
+            rotation_handedness=getattr(cfg, "ROTATION_HANDEDNESS", 1.0),
+            clamp_gxy_ratio=getattr(cfg, "CLAMP_GXY_RATIO", 0.2),
+
+            use_centrifugal_barrier=getattr(cfg, "USE_CENTRIFUGAL_BARRIER", True),
+            centrifugal_strength=getattr(cfg, "CENTRIFUGAL_STRENGTH", 0.8),
+            centrifugal_softening=getattr(cfg, "CENTRIFUGAL_SOFTENING", 0.8),
+
+            use_angular_drift=getattr(cfg, "USE_ANGULAR_DRIFT", True),
+            angular_drift_strength=getattr(cfg, "ANGULAR_DRIFT_STRENGTH", 0.02),
+            angular_drift_sigma=getattr(cfg, "ANGULAR_DRIFT_SIGMA", 2.0),
+            angular_drift_mode=getattr(cfg, "ANGULAR_DRIFT_MODE", "gaussian"),
+            angular_drift_handedness=getattr(cfg, "ANGULAR_DRIFT_HANDEDNESS", 1.0),
+
+            debug_checks=getattr(cfg, "DEBUG_CHECKS", True),
+            debug_packet_stats=getattr(cfg, "DEBUG_PACKET_STATS", True),
+        )
+    
     elif theory_name == "thick_front":
         theory = ThickFrontTheory(
             grid=grid,

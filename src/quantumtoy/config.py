@@ -58,7 +58,7 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "metric_aware_schrodinger"
+    THEORY_NAME: str = "schrodinger"
 
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
@@ -68,15 +68,21 @@ class AppConfig:
     # ============================================================
     METRIC_CENTER_X = 4.0
     METRIC_CENTER_Y = 2.0
-    SCHWARZSCHILD_RADIUS = 1.2
-    METRIC_SOFTENING = 0.35
-    MIN_LAPSE = 0.08
+    SCHWARZSCHILD_RADIUS = 0.9
+    METRIC_SOFTENING = 0.45
+    MIN_LAPSE = 0.10
 
-    METRIC_MODE = "lapse"
+    METRIC_MODE = "conformal_lapse"
     USE_METRIC_POTENTIAL = False
-    METRIC_POTENTIAL_STRENGTH = 2.0
+    METRIC_POTENTIAL_STRENGTH = 0.0
 
     METRIC_INTEGRATOR = "rk4"
+
+    ROTATION_STRENGTH = 0.25
+    ROTATION_SIGMA = 1.8
+    ROTATION_MODE = "kerr_like"
+    ROTATION_HANDEDNESS = 1.0
+    CLAMP_GXY_RATIO = 0.30
 
     # ============================================================
     # Detector
@@ -109,7 +115,7 @@ class AppConfig:
     micro_bh_V_strength = 4.0
     micro_bh_W_strength = 1.5
 
-    USE_HYBRID_BLACK_HOLE = True
+    USE_HYBRID_BLACK_HOLE = False
     hybrid_bh_center_x = 4.0
     hybrid_bh_center_y = 2.0
     hybrid_bh_sigma_V = 1.0
@@ -268,7 +274,7 @@ class AppConfig:
     k0y: float = 0.0
     x0: float = -15.0
     y0: float = 0.0
-    INITIAL_PACKET_MODE: str = "scout_main_scalar"
+    INITIAL_PACKET_MODE: str = "gaussian"
 
     # ============================================================
     # Time stepping

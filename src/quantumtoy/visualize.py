@@ -33,7 +33,10 @@ from viz.visual_debug import (
 )
 
 RENDER_MODES = (
-    "density",
+    "density",                  # current visible rho (current pipeline)
+    "forward_density",          # |psi_fwd|^2 only
+    "backward_density",         # |phi_tau|^2 only
+    "overlap_density",          # |psi_fwd * conj(Emix)|^2 style amplitude
     "phase",
     "phase_contours",
     "ridge_phase",
@@ -480,6 +483,28 @@ def phase_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
         return np.angle(state_vis[0])
     raise ValueError(f"Unsupported state_vis ndim={state_vis.ndim}")
 
+def forward_density_frames_from_state_vis(state_vis_frames: np.ndarray) -> np.ndarray:
+    if state_vis_frames.ndim == 3:
+        return (np.abs(state_vis_frames) ** 2).astype(float)
+    if state_vis_frames.ndim == 4:
+        return np.sum(np.abs(state_vis_frames) ** 2, axis=1).astype(float)
+    raise ValueError(f"Unsupported state_vis_frames ndim={state_vis_frames.ndim}")
+
+
+def backward_density_frames_from_emix(emix_frames: np.ndarray) -> np.ndarray:
+    if emix_frames.ndim == 3:
+        return (np.abs(emix_frames) ** 2).astype(float)
+    if emix_frames.ndim == 4:
+        return np.sum(np.abs(emix_frames) ** 2, axis=1).astype(float)
+    raise ValueError(f"Unsupported emix_frames ndim={emix_frames.ndim}")
+
+
+def overlap_density_frames(
+    state_vis_frames: np.ndarray,
+    emix_frames: np.ndarray,
+) -> np.ndarray:
+    z = make_overlap_complex_frames(state_vis_frames, emix_frames)
+    return (np.abs(z) ** 2).astype(float)
 
 def make_phase_density_rgb(
     state_vis: np.ndarray,
@@ -543,6 +568,9 @@ def build_render_image(
     mode: str,
     i: int,
     rho_current: np.ndarray,
+    forward_density_current: np.ndarray | None,
+    backward_density_current: np.ndarray | None,
+    overlap_density_current: np.ndarray | None,
     state_vis_frames: np.ndarray | None,
     ridge_complex_current: np.ndarray | None,
     vref: float,
@@ -554,6 +582,39 @@ def build_render_image(
             vref=vref,
             gamma=cfg.GAMMA,
             use_fixed_scale=cfg.USE_FIXED_DISPLAY_SCALE,
+        )
+        return img, None, "density"
+
+    if mode == "forward_density":
+        if forward_density_current is None:
+            raise RuntimeError("forward_density render mode requires forward density frames")
+        img = gamma_display(
+            forward_density_current[i],
+            vref=max(float(np.max(forward_density_current[0])), 1e-30),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode == "backward_density":
+        if backward_density_current is None:
+            raise RuntimeError("backward_density render mode requires backward density frames")
+        img = gamma_display(
+            backward_density_current[i],
+            vref=max(float(np.max(backward_density_current[0])), 1e-30),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode == "overlap_density":
+        if overlap_density_current is None:
+            raise RuntimeError("overlap_density render mode requires overlap density frames")
+        img = gamma_display(
+            overlap_density_current[i],
+            vref=max(float(np.max(overlap_density_current[0])), 1e-30),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
         )
         return img, None, "density"
 
@@ -671,6 +732,19 @@ def main():
         nargs="*",
         default=[0.05, 0.10, 0.20, 0.40, 0.70],
         help="Contour levels for contour render modes",
+    )
+
+    parser.add_argument(
+        "--ridge-source",
+        choices=("overlap", "forward"),
+        default="overlap",
+        help="Use overlap-based ridge (current behavior) or forward-density-only ridge",
+    )
+
+    parser.add_argument(
+        "--show-ridge-source-label",
+        action="store_true",
+        help="Append ridge source to plot titles",
     )
 
     parser.add_argument("--debug-metric", action="store_true")
@@ -854,16 +928,32 @@ def main():
             blend_alpha=cfg.RHO_BLEND_ALPHA,
         )
 
-        rx, ry, rs = compute_ridge_xy(
-            frames_psi=state_vis_frames,
-            Emix=Emix,
-            x_vis_1d=grid.x_vis_1d,
-            y_vis_1d=grid.y_vis_1d,
-            mode=cfg.RIDGE_MODE,
-            top_q=cfg.CENTROID_TOP_Q,
-            radius=cfg.LOCALMAX_RADIUS,
-            alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
-        )
+        ridge_source = args.ridge_source
+
+        if ridge_source == "overlap":
+            rx, ry, rs = compute_ridge_xy(
+                frames_psi=state_vis_frames,
+                Emix=Emix,
+                x_vis_1d=grid.x_vis_1d,
+                y_vis_1d=grid.y_vis_1d,
+                mode=cfg.RIDGE_MODE,
+                top_q=cfg.CENTROID_TOP_Q,
+                radius=cfg.LOCALMAX_RADIUS,
+                alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
+            )
+        elif ridge_source == "forward":
+            rx, ry, rs = compute_ridge_xy(
+                frames_psi=state_vis_frames,
+                Emix=None,
+                x_vis_1d=grid.x_vis_1d,
+                y_vis_1d=grid.y_vis_1d,
+                mode=cfg.RIDGE_MODE,
+                top_q=cfg.CENTROID_TOP_Q,
+                radius=cfg.LOCALMAX_RADIUS,
+                alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
+            )
+        else:
+            raise ValueError(f"Unsupported ridge_source={ridge_source!r}")
 
         cos_th = speed = ux = uy = div_v = None
 
@@ -910,6 +1000,10 @@ def main():
 
     ridge_complex_init = make_overlap_complex_frames(state_vis_frames, emix_init)
 
+    forward_density_init = forward_density_frames_from_state_vis(state_vis_frames)
+    backward_density_init = backward_density_frames_from_emix(emix_init)
+    overlap_density_init = overlap_density_frames(state_vis_frames, emix_init)
+
     split_view = bool(args.split_view)
     left_mode = args.left_mode if split_view else args.render_mode
     right_mode = args.right_mode if split_view else None
@@ -933,6 +1027,9 @@ def main():
             mode=mode,
             i=0,
             rho_current=rho_init,
+            forward_density_current=forward_density_init,
+            backward_density_current=backward_density_init,
+            overlap_density_current=overlap_density_init,
             state_vis_frames=state_vis_frames,
             ridge_complex_current=ridge_complex_init,
             vref=vref,
@@ -1113,6 +1210,11 @@ def main():
     rho_current = [rho_init]
     emix_current = [emix_init]
     ridge_complex_current = [ridge_complex_init]
+
+    forward_density_current = [forward_density_init]
+    backward_density_current = [backward_density_init]
+    overlap_density_current = [overlap_density_init]
+
     sigma_current = [sigma_init]
     ridge_x = [ridge_x_init]
     ridge_y = [ridge_y_init]
@@ -1137,6 +1239,9 @@ def main():
             mode=mode,
             i=i,
             rho_current=rho_current[0],
+            forward_density_current=forward_density_current[0],
+            backward_density_current=backward_density_current[0],
+            overlap_density_current=overlap_density_current[0],
             state_vis_frames=state_vis_frames,
             ridge_complex_current=ridge_complex_current[0],
             vref=vref,
@@ -1261,6 +1366,9 @@ def main():
             rf"Γ≈{ridge_s[0][i]:.3e}",
         ]
 
+        if args.show_ridge_source_label:
+            parts.append(rf"ridge_src={args.ridge_source}")
+
         if cos_th[0] is not None and np.isfinite(cos_th[0][i]):
             parts.append(rf"cosθ≈{cos_th[0][i]:.3f}")
 
@@ -1326,6 +1434,10 @@ def main():
         rho_current[0] = rho_new
         emix_current[0] = emix_new
         ridge_complex_current[0] = make_overlap_complex_frames(state_vis_frames, emix_new)
+
+        forward_density_current[0] = forward_density_frames_from_state_vis(state_vis_frames)
+        backward_density_current[0] = backward_density_frames_from_emix(emix_new)
+        overlap_density_current[0] = overlap_density_frames(state_vis_frames, emix_new)
 
         ridge_x[0] = rx
         ridge_y[0] = ry
