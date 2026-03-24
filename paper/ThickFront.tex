@@ -10,7 +10,7 @@
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[C]{\small Preprint -- Work in Progress}
-\fancyfoot[R]{\small QuantumToy TRF preprint v0.2}
+\fancyfoot[R]{\small QuantumToy TRF preprint v0.3}
 \renewcommand{\headrulewidth}{0pt}
 
 \begin{document}
@@ -99,6 +99,50 @@ dynamical law but to develop a numerical framework for analyzing
 forward–backward amplitude structures and the spacetime patterns
 that emerge from them.
 
+
+\section{Related work}
+
+Several recent approaches explore how measurement outcomes or
+effective structure can emerge from quantum systems, but they
+typically locate the selection mechanism either in the measurement
+process itself or in engineered system dynamics.
+
+Measurement-based approaches treat detectors or measurement
+architectures as feature maps that transform quantum states into
+classical data representations~\cite{qelm2026}. In such models, outcome selection
+is effectively implemented at the readout stage through a stable
+measurement mapping that can, in some cases, be calibrated using
+classical inputs. While this provides an efficient framework for
+quantum state inference, it does not address where or how the
+selection of outcomes originates within the underlying quantum
+dynamics.
+
+A different class of models introduces explicit attractor
+structures through engineered system design. For example,
+quantum generalizations of Hopfield neural networks implement
+associative memory through dissipative and coherent dynamics~\cite{rotondo2017},
+where stored patterns correspond to attractors of the system.
+These models demonstrate that open quantum dynamics can support
+nontrivial steady states and even limit-cycle behavior arising
+from the interplay of coherent evolution and dissipation.
+However, in such constructions the attractor landscape is
+explicitly encoded in the Hamiltonian and jump operators,
+and selection corresponds to convergence toward predefined
+states.
+
+The present work differs from both perspectives in that it does
+not place selection at the measurement stage nor encode it in a
+predefined attractor landscape. Instead, the framework explores
+whether structured, localized propagation channels can emerge
+directly from the overlap of forward and backward amplitudes in
+spacetime. In this view, selection is associated with dynamical
+structure formation during propagation rather than with readout
+or engineered convergence.
+
+This distinction motivates the central question addressed here:
+whether outcome-relevant structures can arise as emergent features
+of quantum evolution itself, without being reducible to detector
+response functions or predesigned attractor dynamics.
 
 
 \section{Baseline quantum evolution}
@@ -284,7 +328,7 @@ includes
 
 The precise functional form used in the present experiments is
 given in Ref.~[placeholder] or the accompanying code repository
-\cite{quantumtoy}.
+~\cite{quantumtoy}.
 
 
 
@@ -382,7 +426,7 @@ probability structure and may offer a useful tool for exploring
 time-symmetric aspects of quantum evolution.
 
 
-
-\bibliography{trf_refs}
+\bibliographystyle{apsrev4-2}
+\bibliography{ThickFrontNotes}
 
 \end{document}
