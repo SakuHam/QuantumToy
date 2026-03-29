@@ -129,6 +129,9 @@ def to_bool_or_none(x):
         return None
 
 
+# ------------------------------------------------------------
+# Posthoc / TRF getters
+# ------------------------------------------------------------
 def get_posthoc_side(row: dict):
     return row.get("posthoc_trf_chosen_side", row.get("posthoc_chosen_side"))
 
@@ -195,6 +198,220 @@ def get_posthoc_ref_time(row: dict):
     return to_float_or_none(row.get("posthoc_trf_ref_time"))
 
 
+# ------------------------------------------------------------
+# Forward-only guess getters
+# ------------------------------------------------------------
+def get_forward_guess_valid(row: dict):
+    return to_bool_or_none(row.get("forward_guess_valid"))
+
+
+def get_forward_guess_side(row: dict):
+    return row.get("forward_guess_chosen_side")
+
+
+def get_forward_guess_rel_margin(row: dict):
+    return to_float_or_none(row.get("forward_guess_rel_margin"))
+
+
+def get_forward_guess_ratio(row: dict):
+    x = to_float_or_none(row.get("forward_guess_ratio"))
+    if x is None:
+        return None
+    if x < 0.0:
+        return None
+    return x
+
+
+def get_forward_guess_dominance(row: dict):
+    x = to_float_or_none(row.get("forward_guess_dominance"))
+    if x is None:
+        return None
+    if x < 0.0 or x > 1.0:
+        return None
+    return x
+
+
+def get_forward_guess_total_evidence(row: dict):
+    x = to_float_or_none(row.get("forward_guess_total_evidence"))
+    if x is None:
+        return None
+    if x < 0.0:
+        return None
+    return x
+
+
+def get_forward_guess_adaptive_score(row: dict):
+    x = to_float_or_none(row.get("forward_guess_adaptive_score"))
+    if x is None:
+        return None
+    if x < 0.0:
+        return None
+    return x
+
+
+def get_forward_guess_ref_time(row: dict):
+    return to_float_or_none(row.get("forward_guess_ref_time"))
+
+
+# ------------------------------------------------------------
+# Slit-pass getters
+# ------------------------------------------------------------
+def get_slit_pass_used(row: dict):
+    return to_bool_or_none(row.get("slit_pass_debug_used"))
+
+
+def get_slit_pass_valid(row: dict):
+    x = to_bool_or_none(row.get("slit_pass_valid"))
+    if x is not None:
+        return x
+
+    side = get_slit_pass_side(row)
+    if side in {"upper", "lower"}:
+        return True
+    return None
+
+
+def get_slit_pass_side(row: dict):
+    return row.get("slit_pass_chosen_side")
+
+
+def get_slit_pass_ref_time(row: dict):
+    return to_float_or_none(row.get("slit_pass_ref_time"))
+
+
+def get_slit_pass_rel_margin(row: dict):
+    return to_float_or_none(row.get("slit_pass_rel_margin"))
+
+
+def get_slit_pass_ratio(row: dict):
+    x = to_float_or_none(row.get("slit_pass_ratio"))
+    if x is None:
+        return None
+    if x < 0.0:
+        return None
+    return x
+
+
+def get_slit_pass_dominance(row: dict):
+    x = to_float_or_none(row.get("slit_pass_dominance"))
+    if x is None:
+        return None
+    if x < 0.0 or x > 1.0:
+        return None
+    return x
+
+
+def get_slit_pass_total_evidence(row: dict):
+    x = to_float_or_none(row.get("slit_pass_total_evidence"))
+    if x is None:
+        return None
+    if x < 0.0:
+        return None
+    return x
+
+
+def get_slit_pass_score(row: dict):
+    x = to_float_or_none(row.get("slit_pass_score"))
+    if x is None:
+        return None
+    if x < 0.0:
+        return None
+    return x
+
+
+def get_slit_vs_click_different(row: dict):
+    x = to_bool_or_none(row.get("slit_vs_click_different"))
+    if x is not None:
+        return x
+
+    slit = get_slit_pass_side(row)
+    click = row.get("click_side")
+    if slit is None or click is None:
+        return None
+    return slit != click
+
+
+def get_slit_to_click_transition(row: dict):
+    x = row.get("slit_to_click_transition")
+    if x:
+        return x
+    slit = get_slit_pass_side(row)
+    click = row.get("click_side")
+    if slit is None or click is None:
+        return None
+    return f"{slit}_slit->{click}_click"
+
+
+def get_slit_vs_trf_different(row: dict):
+    slit = get_slit_pass_side(row)
+    trf = get_posthoc_side(row)
+    if slit is None or trf is None:
+        return None
+    return slit != trf
+
+
+def get_slit_vs_forward_different(row: dict):
+    slit = get_slit_pass_side(row)
+    fwd = get_forward_guess_side(row)
+    if slit is None or fwd is None:
+        return None
+    return slit != fwd
+
+
+# ------------------------------------------------------------
+# Comparison helpers
+# ------------------------------------------------------------
+def get_forward_vs_trf_different(row: dict):
+    x = to_bool_or_none(row.get("forward_vs_trf_different"))
+    if x is not None:
+        return x
+
+    fwd = get_forward_guess_side(row)
+    trf = get_posthoc_side(row)
+    if fwd is None or trf is None:
+        return None
+    return fwd != trf
+
+
+def get_forward_vs_click_different(row: dict):
+    x = to_bool_or_none(row.get("forward_vs_click_different"))
+    if x is not None:
+        return x
+
+    fwd = get_forward_guess_side(row)
+    click = row.get("click_side")
+    if fwd is None or click is None:
+        return None
+    return fwd != click
+
+
+def get_trf_vs_click_match(row: dict):
+    x = to_bool_or_none(row.get("trf_vs_click_match"))
+    if x is not None:
+        return x
+
+    trf = get_posthoc_side(row)
+    click = row.get("click_side")
+    if trf is None or click is None:
+        return None
+    return trf == click
+
+
+def get_interesting_forward_trf_click_case(row: dict):
+    x = to_bool_or_none(row.get("interesting_forward_trf_click_case"))
+    if x is not None:
+        return x
+
+    diff = get_forward_vs_trf_different(row)
+    match = get_trf_vs_click_match(row)
+    if diff is None or match is None:
+        return None
+    return diff and match
+
+
+# ------------------------------------------------------------
+# Buckets
+# ------------------------------------------------------------
 def get_rel_margin_bucket(x: float | None) -> str | None:
     if x is None:
         return None
@@ -243,12 +460,24 @@ def get_adaptive_score_bucket(x: float | None) -> str | None:
     return ">=1e-4"
 
 
-def print_accuracy_line(title: str, rows: list[dict]):
+def print_accuracy_line(title: str, rows: list[dict], pred_fn):
     if not rows:
         print(f"{title}: n/a")
         return
-    matches = sum(1 for r in rows if get_posthoc_side(r) == r.get("click_side"))
-    print(f"{title}: {matches} / {len(rows)} ({pct(matches, len(rows))})")
+    matches = 0
+    valid_n = 0
+    for r in rows:
+        pred = pred_fn(r)
+        click = r.get("click_side")
+        if pred is None or click is None:
+            continue
+        valid_n += 1
+        if pred == click:
+            matches += 1
+    if valid_n == 0:
+        print(f"{title}: n/a")
+        return
+    print(f"{title}: {matches} / {valid_n} ({pct(matches, valid_n)})")
 
 
 def main() -> int:
@@ -271,7 +500,7 @@ def main() -> int:
     ok_total = len(ok_rows)
 
     print("=" * 80)
-    print("Posthoc / TRF seed sweep analysis")
+    print("Posthoc / TRF / slit-pass seed sweep analysis")
     print("=" * 80)
     print(f"Summary file : {path}")
     print(f"Rows total   : {total}")
@@ -298,6 +527,13 @@ def main() -> int:
         print(f"  x weight power    : {sample.get('trf_corridor_x_weight_power')}")
         print("")
 
+    slit_debug_rows = [r for r in ok_rows if get_slit_pass_used(r) is not None]
+    if slit_debug_rows:
+        print("Slit-pass debug")
+        sample = slit_debug_rows[0]
+        print(f"  enabled           : {sample.get('slit_pass_debug_used')}")
+        print("")
+
     # ------------------------------------------------------------
     # Row groups
     # ------------------------------------------------------------
@@ -313,7 +549,19 @@ def main() -> int:
     valid_counter = Counter(get_posthoc_side(r) for r in valid_rows)
     invalid_counter = Counter(get_posthoc_side(r) for r in invalid_rows)
 
+    fwd_rows = [r for r in ok_rows if get_forward_guess_side(r) in {"upper", "lower"}]
+    fwd_valid_rows = [r for r in fwd_rows if get_forward_guess_valid(r) is True]
+    fwd_counter = Counter(get_forward_guess_side(r) for r in fwd_rows)
+
+    slit_rows = [r for r in ok_rows if get_slit_pass_side(r) in {"upper", "lower"}]
+    slit_valid_rows = [r for r in slit_rows if get_slit_pass_valid(r) is True]
+    slit_counter = Counter(get_slit_pass_side(r) for r in slit_rows)
+
     print_counter("Click side distribution", click_counter, ok_total)
+    print("")
+    print_counter("Forward-only chosen side distribution", fwd_counter, max(len(fwd_rows), 1))
+    print("")
+    print_counter("Slit-pass chosen side distribution", slit_counter, max(len(slit_rows), 1))
     print("")
     print_counter("Posthoc TRF chosen side distribution", trf_counter, max(len(trf_rows), 1))
     print("")
@@ -339,6 +587,17 @@ def main() -> int:
     invalid_matches_click = [r for r in invalid_rows if get_posthoc_side(r) == r.get("click_side")]
     invalid_mismatches_click = [r for r in invalid_rows if get_posthoc_side(r) != r.get("click_side")]
 
+    slit_matches_click = [r for r in slit_rows if get_slit_pass_side(r) == r.get("click_side")]
+    slit_mismatches_click = [r for r in slit_rows if get_slit_pass_side(r) != r.get("click_side")]
+
+    print("Forward-only-vs-click agreement")
+    print_accuracy_line("  forward guess matches click", fwd_rows, get_forward_guess_side)
+    print("")
+
+    print("Slit-pass-vs-click agreement")
+    print_accuracy_line("  slit pass matches click", slit_rows, get_slit_pass_side)
+    print("")
+
     print("TRF-vs-click agreement (all rows)")
     print(f"  posthoc TRF matches click   : {len(trf_matches_click)} / {max(len(trf_rows), 1)} ({pct(len(trf_matches_click), max(len(trf_rows), 1))})")
     print(f"  posthoc TRF mismatches click: {len(trf_mismatches_click)} / {max(len(trf_rows), 1)} ({pct(len(trf_mismatches_click), max(len(trf_rows), 1))})")
@@ -355,6 +614,10 @@ def main() -> int:
         print(f"  invalid TRF mismatches click: {len(invalid_mismatches_click)} / {len(invalid_rows)} ({pct(len(invalid_mismatches_click), len(invalid_rows))})")
         print("")
 
+    slit_to_click = Counter(
+        f"{get_slit_pass_side(r)} -> {r.get('click_side')}"
+        for r in slit_rows
+    )
     trf_to_click = Counter(
         f"{get_posthoc_side(r)} -> {r.get('click_side')}"
         for r in trf_rows
@@ -368,6 +631,8 @@ def main() -> int:
         for r in invalid_rows
     )
 
+    print_counter("Slit-pass -> click (all rows)", slit_to_click, max(len(slit_rows), 1))
+    print("")
     print_counter("Posthoc TRF -> click (all rows)", trf_to_click, max(len(trf_rows), 1))
     print("")
     print_counter("Posthoc TRF -> click (valid rows)", valid_to_click, max(len(valid_rows), 1))
@@ -377,7 +642,99 @@ def main() -> int:
         print("")
 
     # ------------------------------------------------------------
-    # Evidence stats: valid rows only
+    # Forward vs slit vs TRF vs click
+    # ------------------------------------------------------------
+    comparable_rows = [
+        r for r in ok_rows
+        if get_forward_guess_side(r) in {"upper", "lower"}
+        and get_posthoc_side(r) in {"upper", "lower"}
+    ]
+
+    slit_comparable_rows = [
+        r for r in ok_rows
+        if get_slit_pass_side(r) in {"upper", "lower"}
+        and get_posthoc_side(r) in {"upper", "lower"}
+    ]
+
+    slit_forward_comparable_rows = [
+        r for r in ok_rows
+        if get_slit_pass_side(r) in {"upper", "lower"}
+        and get_forward_guess_side(r) in {"upper", "lower"}
+    ]
+
+    forward_vs_trf_diff_rows = [r for r in comparable_rows if get_forward_vs_trf_different(r) is True]
+    forward_vs_trf_same_rows = [r for r in comparable_rows if get_forward_vs_trf_different(r) is False]
+    interesting_rows = [r for r in comparable_rows if get_interesting_forward_trf_click_case(r) is True]
+
+    slit_vs_trf_diff_rows = [r for r in slit_comparable_rows if get_slit_vs_trf_different(r) is True]
+    slit_vs_trf_same_rows = [r for r in slit_comparable_rows if get_slit_vs_trf_different(r) is False]
+
+    slit_vs_forward_diff_rows = [r for r in slit_forward_comparable_rows if get_slit_vs_forward_different(r) is True]
+    slit_vs_forward_same_rows = [r for r in slit_forward_comparable_rows if get_slit_vs_forward_different(r) is False]
+
+    print("Forward vs TRF comparison")
+    print(f"  comparable rows         : {len(comparable_rows)}")
+    print(f"  forward == TRF          : {len(forward_vs_trf_same_rows)} / {max(len(comparable_rows), 1)} ({pct(len(forward_vs_trf_same_rows), max(len(comparable_rows), 1))})")
+    print(f"  forward != TRF          : {len(forward_vs_trf_diff_rows)} / {max(len(comparable_rows), 1)} ({pct(len(forward_vs_trf_diff_rows), max(len(comparable_rows), 1))})")
+    print(f"  interesting cases       : {len(interesting_rows)} / {max(len(comparable_rows), 1)} ({pct(len(interesting_rows), max(len(comparable_rows), 1))})")
+    print("")
+
+    print("Slit vs TRF comparison")
+    print(f"  comparable rows         : {len(slit_comparable_rows)}")
+    print(f"  slit == TRF             : {len(slit_vs_trf_same_rows)} / {max(len(slit_comparable_rows), 1)} ({pct(len(slit_vs_trf_same_rows), max(len(slit_comparable_rows), 1))})")
+    print(f"  slit != TRF             : {len(slit_vs_trf_diff_rows)} / {max(len(slit_comparable_rows), 1)} ({pct(len(slit_vs_trf_diff_rows), max(len(slit_comparable_rows), 1))})")
+    print("")
+
+    print("Slit vs forward comparison")
+    print(f"  comparable rows         : {len(slit_forward_comparable_rows)}")
+    print(f"  slit == forward         : {len(slit_vs_forward_same_rows)} / {max(len(slit_forward_comparable_rows), 1)} ({pct(len(slit_vs_forward_same_rows), max(len(slit_forward_comparable_rows), 1))})")
+    print(f"  slit != forward         : {len(slit_vs_forward_diff_rows)} / {max(len(slit_forward_comparable_rows), 1)} ({pct(len(slit_vs_forward_diff_rows), max(len(slit_forward_comparable_rows), 1))})")
+    print("")
+
+    fwd_to_trf = Counter(
+        f"{get_forward_guess_side(r)} -> {get_posthoc_side(r)}"
+        for r in comparable_rows
+    )
+    slit_to_trf = Counter(
+        f"{get_slit_pass_side(r)} -> {get_posthoc_side(r)}"
+        for r in slit_comparable_rows
+    )
+    slit_to_forward = Counter(
+        f"{get_slit_pass_side(r)} -> {get_forward_guess_side(r)}"
+        for r in slit_forward_comparable_rows
+    )
+
+    print_counter("Forward-only -> TRF", fwd_to_trf, max(len(comparable_rows), 1))
+    print("")
+    print_counter("Slit-pass -> TRF", slit_to_trf, max(len(slit_comparable_rows), 1))
+    print("")
+    print_counter("Slit-pass -> forward", slit_to_forward, max(len(slit_forward_comparable_rows), 1))
+    print("")
+
+    interesting_to_click = Counter(
+        f"{get_forward_guess_side(r)} -> {get_posthoc_side(r)} -> {r.get('click_side')}"
+        for r in interesting_rows
+    )
+    if interesting_rows:
+        print_counter("Interesting cases: forward -> TRF -> click", interesting_to_click, len(interesting_rows))
+        print("")
+
+    four_stage_rows = [
+        r for r in ok_rows
+        if get_slit_pass_side(r) in {"upper", "lower"}
+        and get_forward_guess_side(r) in {"upper", "lower"}
+        and get_posthoc_side(r) in {"upper", "lower"}
+        and r.get("click_side") in {"upper", "lower"}
+    ]
+    four_stage_counter = Counter(
+        f"{get_slit_pass_side(r)} -> {get_forward_guess_side(r)} -> {get_posthoc_side(r)} -> {r.get('click_side')}"
+        for r in four_stage_rows
+    )
+    print_counter("Slit -> forward -> TRF -> click", four_stage_counter, max(len(four_stage_rows), 1))
+    print("")
+
+    # ------------------------------------------------------------
+    # Evidence stats: valid TRF rows
     # ------------------------------------------------------------
     rel_margins = [get_posthoc_rel_margin(r) for r in valid_rows]
     rel_margins = [x for x in rel_margins if x is not None]
@@ -414,50 +771,102 @@ def main() -> int:
         print("")
 
     # ------------------------------------------------------------
-    # Invalid stats
+    # Forward-only evidence stats
     # ------------------------------------------------------------
-    if invalid_rows:
-        invalid_rel = [get_posthoc_rel_margin(r) for r in invalid_rows]
-        invalid_rel = [x for x in invalid_rel if x is not None]
-        invalid_ratio = [get_posthoc_ratio(r) for r in invalid_rows]
-        invalid_ratio = [x for x in invalid_ratio if x is not None]
-        invalid_dom = [get_posthoc_dominance(r) for r in invalid_rows]
-        invalid_dom = [x for x in invalid_dom if x is not None]
-        invalid_tot = [get_posthoc_total_evidence(r) for r in invalid_rows]
-        invalid_tot = [x for x in invalid_tot if x is not None]
-        invalid_as = [get_posthoc_adaptive_score(r) for r in invalid_rows]
-        invalid_as = [x for x in invalid_as if x is not None]
+    fwd_rel_margins = [get_forward_guess_rel_margin(r) for r in fwd_valid_rows]
+    fwd_rel_margins = [x for x in fwd_rel_margins if x is not None]
 
-        print("Invalid TRF evidence stats")
-        if invalid_rel:
-            print(f"  rel margin min/avg/median/max : {min(invalid_rel):.6f} / {mean_of(invalid_rel):.6f} / {median_of(invalid_rel):.6f} / {max(invalid_rel):.6f}")
-        if invalid_ratio:
-            print(f"  ratio min/avg/median/max      : {min(invalid_ratio):.6f} / {mean_of(invalid_ratio):.6f} / {median_of(invalid_ratio):.6f} / {max(invalid_ratio):.6f}")
-        if invalid_dom:
-            print(f"  dominance min/avg/median/max  : {min(invalid_dom):.6f} / {mean_of(invalid_dom):.6f} / {median_of(invalid_dom):.6f} / {max(invalid_dom):.6f}")
-        if invalid_tot:
-            print(f"  total ev min/avg/median/max   : {min(invalid_tot):.6e} / {mean_of(invalid_tot):.6e} / {median_of(invalid_tot):.6e} / {max(invalid_tot):.6e}")
-        if invalid_as:
-            print(f"  adaptive score min/avg/median/max: {min(invalid_as):.6e} / {mean_of(invalid_as):.6e} / {median_of(invalid_as):.6e} / {max(invalid_as):.6e}")
+    fwd_ratios = [get_forward_guess_ratio(r) for r in fwd_valid_rows]
+    fwd_ratios = [x for x in fwd_ratios if x is not None]
+
+    fwd_dominances = [get_forward_guess_dominance(r) for r in fwd_valid_rows]
+    fwd_dominances = [x for x in fwd_dominances if x is not None]
+
+    fwd_total_evidences = [get_forward_guess_total_evidence(r) for r in fwd_valid_rows]
+    fwd_total_evidences = [x for x in fwd_total_evidences if x is not None]
+
+    fwd_adaptive_scores = [get_forward_guess_adaptive_score(r) for r in fwd_valid_rows]
+    fwd_adaptive_scores = [x for x in fwd_adaptive_scores if x is not None]
+
+    fwd_ref_times = [get_forward_guess_ref_time(r) for r in fwd_valid_rows]
+    fwd_ref_times = [x for x in fwd_ref_times if x is not None]
+
+    if fwd_rel_margins or fwd_ratios or fwd_dominances or fwd_total_evidences or fwd_adaptive_scores or fwd_ref_times:
+        print("Forward-only evidence stats (valid rows only)")
+        if fwd_rel_margins:
+            print(f"  rel margin min/avg/median/max : {min(fwd_rel_margins):.6f} / {mean_of(fwd_rel_margins):.6f} / {median_of(fwd_rel_margins):.6f} / {max(fwd_rel_margins):.6f}")
+        if fwd_ratios:
+            print(f"  ratio min/avg/median/max      : {min(fwd_ratios):.6f} / {mean_of(fwd_ratios):.6f} / {median_of(fwd_ratios):.6f} / {max(fwd_ratios):.6f}")
+        if fwd_dominances:
+            print(f"  dominance min/avg/median/max  : {min(fwd_dominances):.6f} / {mean_of(fwd_dominances):.6f} / {median_of(fwd_dominances):.6f} / {max(fwd_dominances):.6f}")
+        if fwd_total_evidences:
+            print(f"  total ev min/avg/median/max   : {min(fwd_total_evidences):.6e} / {mean_of(fwd_total_evidences):.6e} / {median_of(fwd_total_evidences):.6e} / {max(fwd_total_evidences):.6e}")
+        if fwd_adaptive_scores:
+            print(f"  adaptive score min/avg/median/max: {min(fwd_adaptive_scores):.6e} / {mean_of(fwd_adaptive_scores):.6e} / {median_of(fwd_adaptive_scores):.6e} / {max(fwd_adaptive_scores):.6e}")
+        if fwd_ref_times:
+            print(f"  ref time min/avg/median/max   : {min(fwd_ref_times):.6f} / {mean_of(fwd_ref_times):.6f} / {median_of(fwd_ref_times):.6f} / {max(fwd_ref_times):.6f}")
         print("")
 
     # ------------------------------------------------------------
-    # Accuracy by thresholds (valid rows only)
+    # Slit-pass evidence stats
     # ------------------------------------------------------------
-    print("Valid-only accuracy by dominance threshold")
+    slit_rel_margins = [get_slit_pass_rel_margin(r) for r in slit_valid_rows]
+    slit_rel_margins = [x for x in slit_rel_margins if x is not None]
+
+    slit_ratios = [get_slit_pass_ratio(r) for r in slit_valid_rows]
+    slit_ratios = [x for x in slit_ratios if x is not None]
+
+    slit_dominances = [get_slit_pass_dominance(r) for r in slit_valid_rows]
+    slit_dominances = [x for x in slit_dominances if x is not None]
+
+    slit_total_evidences = [get_slit_pass_total_evidence(r) for r in slit_valid_rows]
+    slit_total_evidences = [x for x in slit_total_evidences if x is not None]
+
+    slit_scores = [get_slit_pass_score(r) for r in slit_valid_rows]
+    slit_scores = [x for x in slit_scores if x is not None]
+
+    slit_ref_times = [get_slit_pass_ref_time(r) for r in slit_valid_rows]
+    slit_ref_times = [x for x in slit_ref_times if x is not None]
+
+    if slit_rel_margins or slit_ratios or slit_dominances or slit_total_evidences or slit_scores or slit_ref_times:
+        print("Slit-pass evidence stats (valid rows only)")
+        if slit_rel_margins:
+            print(f"  rel margin min/avg/median/max : {min(slit_rel_margins):.6f} / {mean_of(slit_rel_margins):.6f} / {median_of(slit_rel_margins):.6f} / {max(slit_rel_margins):.6f}")
+        if slit_ratios:
+            print(f"  ratio min/avg/median/max      : {min(slit_ratios):.6f} / {mean_of(slit_ratios):.6f} / {median_of(slit_ratios):.6f} / {max(slit_ratios):.6f}")
+        if slit_dominances:
+            print(f"  dominance min/avg/median/max  : {min(slit_dominances):.6f} / {mean_of(slit_dominances):.6f} / {median_of(slit_dominances):.6f} / {max(slit_dominances):.6f}")
+        if slit_total_evidences:
+            print(f"  total ev min/avg/median/max   : {min(slit_total_evidences):.6e} / {mean_of(slit_total_evidences):.6e} / {median_of(slit_total_evidences):.6e} / {max(slit_total_evidences):.6e}")
+        if slit_scores:
+            print(f"  score min/avg/median/max      : {min(slit_scores):.6e} / {mean_of(slit_scores):.6e} / {median_of(slit_scores):.6e} / {max(slit_scores):.6e}")
+        if slit_ref_times:
+            print(f"  ref time min/avg/median/max   : {min(slit_ref_times):.6f} / {mean_of(slit_ref_times):.6f} / {median_of(slit_ref_times):.6f} / {max(slit_ref_times):.6f}")
+        print("")
+
+    # ------------------------------------------------------------
+    # Accuracy by thresholds
+    # ------------------------------------------------------------
+    print("Valid-only TRF accuracy by dominance threshold")
     for thr in [0.52, 0.55, 0.60, 0.70, 0.80, 0.90]:
         rows_thr = [r for r in valid_rows if (get_posthoc_dominance(r) or -1.0) >= thr]
-        print_accuracy_line(f"  dominance >= {thr:.2f}", rows_thr)
+        print_accuracy_line(f"  dominance >= {thr:.2f}", rows_thr, get_posthoc_side)
     print("")
 
-    print("Valid-only accuracy by adaptive score threshold")
+    print("Valid-only TRF accuracy by adaptive score threshold")
     for thr in [1e-8, 1e-6, 1e-4, 1e-3]:
         rows_thr = [r for r in valid_rows if (get_posthoc_adaptive_score(r) or -1.0) >= thr]
-        print_accuracy_line(f"  adaptive_score >= {thr:.0e}", rows_thr)
+        print_accuracy_line(f"  adaptive_score >= {thr:.0e}", rows_thr, get_posthoc_side)
+    print("")
+
+    print("Forward-only accuracy by dominance threshold")
+    for thr in [0.52, 0.55, 0.60, 0.70, 0.80, 0.90]:
+        rows_thr = [r for r in fwd_valid_rows if (get_forward_guess_dominance(r) or -1.0) >= thr]
+        print_accuracy_line(f"  dominance >= {thr:.2f}", rows_thr, get_forward_guess_side)
     print("")
 
     # ------------------------------------------------------------
-    # Buckets: valid rows only
+    # Buckets: valid TRF rows
     # ------------------------------------------------------------
     rel_bucket_counter = Counter()
     rel_bucket_to_click = Counter()
@@ -526,9 +935,12 @@ def main() -> int:
     # ------------------------------------------------------------
     categories: dict[str, list[dict]] = defaultdict(list)
 
-    for r in trf_rows:
+    for r in ok_rows:
         click = r.get("click_side")
         trf_side = get_posthoc_side(r)
+        fwd_side = get_forward_guess_side(r)
+        slit_side = get_slit_pass_side(r)
+
         valid = get_posthoc_valid(r)
         rel_margin = get_posthoc_rel_margin(r)
         ratio = get_posthoc_ratio(r)
@@ -542,10 +954,23 @@ def main() -> int:
         else:
             categories["trf_unknown_validity"].append(r)
 
-        if trf_side == click:
-            categories["trf_matches_click"].append(r)
-        else:
-            categories["trf_mismatches_click"].append(r)
+        if trf_side is not None:
+            if trf_side == click:
+                categories["trf_matches_click"].append(r)
+            else:
+                categories["trf_mismatches_click"].append(r)
+
+        if fwd_side is not None:
+            if fwd_side == click:
+                categories["forward_matches_click"].append(r)
+            else:
+                categories["forward_mismatches_click"].append(r)
+
+        if slit_side is not None:
+            if slit_side == click:
+                categories["slit_matches_click"].append(r)
+            else:
+                categories["slit_mismatches_click"].append(r)
 
         if valid is True and trf_side == click:
             categories["trf_valid_and_match"].append(r)
@@ -564,6 +989,55 @@ def main() -> int:
             categories["trf_lower_and_click_lower"].append(r)
         if trf_side == "lower" and click == "upper":
             categories["trf_lower_but_click_upper"].append(r)
+
+        if slit_side == "upper" and click == "upper":
+            categories["slit_upper_and_click_upper"].append(r)
+        if slit_side == "upper" and click == "lower":
+            categories["slit_upper_but_click_lower"].append(r)
+        if slit_side == "lower" and click == "lower":
+            categories["slit_lower_and_click_lower"].append(r)
+        if slit_side == "lower" and click == "upper":
+            categories["slit_lower_but_click_upper"].append(r)
+
+        diff = get_forward_vs_trf_different(r)
+        if diff is True:
+            categories["forward_vs_trf_different"].append(r)
+        if diff is False:
+            categories["forward_vs_trf_same"].append(r)
+
+        slit_trf_diff = get_slit_vs_trf_different(r)
+        if slit_trf_diff is True:
+            categories["slit_vs_trf_different"].append(r)
+        if slit_trf_diff is False:
+            categories["slit_vs_trf_same"].append(r)
+
+        slit_fwd_diff = get_slit_vs_forward_different(r)
+        if slit_fwd_diff is True:
+            categories["slit_vs_forward_different"].append(r)
+        if slit_fwd_diff is False:
+            categories["slit_vs_forward_same"].append(r)
+
+        slit_click_diff = get_slit_vs_click_different(r)
+        if slit_click_diff is True:
+            categories["slit_vs_click_different"].append(r)
+        if slit_click_diff is False:
+            categories["slit_vs_click_same"].append(r)
+
+        interesting = get_interesting_forward_trf_click_case(r)
+        if interesting is True:
+            categories["interesting_forward_trf_click_case"].append(r)
+
+        transition = get_slit_to_click_transition(r)
+        if transition is not None:
+            categories[f"transition_{transition}"].append(r)
+
+        if (
+            slit_side in {"upper", "lower"}
+            and fwd_side in {"upper", "lower"}
+            and trf_side in {"upper", "lower"}
+            and click in {"upper", "lower"}
+        ):
+            categories[f"path_{slit_side}_{fwd_side}_{trf_side}_{click}"].append(r)
 
         if valid is True:
             if rel_margin is not None and rel_margin < float(args.low_rel_margin_threshold):
@@ -588,7 +1062,7 @@ def main() -> int:
 
             if (
                 rel_margin is not None
-                and rel_margin < float(args.low-rel-margin-threshold if False else args.low_rel_margin_threshold)
+                and rel_margin < float(args.low_rel_margin_threshold)
                 and trf_side != click
             ):
                 categories["trf_low_rel_margin_and_mismatch"].append(r)
@@ -648,7 +1122,7 @@ def main() -> int:
 
     print("Interesting category counts")
     for name in sorted(categories):
-        print(f"  {name}: {len(categories[name])} ({pct(len(categories[name]), max(len(trf_rows), 1))})")
+        print(f"  {name}: {len(categories[name])} ({pct(len(categories[name]), max(len(ok_rows), 1))})")
     print("")
 
     # ------------------------------------------------------------
@@ -662,14 +1136,33 @@ def main() -> int:
             "trf_invalid",
             "trf_valid_and_match",
             "trf_valid_and_mismatch",
-            "trf_invalid_and_match",
-            "trf_invalid_and_mismatch",
             "trf_matches_click",
             "trf_mismatches_click",
+            "forward_matches_click",
+            "forward_mismatches_click",
+            "slit_matches_click",
+            "slit_mismatches_click",
+            "forward_vs_trf_same",
+            "forward_vs_trf_different",
+            "slit_vs_trf_same",
+            "slit_vs_trf_different",
+            "slit_vs_forward_same",
+            "slit_vs_forward_different",
+            "slit_vs_click_same",
+            "slit_vs_click_different",
+            "interesting_forward_trf_click_case",
             "trf_upper_and_click_upper",
             "trf_upper_but_click_lower",
             "trf_lower_and_click_lower",
             "trf_lower_but_click_upper",
+            "slit_upper_and_click_upper",
+            "slit_upper_but_click_lower",
+            "slit_lower_and_click_lower",
+            "slit_lower_but_click_upper",
+            "transition_upper_slit->upper_click",
+            "transition_upper_slit->lower_click",
+            "transition_lower_slit->lower_click",
+            "transition_lower_slit->upper_click",
             "trf_low_rel_margin",
             "trf_low_rel_margin_and_mismatch",
             "trf_high_ratio",
@@ -747,7 +1240,7 @@ def main() -> int:
         print("")
 
     # ------------------------------------------------------------
-    # Hard cases (valid + mismatch)
+    # Hard cases (valid TRF but mismatch)
     # ------------------------------------------------------------
     hard_cases = [
         r for r in valid_rows
@@ -778,11 +1271,83 @@ def main() -> int:
     print("")
 
     hard_path = Path("hard_cases.json")
-
     with open(hard_path, "w", encoding="utf-8") as f:
         json.dump(hard_cases, f, indent=2)
 
     print(f"Saved hard cases to: {hard_path}")
+
+    # ------------------------------------------------------------
+    # Interesting cases (forward != TRF and TRF == click)
+    # ------------------------------------------------------------
+    print("=" * 80)
+    print("INTERESTING CASE SEEDS (forward != TRF and TRF == click)")
+    print("=" * 80)
+
+    for r in interesting_rows:
+        fwd_side = get_forward_guess_side(r)
+        trf_side = get_posthoc_side(r)
+        click = r.get("click_side")
+        fwd_dom = get_forward_guess_dominance(r)
+        trf_dom = get_posthoc_dominance(r)
+        fwd_ref_t = get_forward_guess_ref_time(r)
+        trf_ref_t = get_posthoc_ref_time(r)
+        print(
+            f"seed={r.get('seed')} "
+            f"forward={fwd_side} "
+            f"trf={trf_side} "
+            f"click={click} "
+            f"fwd_dom={fwd_dom:.6f} "
+            f"trf_dom={trf_dom:.6f} "
+            f"fwd_ref_t={fwd_ref_t:.6f} "
+            f"trf_ref_t={trf_ref_t:.6f}"
+        )
+
+    print("")
+
+    interesting_path = Path("interesting_cases.json")
+    with open(interesting_path, "w", encoding="utf-8") as f:
+        json.dump(interesting_rows, f, indent=2)
+
+    print(f"Saved interesting cases to: {interesting_path}")
+
+    # ------------------------------------------------------------
+    # Slit mismatch cases
+    # ------------------------------------------------------------
+    slit_mismatch_cases = [
+        r for r in slit_rows
+        if get_slit_pass_side(r) != r.get("click_side")
+    ]
+
+    print("=" * 80)
+    print("SLIT MISMATCH CASE SEEDS (slit pass != click)")
+    print("=" * 80)
+
+    for r in slit_mismatch_cases:
+        slit_side = get_slit_pass_side(r)
+        click = r.get("click_side")
+        fwd_side = get_forward_guess_side(r)
+        trf_side = get_posthoc_side(r)
+        slit_dom = get_slit_pass_dominance(r)
+        slit_ratio = get_slit_pass_ratio(r)
+        slit_ref_t = get_slit_pass_ref_time(r)
+        print(
+            f"seed={r.get('seed')} "
+            f"slit={slit_side} "
+            f"click={click} "
+            f"forward={fwd_side} "
+            f"trf={trf_side} "
+            f"slit_dom={slit_dom:.6f} "
+            f"slit_ratio={slit_ratio:.6f} "
+            f"slit_ref_t={slit_ref_t:.6f}"
+        )
+
+    print("")
+
+    slit_mismatch_path = Path("slit_mismatch_cases.json")
+    with open(slit_mismatch_path, "w", encoding="utf-8") as f:
+        json.dump(slit_mismatch_cases, f, indent=2)
+
+    print(f"Saved slit mismatch cases to: {slit_mismatch_path}")
 
     print("=" * 80)
     return 0
