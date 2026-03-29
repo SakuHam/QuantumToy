@@ -43,6 +43,12 @@ def parse_args():
         default=0.60,
         help="Threshold for high posthoc TRF dominance",
     )
+    p.add_argument(
+        "--high-adaptive-score-threshold",
+        type=float,
+        default=1e-4,
+        help="Threshold for high posthoc TRF adaptive score",
+    )
     return p.parse_args()
 
 
@@ -132,7 +138,6 @@ def get_posthoc_valid(row: dict):
     if x is not None:
         return x
 
-    # fallback heuristic for old rows:
     ratio = get_posthoc_ratio(row)
     rel_margin = get_posthoc_rel_margin(row)
     dominance = get_posthoc_dominance(row)
@@ -164,6 +169,24 @@ def get_posthoc_dominance(row: dict):
     if x is None:
         return None
     if x < 0.0 or x > 1.0:
+        return None
+    return x
+
+
+def get_posthoc_total_evidence(row: dict):
+    x = to_float_or_none(row.get("posthoc_trf_total_evidence"))
+    if x is None:
+        return None
+    if x < 0.0:
+        return None
+    return x
+
+
+def get_posthoc_adaptive_score(row: dict):
+    x = to_float_or_none(row.get("posthoc_trf_adaptive_score"))
+    if x is None:
+        return None
+    if x < 0.0:
         return None
     return x
 
@@ -208,6 +231,26 @@ def get_dominance_bucket(x: float | None) -> str | None:
     return ">=0.60"
 
 
+def get_adaptive_score_bucket(x: float | None) -> str | None:
+    if x is None:
+        return None
+    if x < 1e-8:
+        return "<1e-8"
+    if x < 1e-6:
+        return "1e-8-1e-6"
+    if x < 1e-4:
+        return "1e-6-1e-4"
+    return ">=1e-4"
+
+
+def print_accuracy_line(title: str, rows: list[dict]):
+    if not rows:
+        print(f"{title}: n/a")
+        return
+    matches = sum(1 for r in rows if get_posthoc_side(r) == r.get("click_side"))
+    print(f"{title}: {matches} / {len(rows)} ({pct(matches, len(rows))})")
+
+
 def main() -> int:
     args = parse_args()
     path = Path(args.summary_jsonl)
@@ -239,6 +282,21 @@ def main() -> int:
     if ok_total == 0:
         print("No successful rows to analyze.")
         return 0
+
+    # ------------------------------------------------------------
+    # Run config glimpse
+    # ------------------------------------------------------------
+    adaptive_rows = [r for r in ok_rows if r.get("trf_use_adaptive_ref") is not None]
+    if adaptive_rows:
+        sample = adaptive_rows[0]
+        print("TRF run config")
+        print(f"  adaptive ref      : {sample.get('trf_use_adaptive_ref')}")
+        print(f"  ref t min frac    : {sample.get('trf_ref_t_min_frac')}")
+        print(f"  ref t max frac    : {sample.get('trf_ref_t_max_frac')}")
+        print(f"  corridor x start  : {sample.get('trf_corridor_x_frac_start')}")
+        print(f"  corridor y sigma  : {sample.get('trf_corridor_y_sigma')}")
+        print(f"  x weight power    : {sample.get('trf_corridor_x_weight_power')}")
+        print("")
 
     # ------------------------------------------------------------
     # Row groups
@@ -330,10 +388,16 @@ def main() -> int:
     dominances = [get_posthoc_dominance(r) for r in valid_rows]
     dominances = [x for x in dominances if x is not None]
 
+    total_evidences = [get_posthoc_total_evidence(r) for r in valid_rows]
+    total_evidences = [x for x in total_evidences if x is not None]
+
+    adaptive_scores = [get_posthoc_adaptive_score(r) for r in valid_rows]
+    adaptive_scores = [x for x in adaptive_scores if x is not None]
+
     ref_times = [get_posthoc_ref_time(r) for r in valid_rows]
     ref_times = [x for x in ref_times if x is not None]
 
-    if rel_margins or ratios or dominances or ref_times:
+    if rel_margins or ratios or dominances or total_evidences or adaptive_scores or ref_times:
         print("Posthoc TRF evidence stats (valid rows only)")
         if rel_margins:
             print(f"  rel margin min/avg/median/max : {min(rel_margins):.6f} / {mean_of(rel_margins):.6f} / {median_of(rel_margins):.6f} / {max(rel_margins):.6f}")
@@ -341,6 +405,10 @@ def main() -> int:
             print(f"  ratio min/avg/median/max      : {min(ratios):.6f} / {mean_of(ratios):.6f} / {median_of(ratios):.6f} / {max(ratios):.6f}")
         if dominances:
             print(f"  dominance min/avg/median/max  : {min(dominances):.6f} / {mean_of(dominances):.6f} / {median_of(dominances):.6f} / {max(dominances):.6f}")
+        if total_evidences:
+            print(f"  total ev min/avg/median/max   : {min(total_evidences):.6e} / {mean_of(total_evidences):.6e} / {median_of(total_evidences):.6e} / {max(total_evidences):.6e}")
+        if adaptive_scores:
+            print(f"  adaptive score min/avg/median/max: {min(adaptive_scores):.6e} / {mean_of(adaptive_scores):.6e} / {median_of(adaptive_scores):.6e} / {max(adaptive_scores):.6e}")
         if ref_times:
             print(f"  ref time min/avg/median/max   : {min(ref_times):.6f} / {mean_of(ref_times):.6f} / {median_of(ref_times):.6f} / {max(ref_times):.6f}")
         print("")
@@ -355,6 +423,10 @@ def main() -> int:
         invalid_ratio = [x for x in invalid_ratio if x is not None]
         invalid_dom = [get_posthoc_dominance(r) for r in invalid_rows]
         invalid_dom = [x for x in invalid_dom if x is not None]
+        invalid_tot = [get_posthoc_total_evidence(r) for r in invalid_rows]
+        invalid_tot = [x for x in invalid_tot if x is not None]
+        invalid_as = [get_posthoc_adaptive_score(r) for r in invalid_rows]
+        invalid_as = [x for x in invalid_as if x is not None]
 
         print("Invalid TRF evidence stats")
         if invalid_rel:
@@ -363,7 +435,26 @@ def main() -> int:
             print(f"  ratio min/avg/median/max      : {min(invalid_ratio):.6f} / {mean_of(invalid_ratio):.6f} / {median_of(invalid_ratio):.6f} / {max(invalid_ratio):.6f}")
         if invalid_dom:
             print(f"  dominance min/avg/median/max  : {min(invalid_dom):.6f} / {mean_of(invalid_dom):.6f} / {median_of(invalid_dom):.6f} / {max(invalid_dom):.6f}")
+        if invalid_tot:
+            print(f"  total ev min/avg/median/max   : {min(invalid_tot):.6e} / {mean_of(invalid_tot):.6e} / {median_of(invalid_tot):.6e} / {max(invalid_tot):.6e}")
+        if invalid_as:
+            print(f"  adaptive score min/avg/median/max: {min(invalid_as):.6e} / {mean_of(invalid_as):.6e} / {median_of(invalid_as):.6e} / {max(invalid_as):.6e}")
         print("")
+
+    # ------------------------------------------------------------
+    # Accuracy by thresholds (valid rows only)
+    # ------------------------------------------------------------
+    print("Valid-only accuracy by dominance threshold")
+    for thr in [0.52, 0.55, 0.60, 0.70, 0.80, 0.90]:
+        rows_thr = [r for r in valid_rows if (get_posthoc_dominance(r) or -1.0) >= thr]
+        print_accuracy_line(f"  dominance >= {thr:.2f}", rows_thr)
+    print("")
+
+    print("Valid-only accuracy by adaptive score threshold")
+    for thr in [1e-8, 1e-6, 1e-4, 1e-3]:
+        rows_thr = [r for r in valid_rows if (get_posthoc_adaptive_score(r) or -1.0) >= thr]
+        print_accuracy_line(f"  adaptive_score >= {thr:.0e}", rows_thr)
+    print("")
 
     # ------------------------------------------------------------
     # Buckets: valid rows only
@@ -376,6 +467,9 @@ def main() -> int:
 
     dom_bucket_counter = Counter()
     dom_bucket_to_click = Counter()
+
+    adaptive_bucket_counter = Counter()
+    adaptive_bucket_to_click = Counter()
 
     for r in valid_rows:
         match = "match" if get_posthoc_side(r) == r.get("click_side") else "mismatch"
@@ -395,6 +489,11 @@ def main() -> int:
             dom_bucket_counter[dom_bucket] += 1
             dom_bucket_to_click[f"{dom_bucket} -> {match}"] += 1
 
+        adaptive_bucket = get_adaptive_score_bucket(get_posthoc_adaptive_score(r))
+        if adaptive_bucket is not None:
+            adaptive_bucket_counter[adaptive_bucket] += 1
+            adaptive_bucket_to_click[f"{adaptive_bucket} -> {match}"] += 1
+
     print_counter("TRF rel-margin bucket distribution (valid rows)", rel_bucket_counter, max(len(valid_rows), 1))
     print("")
     print_counter("TRF rel-margin bucket -> click (valid rows)", rel_bucket_to_click, max(len(valid_rows), 1))
@@ -406,6 +505,10 @@ def main() -> int:
     print_counter("TRF dominance bucket distribution (valid rows)", dom_bucket_counter, max(len(valid_rows), 1))
     print("")
     print_counter("TRF dominance bucket -> click (valid rows)", dom_bucket_to_click, max(len(valid_rows), 1))
+    print("")
+    print_counter("TRF adaptive-score bucket distribution (valid rows)", adaptive_bucket_counter, max(len(valid_rows), 1))
+    print("")
+    print_counter("TRF adaptive-score bucket -> click (valid rows)", adaptive_bucket_to_click, max(len(valid_rows), 1))
     print("")
 
     # ------------------------------------------------------------
@@ -430,6 +533,7 @@ def main() -> int:
         rel_margin = get_posthoc_rel_margin(r)
         ratio = get_posthoc_ratio(r)
         dominance = get_posthoc_dominance(r)
+        adaptive_score = get_posthoc_adaptive_score(r)
 
         if valid is True:
             categories["trf_valid"].append(r)
@@ -477,9 +581,14 @@ def main() -> int:
             if dominance is not None and dominance < float(args.high_dominance_threshold):
                 categories["trf_not_high_dominance"].append(r)
 
+            if adaptive_score is not None and adaptive_score >= float(args.high_adaptive_score_threshold):
+                categories["trf_high_adaptive_score"].append(r)
+            if adaptive_score is not None and adaptive_score < float(args.high_adaptive_score_threshold):
+                categories["trf_not_high_adaptive_score"].append(r)
+
             if (
                 rel_margin is not None
-                and rel_margin < float(args.low_rel_margin_threshold)
+                and rel_margin < float(args.low-rel-margin-threshold if False else args.low_rel_margin_threshold)
                 and trf_side != click
             ):
                 categories["trf_low_rel_margin_and_mismatch"].append(r)
@@ -497,6 +606,13 @@ def main() -> int:
                 and trf_side == click
             ):
                 categories["trf_high_dominance_and_match"].append(r)
+
+            if (
+                adaptive_score is not None
+                and adaptive_score >= float(args.high_adaptive_score_threshold)
+                and trf_side == click
+            ):
+                categories["trf_high_adaptive_score_and_match"].append(r)
 
             rel_bucket = get_rel_margin_bucket(rel_margin)
             if rel_bucket is not None:
@@ -521,6 +637,14 @@ def main() -> int:
                     categories[f"trf_dominance_bucket_{dom_bucket}_match"].append(r)
                 else:
                     categories[f"trf_dominance_bucket_{dom_bucket}_mismatch"].append(r)
+
+            adaptive_bucket = get_adaptive_score_bucket(adaptive_score)
+            if adaptive_bucket is not None:
+                categories[f"trf_adaptive_score_bucket_{adaptive_bucket}"].append(r)
+                if trf_side == click:
+                    categories[f"trf_adaptive_score_bucket_{adaptive_bucket}_match"].append(r)
+                else:
+                    categories[f"trf_adaptive_score_bucket_{adaptive_bucket}_mismatch"].append(r)
 
     print("Interesting category counts")
     for name in sorted(categories):
@@ -552,6 +676,8 @@ def main() -> int:
             "trf_high_ratio_and_match",
             "trf_high_dominance",
             "trf_high_dominance_and_match",
+            "trf_high_adaptive_score",
+            "trf_high_adaptive_score_and_match",
             "trf_rel_margin_bucket_<0.005",
             "trf_rel_margin_bucket_<0.005_match",
             "trf_rel_margin_bucket_<0.005_mismatch",
@@ -588,6 +714,18 @@ def main() -> int:
             "trf_dominance_bucket_>=0.60",
             "trf_dominance_bucket_>=0.60_match",
             "trf_dominance_bucket_>=0.60_mismatch",
+            "trf_adaptive_score_bucket_<1e-8",
+            "trf_adaptive_score_bucket_<1e-8_match",
+            "trf_adaptive_score_bucket_<1e-8_mismatch",
+            "trf_adaptive_score_bucket_1e-8-1e-6",
+            "trf_adaptive_score_bucket_1e-8-1e-6_match",
+            "trf_adaptive_score_bucket_1e-8-1e-6_mismatch",
+            "trf_adaptive_score_bucket_1e-6-1e-4",
+            "trf_adaptive_score_bucket_1e-6-1e-4_match",
+            "trf_adaptive_score_bucket_1e-6-1e-4_mismatch",
+            "trf_adaptive_score_bucket_>=1e-4",
+            "trf_adaptive_score_bucket_>=1e-4_match",
+            "trf_adaptive_score_bucket_>=1e-4_mismatch",
         ]:
             rows_cat = categories.get(name, [])
             print(f"{name}:")
@@ -607,6 +745,44 @@ def main() -> int:
                 f"error={r.get('error')}"
             )
         print("")
+
+    # ------------------------------------------------------------
+    # Hard cases (valid + mismatch)
+    # ------------------------------------------------------------
+    hard_cases = [
+        r for r in valid_rows
+        if get_posthoc_side(r) != r.get("click_side")
+    ]
+
+    print("=" * 80)
+    print("HARD CASE SEEDS (valid TRF but mismatch)")
+    print("=" * 80)
+
+    for r in hard_cases:
+        rel = get_posthoc_rel_margin(r)
+        dom = get_posthoc_dominance(r)
+        ratio = get_posthoc_ratio(r)
+        adaptive_score = get_posthoc_adaptive_score(r)
+        ref_time = get_posthoc_ref_time(r)
+        print(
+            f"seed={r.get('seed')} "
+            f"click={r.get('click_side')} "
+            f"trf={get_posthoc_side(r)} "
+            f"rel={rel:.6f} "
+            f"dom={dom:.6f} "
+            f"ratio={ratio:.6f} "
+            f"adaptive={adaptive_score:.6e} "
+            f"ref_t={ref_time:.6f}"
+        )
+
+    print("")
+
+    hard_path = Path("hard_cases.json")
+
+    with open(hard_path, "w", encoding="utf-8") as f:
+        json.dump(hard_cases, f, indent=2)
+
+    print(f"Saved hard cases to: {hard_path}")
 
     print("=" * 80)
     return 0

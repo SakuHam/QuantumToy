@@ -294,13 +294,18 @@ sigma_click = 0.4
 TRF_SIGMAT_FRAC = 0.60
 TRF_K_JITTER = 13
 
-# reference frame for posthoc branch selection
-TRF_REF_FRAC_GAP = 0.55
+# adaptive reference search window
+TRF_REF_T_MIN_FRAC = 0.30
+TRF_REF_T_MAX_FRAC = 0.95
 
 # screen-end corridor evidence
 TRF_CORRIDOR_X_FRAC_START = 0.70
 TRF_CORRIDOR_Y_SIGMA = 1.3
 TRF_CORRIDOR_X_WEIGHT_POWER = 2.5
+
+# adaptive metric
+TRF_USE_ADAPTIVE_REF = True
+TRF_VALID_TOTAL_EVIDENCE_EPS = 1e-12
 
 # optional worldline refinement after corridor choice
 USE_POSTHOC_WORLDLINE = True
@@ -397,44 +402,115 @@ def build_trf_corridor_masks_vis():
 TRF_UPPER_CORRIDOR_VIS, TRF_LOWER_CORRIDOR_VIS, TRF_CORRIDOR_X_START = build_trf_corridor_masks_vis()
 
 
-def choose_trf_branch_by_corridor(base_rho: np.ndarray, times: np.ndarray, x0: float, barrier_center_x: float, screen_center_x: float, v_est: float):
-    idx_ref, t_ref = find_reference_frame_index(
-        times, x0, barrier_center_x, screen_center_x, v_est, TRF_REF_FRAC_GAP
-    )
+def compute_trf_corridor_evidence_for_frame(rho_frame: np.ndarray):
+    upper_ev = float(np.sum(rho_frame * TRF_UPPER_CORRIDOR_VIS))
+    lower_ev = float(np.sum(rho_frame * TRF_LOWER_CORRIDOR_VIS))
+    total_ev = float(upper_ev + lower_ev)
 
-    rho_ref = base_rho[idx_ref]
-
-    upper_ev = float(np.sum(rho_ref * TRF_UPPER_CORRIDOR_VIS))
-    lower_ev = float(np.sum(rho_ref * TRF_LOWER_CORRIDOR_VIS))
-
-    abs_margin = float(abs(upper_ev - lower_ev))
-    rel_margin = float(abs_margin / max(max(upper_ev, lower_ev), 1e-12))
-    ratio = float(max(upper_ev, lower_ev) / max(min(upper_ev, lower_ev), 1e-12))
-    dominance = float(max(upper_ev, lower_ev) / max(upper_ev + lower_ev, 1e-12))
-
-    total_ev = upper_ev + lower_ev
-
-    if total_ev < 1e-12:
-        chosen_side = None  # EI päätöstä
+    if total_ev <= 0.0:
+        dominance = 0.0
+        rel_margin = 0.0
+        ratio = 0.0
+        chosen_side = None
     else:
+        dominance = float(max(upper_ev, lower_ev) / max(total_ev, 1e-12))
+        rel_margin = float(abs(upper_ev - lower_ev) / max(max(upper_ev, lower_ev), 1e-12))
+        ratio = float(max(upper_ev, lower_ev) / max(min(upper_ev, lower_ev), 1e-12))
         chosen_side = "upper" if upper_ev >= lower_ev else "lower"
-     
+
+    adaptive_score = float(total_ev * dominance)
+
+    return {
+        "upper_evidence": float(upper_ev),
+        "lower_evidence": float(lower_ev),
+        "total_evidence": float(total_ev),
+        "dominance": float(dominance),
+        "rel_margin": float(rel_margin),
+        "ratio": float(ratio),
+        "chosen_side": chosen_side,
+        "adaptive_score": float(adaptive_score),
+    }
+
+
+def choose_trf_branch_by_corridor(base_rho: np.ndarray, times: np.ndarray, x0: float, barrier_center_x: float, screen_center_x: float, v_est: float):
+    Nt = len(times)
+
+    if not TRF_USE_ADAPTIVE_REF:
+        idx_ref, t_ref = find_reference_frame_index(
+            times, x0, barrier_center_x, screen_center_x, v_est, 0.55
+        )
+        ev = compute_trf_corridor_evidence_for_frame(base_rho[idx_ref])
+        valid = bool(ev["total_evidence"] >= TRF_VALID_TOTAL_EVIDENCE_EPS and ev["chosen_side"] is not None)
+
+        upper_seed_x = float(0.5 * (TRF_CORRIDOR_X_START + (screen_center_x - 0.5)))
+        upper_seed_y = float(slit_center_offset)
+        lower_seed_x = float(0.5 * (TRF_CORRIDOR_X_START + (screen_center_x - 0.5)))
+        lower_seed_y = float(-slit_center_offset)
+
+        return {
+            "valid": valid,
+            "ref_idx": int(idx_ref),
+            "ref_time": float(t_ref),
+            "chosen_side": ev["chosen_side"],
+            "upper_evidence": ev["upper_evidence"],
+            "lower_evidence": ev["lower_evidence"],
+            "total_evidence": ev["total_evidence"],
+            "abs_margin": float(abs(ev["upper_evidence"] - ev["lower_evidence"])),
+            "rel_margin": ev["rel_margin"],
+            "ratio": ev["ratio"],
+            "dominance": ev["dominance"],
+            "adaptive_score": ev["adaptive_score"],
+            "upper_seed_x": upper_seed_x,
+            "upper_seed_y": upper_seed_y,
+            "lower_seed_x": lower_seed_x,
+            "lower_seed_y": lower_seed_y,
+        }
+
+    t_min = float(TRF_REF_T_MIN_FRAC * times[-1])
+    t_max = float(TRF_REF_T_MAX_FRAC * times[-1])
+
+    cand_inds = np.where((times >= t_min) & (times <= t_max))[0]
+    if len(cand_inds) == 0:
+        cand_inds = np.arange(Nt)
+
+    best = None
+    for idx in cand_inds:
+        ev = compute_trf_corridor_evidence_for_frame(base_rho[idx])
+        rec = {
+            "idx": int(idx),
+            "time": float(times[idx]),
+            **ev,
+        }
+
+        if best is None:
+            best = rec
+            continue
+
+        if rec["adaptive_score"] > best["adaptive_score"]:
+            best = rec
+        elif rec["adaptive_score"] == best["adaptive_score"] and rec["dominance"] > best["dominance"]:
+            best = rec
+
     upper_seed_x = float(0.5 * (TRF_CORRIDOR_X_START + (screen_center_x - 0.5)))
     upper_seed_y = float(slit_center_offset)
     lower_seed_x = float(0.5 * (TRF_CORRIDOR_X_START + (screen_center_x - 0.5)))
     lower_seed_y = float(-slit_center_offset)
 
+    valid = bool(best["total_evidence"] >= TRF_VALID_TOTAL_EVIDENCE_EPS and best["chosen_side"] is not None)
+
     return {
-        "ref_idx": int(idx_ref),
-        "ref_time": float(t_ref),
-        "chosen_side": chosen_side,
-        "upper_evidence": float(upper_ev),
-        "lower_evidence": float(lower_ev),
-        "total_evidence": float(total_ev),
-        "abs_margin": float(abs_margin),
-        "rel_margin": float(rel_margin),
-        "ratio": float(ratio),
-        "dominance": float(dominance),
+        "valid": valid,
+        "ref_idx": int(best["idx"]),
+        "ref_time": float(best["time"]),
+        "chosen_side": best["chosen_side"],
+        "upper_evidence": float(best["upper_evidence"]),
+        "lower_evidence": float(best["lower_evidence"]),
+        "total_evidence": float(best["total_evidence"]),
+        "abs_margin": float(abs(best["upper_evidence"] - best["lower_evidence"])),
+        "rel_margin": float(best["rel_margin"]),
+        "ratio": float(best["ratio"]),
+        "dominance": float(best["dominance"]),
+        "adaptive_score": float(best["adaptive_score"]),
         "upper_seed_x": upper_seed_x,
         "upper_seed_y": upper_seed_y,
         "lower_seed_x": lower_seed_x,
@@ -676,19 +752,22 @@ def main() -> int:
             base_rho, times_arr, x0, barrier_center_x, screen_center_x, v_est
         )
         log(
-            f"[TRF] chosen={trf_info['chosen_side']} "
+            f"[TRF] valid={trf_info['valid']} "
+            f"chosen={trf_info['chosen_side']} "
             f"upper_ev={trf_info['upper_evidence']:.6e} "
             f"lower_ev={trf_info['lower_evidence']:.6e} "
+            f"total_ev={trf_info['total_evidence']:.6e} "
             f"abs_margin={trf_info['abs_margin']:.6e} "
             f"rel_margin={trf_info['rel_margin']:.6f} "
-            f"ratio={trf_info['ratio']:.6f} "
             f"dominance={trf_info['dominance']:.6f} "
+            f"ratio={trf_info['ratio']:.6f} "
+            f"adaptive_score={trf_info['adaptive_score']:.6e} "
             f"ref_idx={trf_info['ref_idx']} "
             f"ref_time={trf_info['ref_time']:.6f}"
         )
 
     wl_info = None
-    if USE_POSTHOC_WORLDLINE and trf_info is not None:
+    if USE_POSTHOC_WORLDLINE and trf_info is not None and trf_info["valid"]:
         _, wl_info = compute_posthoc_worldline_selected_rho(base_rho, trf_info)
 
     result = {
@@ -697,28 +776,15 @@ def main() -> int:
         "returncode": 0,
         "elapsed_sec": float(time.time() - t0),
 
-        # no online branch forcing in this cleaned version
-        "dynamic_initialized": False,
-        "dynamic_init_step": None,
-        "dynamic_init_side": None,
-        "dynamic_final_side": None,
-        "dynamic_flip_count": 0,
-        "dynamic_same_side_samples": 0,
-        "dynamic_total_track_samples": 0,
-        "dynamic_same_side_fraction": None,
-        "dynamic_seed_x": None,
-        "dynamic_seed_y": None,
-        "dynamic_final_x": None,
-        "dynamic_final_y": None,
-
         "clicked": True,
         "click_time": float(t_det),
         "click_x": float(x_click),
         "click_y": float(y_click),
         "click_side": click_side,
 
-        # cleaned TRF/posthoc fields
-        "trf_ref_frac_gap": float(TRF_REF_FRAC_GAP),
+        "trf_use_adaptive_ref": bool(TRF_USE_ADAPTIVE_REF),
+        "trf_ref_t_min_frac": float(TRF_REF_T_MIN_FRAC),
+        "trf_ref_t_max_frac": float(TRF_REF_T_MAX_FRAC),
         "trf_sigmat_frac": float(TRF_SIGMAT_FRAC),
         "trf_k_jitter": int(TRF_K_JITTER),
 
@@ -726,27 +792,27 @@ def main() -> int:
         "trf_corridor_y_sigma": float(TRF_CORRIDOR_Y_SIGMA),
         "trf_corridor_x_weight_power": float(TRF_CORRIDOR_X_WEIGHT_POWER),
 
+        "posthoc_trf_valid": None if trf_info is None else bool(trf_info["valid"]),
         "posthoc_trf_ref_idx": None if trf_info is None else int(trf_info["ref_idx"]),
         "posthoc_trf_ref_time": None if trf_info is None else float(trf_info["ref_time"]),
         "posthoc_trf_chosen_side": None if trf_info is None else trf_info["chosen_side"],
         "posthoc_trf_upper_evidence": None if trf_info is None else float(trf_info["upper_evidence"]),
         "posthoc_trf_lower_evidence": None if trf_info is None else float(trf_info["lower_evidence"]),
-        "posthoc_trf_valid": bool(float(trf_info["total_evidence"]) >= 1e-12),
+        "posthoc_trf_total_evidence": None if trf_info is None else float(trf_info["total_evidence"]),
         "posthoc_trf_abs_margin": None if trf_info is None else float(trf_info["abs_margin"]),
         "posthoc_trf_rel_margin": None if trf_info is None else float(trf_info["rel_margin"]),
         "posthoc_trf_ratio": None if trf_info is None else float(trf_info["ratio"]),
         "posthoc_trf_dominance": None if trf_info is None else float(trf_info["dominance"]),
+        "posthoc_trf_adaptive_score": None if trf_info is None else float(trf_info["adaptive_score"]),
         "posthoc_trf_upper_seed_x": None if trf_info is None else float(trf_info["upper_seed_x"]),
         "posthoc_trf_upper_seed_y": None if trf_info is None else float(trf_info["upper_seed_y"]),
         "posthoc_trf_lower_seed_x": None if trf_info is None else float(trf_info["lower_seed_x"]),
         "posthoc_trf_lower_seed_y": None if trf_info is None else float(trf_info["lower_seed_y"]),
 
-        # keep old name for old analyzers if needed
+        # compatibility alias
         "posthoc_chosen_side": None if trf_info is None else trf_info["chosen_side"],
-        "posthoc_chosen_x": None if wl_info is None else float(wl_info["seed_x"]),
-        "posthoc_chosen_y": None if wl_info is None else float(wl_info["seed_y"]),
 
-        "posthoc_worldline_used": bool(USE_POSTHOC_WORLDLINE),
+        "posthoc_worldline_used": bool(USE_POSTHOC_WORLDLINE and trf_info is not None and trf_info["valid"]),
         "posthoc_worldline_seed_side": None if wl_info is None else wl_info["seed_side"],
         "posthoc_worldline_seed_x": None if wl_info is None else float(wl_info["seed_x"]),
         "posthoc_worldline_seed_y": None if wl_info is None else float(wl_info["seed_y"]),
