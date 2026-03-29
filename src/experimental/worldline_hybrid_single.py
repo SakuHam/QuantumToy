@@ -264,9 +264,9 @@ def continuous_measurement_update_preserve_norm(psi, dt, kappa, rng):
 # ====================================================
 USE_POSTHOC_TRF_SELECTION = True
 
-sigma_click = 0.4
-TRF_SIGMAT_FRAC = 0.60
-TRF_K_JITTER = 13
+sigma_click = 0.25
+TRF_SIGMAT_FRAC = 0.12
+TRF_K_JITTER = 3
 
 TRF_REF_T_MIN_FRAC = 0.30
 TRF_REF_T_MAX_FRAC = 0.95
@@ -286,6 +286,13 @@ WL_GAIN_STRENGTH = 2.0
 WL_OUTSIDE_DAMP = 0.20
 WL_TIME_RAMP_FRAC = 0.12
 
+# Weighted geometric fusion:
+# rho ∝ F^(1-w) * B^w
+# w = 0.50  -> symmetric baseline
+# w > 0.50  -> mild backward / future emphasis
+RHO_FUSION_W = 0.50
+RHO_MIX_EPS = 1e-30
+
 
 # ====================================================
 # 7b) Pre-slit + slit-pass debug analysis
@@ -293,7 +300,6 @@ WL_TIME_RAMP_FRAC = 0.12
 USE_PRE_SLIT_DEBUG = True
 USE_SLIT_PASS_DEBUG = True
 
-# Pre-slit window: left of barrier
 PRE_SLIT_DEBUG_X_SIGMA = 0.60
 PRE_SLIT_DEBUG_Y_SIGMA = 0.90
 PRE_SLIT_DEBUG_X_CENTER = barrier_center_x - 1.20
@@ -301,7 +307,6 @@ PRE_SLIT_DEBUG_T_MIN_FRAC = 0.08
 PRE_SLIT_DEBUG_T_MAX_FRAC = 0.55
 PRE_SLIT_DEBUG_VALID_TOTAL_EVIDENCE_EPS = 1e-14
 
-# Slit window: near barrier / just after
 SLIT_DEBUG_X_SIGMA = 0.45
 SLIT_DEBUG_Y_SIGMA = 0.60
 SLIT_DEBUG_X_CENTER = barrier_center_x + 0.15
@@ -356,14 +361,41 @@ def build_Emix_from_phi_tau(phi_tau_frames, times, t_det, sigmaT, tau_step, K_JI
     return Emix
 
 
-def make_rho(frames_psi, Emix):
+def make_rho(frames_psi, Emix, w=0.5, eps=1e-30):
+    """
+    Weighted geometric fusion:
+        rho ∝ F^(1-w) * B^w
+
+    where
+        F = forward density
+        B = click-conditioned backward evidence (Emix)
+
+    w in [0, 1] is the cleanest interpretation:
+        w = 0.5  -> symmetric fusion
+        w > 0.5  -> more future-conditioned
+        w < 0.5  -> more forward-conditioned
+    """
+    w = float(w)
+    if w < 0.0 or w > 1.0:
+        raise ValueError(f"RHO_FUSION_W must be in [0,1], got {w}")
+
     out = np.zeros_like(frames_psi, dtype=np.float32)
+
+    pow_fwd = 1.0 - w
+    pow_bwd = w
+
     for i in range(frames_psi.shape[0]):
-        rho = frames_psi[i] * Emix[i]
+        fwd = np.maximum(frames_psi[i], eps)
+        bwd = np.maximum(Emix[i], eps)
+
+        rho = (fwd ** pow_fwd) * (bwd ** pow_bwd)
+
         s = float(np.sum(rho) * dx * dy)
         if s > 0:
             rho /= s
+
         out[i] = rho.astype(np.float32)
+
     return out
 
 
@@ -785,6 +817,12 @@ def main() -> int:
     psi_cur = psi.copy()
 
     log(f"[START] case={case_name} seed={seed}")
+    log(
+        f"[RHO_FUSION] w={RHO_FUSION_W:.3f} "
+        f"(forward exponent={1.0 - RHO_FUSION_W:.3f}, "
+        f"backward exponent={RHO_FUSION_W:.3f}) "
+        f"eps={RHO_MIX_EPS:.1e}"
+    )
 
     for n in range(n_steps + 1):
         prob_psi = np.abs(psi_cur) ** 2
@@ -825,7 +863,7 @@ def main() -> int:
         f"ref_time={forward_guess_info['ref_time']:.6f}"
     )
 
-    # Pre-slit debug guess from forward density before the barrier
+    # Pre-slit debug
     pre_slit_info = None
     pre_slit_upper_series = None
     pre_slit_lower_series = None
@@ -852,7 +890,7 @@ def main() -> int:
             f"ref_time={pre_slit_info['ref_time']:.6f}"
         )
 
-    # Slit-pass debug guess from forward density near the barrier/slits
+    # Slit-pass debug
     slit_pass_info = None
     slit_upper_series = None
     slit_lower_series = None
@@ -927,7 +965,12 @@ def main() -> int:
         tau_step=tau_step,
         K_JITTER=TRF_K_JITTER,
     )
-    base_rho = make_rho(frames_psi, Emix)
+    base_rho = make_rho(
+        frames_psi,
+        Emix,
+        w=RHO_FUSION_W,
+        eps=RHO_MIX_EPS,
+    )
 
     trf_info = None
     if USE_POSTHOC_TRF_SELECTION:
@@ -1064,9 +1107,10 @@ def main() -> int:
                 f"slit_dom={slit_pass_info['dominance']:.6f}"
             )
 
+    rho_wl = None
     wl_info = None
     if USE_POSTHOC_WORLDLINE and trf_info is not None and trf_info["valid"]:
-        _, wl_info = compute_posthoc_worldline_selected_rho(base_rho, trf_info)
+        rho_wl, wl_info = compute_posthoc_worldline_selected_rho(base_rho, trf_info)
 
     result = {
         "case_name": case_name,
@@ -1089,6 +1133,8 @@ def main() -> int:
         "trf_corridor_x_frac_start": float(TRF_CORRIDOR_X_FRAC_START),
         "trf_corridor_y_sigma": float(TRF_CORRIDOR_Y_SIGMA),
         "trf_corridor_x_weight_power": float(TRF_CORRIDOR_X_WEIGHT_POWER),
+
+        "rho_fusion_w": float(RHO_FUSION_W),
 
         # forward-only guess
         "forward_guess_valid": bool(forward_guess_info["valid"]),
@@ -1173,6 +1219,7 @@ def main() -> int:
         "clean_path_transition": clean_path_transition,
 
         "posthoc_worldline_used": bool(USE_POSTHOC_WORLDLINE and trf_info is not None and trf_info["valid"]),
+        "posthoc_worldline_available": bool(rho_wl is not None),
         "posthoc_worldline_seed_side": None if wl_info is None else wl_info["seed_side"],
         "posthoc_worldline_seed_x": None if wl_info is None else float(wl_info["seed_x"]),
         "posthoc_worldline_seed_y": None if wl_info is None else float(wl_info["seed_y"]),
@@ -1193,6 +1240,7 @@ def main() -> int:
             debug_npz_path,
             frames_psi=frames_psi,
             base_rho=base_rho,
+            rho_wl=np.array([] if rho_wl is None else rho_wl, dtype=np.float32),
             times_arr=times_arr,
             screen_int=screen_int,
             screen_mask_vis=screen_mask_vis.astype(np.uint8),
