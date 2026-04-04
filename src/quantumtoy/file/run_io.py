@@ -71,6 +71,41 @@ def pack_points_2d(points):
     return arr.reshape(-1, 2)
 
 
+def _pack_optional_json_dict(d: dict | None) -> str:
+    """
+    Store small optional dict metadata as a JSON string in NPZ.
+    Empty string means None.
+    """
+    if d is None:
+        return ""
+    return json.dumps(_jsonable(d), ensure_ascii=False)
+
+
+def _unpack_optional_json_dict(s) -> dict | None:
+    """
+    Read dict metadata stored as JSON string from NPZ.
+    """
+    if isinstance(s, np.ndarray):
+        if s.shape == ():
+            s = s.item()
+        elif s.size == 1:
+            s = s.reshape(-1)[0]
+        else:
+            raise ValueError(f"Expected scalar JSON payload, got array shape={s.shape}")
+
+    if isinstance(s, bytes):
+        s = s.decode("utf-8")
+
+    if s is None:
+        return None
+
+    s = str(s)
+    if s == "":
+        return None
+
+    return json.loads(s)
+
+
 # ============================================================
 # Save / load
 # ============================================================
@@ -108,6 +143,16 @@ def save_run_bundle(
     bohm_traj_y,
     bohm_traj_alive,
     bohm_init_points,
+
+    # --------------------------------------------------------
+    # Optional posthoc TRF products
+    # --------------------------------------------------------
+    posthoc_base_rho=None,
+    posthoc_selected_rho=None,
+    posthoc_corridor_upper_mask=None,
+    posthoc_corridor_lower_mask=None,
+    posthoc_trf_info: dict | None = None,
+    posthoc_worldline_info: dict | None = None,
 ):
     prefix = Path(output_prefix)
     ensure_parent_dir(prefix)
@@ -155,6 +200,18 @@ def save_run_bundle(
         Y_vis=np.asarray(grid.Y_vis),
 
         screen_mask_vis=np.asarray(potential.screen_mask_vis),
+
+        # ----------------------------------------------------
+        # Posthoc TRF arrays
+        # ----------------------------------------------------
+        posthoc_base_rho=pack_optional_array(posthoc_base_rho, dtype=float),
+        posthoc_selected_rho=pack_optional_array(posthoc_selected_rho, dtype=float),
+        posthoc_corridor_upper_mask=pack_optional_array(posthoc_corridor_upper_mask, dtype=float),
+        posthoc_corridor_lower_mask=pack_optional_array(posthoc_corridor_lower_mask, dtype=float),
+
+        # small dict payloads stored as JSON strings
+        posthoc_trf_info_json=np.array([_pack_optional_json_dict(posthoc_trf_info)], dtype=object),
+        posthoc_worldline_info_json=np.array([_pack_optional_json_dict(posthoc_worldline_info)], dtype=object),
     )
 
     meta = {
@@ -165,6 +222,18 @@ def save_run_bundle(
         "debug_free_case": bool(debug_free_case),
         "has_state_vis_frames": bool(state_vis_frames is not None),
         "has_bohmian": bool(bohm_traj_x is not None),
+
+        # ----------------------------------------------------
+        # Posthoc metadata flags / summaries
+        # ----------------------------------------------------
+        "has_posthoc_base_rho": bool(posthoc_base_rho is not None),
+        "has_posthoc_selected_rho": bool(posthoc_selected_rho is not None),
+        "has_posthoc_corridor_masks": bool(
+            (posthoc_corridor_upper_mask is not None) and (posthoc_corridor_lower_mask is not None)
+        ),
+        "posthoc_trf_info": _jsonable(posthoc_trf_info),
+        "posthoc_worldline_info": _jsonable(posthoc_worldline_info),
+
         "visible_extent": {
             "x_vis_min": float(grid.x_vis_min),
             "x_vis_max": float(grid.x_vis_max),
@@ -193,6 +262,15 @@ def load_run_bundle(npz_path: str | Path, meta_path: str | Path | None = None) -
         meta = json.load(f)
 
     raw = np.load(npz_path, allow_pickle=True)
+
+    posthoc_trf_info = None
+    posthoc_worldline_info = None
+
+    if "posthoc_trf_info_json" in raw.files:
+        posthoc_trf_info = _unpack_optional_json_dict(raw["posthoc_trf_info_json"][0])
+
+    if "posthoc_worldline_info_json" in raw.files:
+        posthoc_worldline_info = _unpack_optional_json_dict(raw["posthoc_worldline_info_json"][0])
 
     out = {
         "meta": meta,
@@ -234,6 +312,24 @@ def load_run_bundle(npz_path: str | Path, meta_path: str | Path | None = None) -
         "X_vis": raw["X_vis"],
         "Y_vis": raw["Y_vis"],
         "screen_mask_vis": raw["screen_mask_vis"],
+
+        # ----------------------------------------------------
+        # Posthoc TRF payloads
+        # ----------------------------------------------------
+        "posthoc_base_rho": unpack_optional_array(raw["posthoc_base_rho"])
+        if "posthoc_base_rho" in raw.files else None,
+
+        "posthoc_selected_rho": unpack_optional_array(raw["posthoc_selected_rho"])
+        if "posthoc_selected_rho" in raw.files else None,
+
+        "posthoc_corridor_upper_mask": unpack_optional_array(raw["posthoc_corridor_upper_mask"])
+        if "posthoc_corridor_upper_mask" in raw.files else None,
+
+        "posthoc_corridor_lower_mask": unpack_optional_array(raw["posthoc_corridor_lower_mask"])
+        if "posthoc_corridor_lower_mask" in raw.files else None,
+
+        "posthoc_trf_info": posthoc_trf_info,
+        "posthoc_worldline_info": posthoc_worldline_info,
     }
 
     return out

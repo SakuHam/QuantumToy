@@ -29,7 +29,7 @@ from viz.visual_debug import (
     debug_plot_phase_density_composite_with_contours_vis,
     debug_plot_phase_winding_vis,
     debug_plot_scalar_field_vis,
-    debug_plot_metric_fields_vis,    
+    debug_plot_metric_fields_vis,
 )
 
 RENDER_MODES = (
@@ -37,6 +37,8 @@ RENDER_MODES = (
     "forward_density",          # |psi_fwd|^2 only
     "backward_density",         # |phi_tau|^2 only
     "overlap_density",          # |psi_fwd * conj(Emix)|^2 style amplitude
+    "posthoc_base_rho",         # saved posthoc base rho
+    "posthoc_selected_rho",     # saved posthoc worldline-selected rho
     "phase",
     "phase_contours",
     "ridge_phase",
@@ -483,6 +485,7 @@ def phase_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
         return np.angle(state_vis[0])
     raise ValueError(f"Unsupported state_vis ndim={state_vis.ndim}")
 
+
 def forward_density_frames_from_state_vis(state_vis_frames: np.ndarray) -> np.ndarray:
     if state_vis_frames.ndim == 3:
         return (np.abs(state_vis_frames) ** 2).astype(float)
@@ -505,6 +508,7 @@ def overlap_density_frames(
 ) -> np.ndarray:
     z = make_overlap_complex_frames(state_vis_frames, emix_frames)
     return (np.abs(z) ** 2).astype(float)
+
 
 def make_phase_density_rgb(
     state_vis: np.ndarray,
@@ -563,6 +567,13 @@ def make_phase_density_rgb_from_complex_frames(
     return rgb, rho_norm
 
 
+def _default_frame_vref(frames: np.ndarray) -> float:
+    if frames is None:
+        return 1.0
+    m = float(np.max(frames[0])) if len(frames) > 0 else 0.0
+    return max(m, 1e-30)
+
+
 def build_render_image(
     *,
     mode: str,
@@ -571,6 +582,8 @@ def build_render_image(
     forward_density_current: np.ndarray | None,
     backward_density_current: np.ndarray | None,
     overlap_density_current: np.ndarray | None,
+    posthoc_base_rho: np.ndarray | None,
+    posthoc_selected_rho: np.ndarray | None,
     state_vis_frames: np.ndarray | None,
     ridge_complex_current: np.ndarray | None,
     vref: float,
@@ -590,7 +603,7 @@ def build_render_image(
             raise RuntimeError("forward_density render mode requires forward density frames")
         img = gamma_display(
             forward_density_current[i],
-            vref=max(float(np.max(forward_density_current[0])), 1e-30),
+            vref=_default_frame_vref(forward_density_current),
             gamma=cfg.GAMMA,
             use_fixed_scale=False,
         )
@@ -601,7 +614,7 @@ def build_render_image(
             raise RuntimeError("backward_density render mode requires backward density frames")
         img = gamma_display(
             backward_density_current[i],
-            vref=max(float(np.max(backward_density_current[0])), 1e-30),
+            vref=_default_frame_vref(backward_density_current),
             gamma=cfg.GAMMA,
             use_fixed_scale=False,
         )
@@ -612,7 +625,29 @@ def build_render_image(
             raise RuntimeError("overlap_density render mode requires overlap density frames")
         img = gamma_display(
             overlap_density_current[i],
-            vref=max(float(np.max(overlap_density_current[0])), 1e-30),
+            vref=_default_frame_vref(overlap_density_current),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode == "posthoc_base_rho":
+        if posthoc_base_rho is None:
+            raise RuntimeError("posthoc_base_rho render mode requires saved posthoc_base_rho")
+        img = gamma_display(
+            posthoc_base_rho[i],
+            vref=_default_frame_vref(posthoc_base_rho),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode == "posthoc_selected_rho":
+        if posthoc_selected_rho is None:
+            raise RuntimeError("posthoc_selected_rho render mode requires saved posthoc_selected_rho")
+        img = gamma_display(
+            posthoc_selected_rho[i],
+            vref=_default_frame_vref(posthoc_selected_rho),
             gamma=cfg.GAMMA,
             use_fixed_scale=False,
         )
@@ -842,7 +877,7 @@ def main():
                 cmap="magma",
                 colorbar_label="V_metric",
             )
-            
+
     times = bundle["times"]
     state_vis_frames = bundle["state_vis_frames"]
     norms = bundle["norms"]
@@ -859,6 +894,21 @@ def main():
     bohm_traj_x = bundle["bohm_traj_x"]
     bohm_traj_y = bundle["bohm_traj_y"]
     bohm_traj_alive = bundle["bohm_traj_alive"]
+
+    posthoc_base_rho_saved = bundle.get("posthoc_base_rho", None)
+    posthoc_selected_rho_saved = bundle.get("posthoc_selected_rho", None)
+    posthoc_corridor_upper_mask = bundle.get("posthoc_corridor_upper_mask", None)
+    posthoc_corridor_lower_mask = bundle.get("posthoc_corridor_lower_mask", None)
+    posthoc_trf_info = bundle.get("posthoc_trf_info", None)
+    posthoc_worldline_info = bundle.get("posthoc_worldline_info", None)
+
+    print(
+        "[POSTHOC LOAD] "
+        f"base_rho={'yes' if posthoc_base_rho_saved is not None else 'no'} "
+        f"selected_rho={'yes' if posthoc_selected_rho_saved is not None else 'no'} "
+        f"trf_info={'yes' if posthoc_trf_info is not None else 'no'} "
+        f"worldline_info={'yes' if posthoc_worldline_info is not None else 'no'}"
+    )
 
     Nt = len(times)
     tau_step = cfg.save_every * cfg.dt
@@ -1030,6 +1080,8 @@ def main():
             forward_density_current=forward_density_init,
             backward_density_current=backward_density_init,
             overlap_density_current=overlap_density_init,
+            posthoc_base_rho=posthoc_base_rho_saved,
+            posthoc_selected_rho=posthoc_selected_rho_saved,
             state_vis_frames=state_vis_frames,
             ridge_complex_current=ridge_complex_init,
             vref=vref,
@@ -1077,6 +1129,33 @@ def main():
                 zorder=7,
             )
             contour_artists = list(cs.collections)
+
+        # Optional posthoc corridor overlay for posthoc render modes
+        posthoc_corridor_artists = []
+        if mode in {"posthoc_base_rho", "posthoc_selected_rho"}:
+            if posthoc_corridor_upper_mask is not None:
+                im_u = ax.imshow(
+                    posthoc_corridor_upper_mask,
+                    extent=extent,
+                    origin="lower",
+                    cmap="Blues",
+                    interpolation="nearest",
+                    alpha=0.10 * np.clip(posthoc_corridor_upper_mask, 0.0, 1.0),
+                    zorder=3,
+                )
+                posthoc_corridor_artists.append(im_u)
+
+            if posthoc_corridor_lower_mask is not None:
+                im_l = ax.imshow(
+                    posthoc_corridor_lower_mask,
+                    extent=extent,
+                    origin="lower",
+                    cmap="Greens",
+                    interpolation="nearest",
+                    alpha=0.10 * np.clip(posthoc_corridor_lower_mask, 0.0, 1.0),
+                    zorder=3,
+                )
+                posthoc_corridor_artists.append(im_l)
 
         ax.set_xlabel("x")
         ax.set_ylabel("y")
@@ -1187,6 +1266,7 @@ def main():
                 "im": im,
                 "title": title,
                 "static_geometry_artists": static_geometry_artists,
+                "posthoc_corridor_artists": posthoc_corridor_artists,
                 "contour_artists": contour_artists,
                 "ridge_marker": ridge_marker,
                 "click_marker": click_marker,
@@ -1242,6 +1322,8 @@ def main():
             forward_density_current=forward_density_current[0],
             backward_density_current=backward_density_current[0],
             overlap_density_current=overlap_density_current[0],
+            posthoc_base_rho=posthoc_base_rho_saved,
+            posthoc_selected_rho=posthoc_selected_rho_saved,
             state_vis_frames=state_vis_frames,
             ridge_complex_current=ridge_complex_current[0],
             vref=vref,
@@ -1366,6 +1448,16 @@ def main():
             rf"Γ≈{ridge_s[0][i]:.3e}",
         ]
 
+        if mode == "posthoc_base_rho" and posthoc_trf_info is not None:
+            parts.append(f"trf={posthoc_trf_info.get('chosen_side', None)}")
+            if "ref_time" in posthoc_trf_info:
+                parts.append(f"t_ref≈{float(posthoc_trf_info['ref_time']):.3f}")
+
+        if mode == "posthoc_selected_rho" and posthoc_worldline_info is not None:
+            parts.append(f"wl_used={posthoc_worldline_info.get('used', False)}")
+            if posthoc_worldline_info.get("seed_side", None) is not None:
+                parts.append(f"wl_seed={posthoc_worldline_info.get('seed_side')}")
+
         if args.show_ridge_source_label:
             parts.append(rf"ridge_src={args.ridge_source}")
 
@@ -1385,10 +1477,20 @@ def main():
         return " | ".join(parts)
 
     def make_split_title(i: int, mode: str):
-        return (
-            f"{mode} | t={times[i]:.3f} | σT={sigma_current[0]:.3f} | "
-            f"Γ≈{ridge_s[0][i]:.3e}"
-        )
+        parts = [
+            f"{mode}",
+            f"t={times[i]:.3f}",
+            f"σT={sigma_current[0]:.3f}",
+            f"Γ≈{ridge_s[0][i]:.3e}",
+        ]
+
+        if mode == "posthoc_base_rho" and posthoc_trf_info is not None:
+            parts.append(f"trf={posthoc_trf_info.get('chosen_side', None)}")
+
+        if mode == "posthoc_selected_rho" and posthoc_worldline_info is not None:
+            parts.append(f"wl={posthoc_worldline_info.get('used', False)}")
+
+        return " | ".join(parts)
 
     def refresh_titles(i: int):
         for panel in panel_states:
@@ -1473,6 +1575,7 @@ def main():
 
         for panel in panel_states:
             artists.extend(panel["static_geometry_artists"])
+            artists.extend(panel["posthoc_corridor_artists"])
             artists.append(panel["ridge_marker"])
             artists.append(panel["click_marker"])
             artists.append(panel["ridge_trail"])
