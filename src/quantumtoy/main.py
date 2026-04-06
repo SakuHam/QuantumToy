@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 
 import numpy as np
-
+import os
 from config import AppConfig
 from core.grid import build_grid
 from core.potentials import build_double_slit_and_caps
@@ -1113,6 +1113,9 @@ class QuantumSimulationApp:
         rho_mode = getattr(cfg, "POSTHOC_TRF_RHO_MODE", "density_product_oldstyle")
         use_worldline = bool(getattr(cfg, "POSTHOC_USE_WORLDLINE", True))
 
+        sigmaT_env = os.environ.get("POSTHOC_TRF_SIGMAT", None)
+        sigmaT_value = float(sigmaT_env) if sigmaT_env is not None else sigma_init
+        
         result = run_posthoc_trf_selection(
             frames_psi=forward.state_vis_frames,
             phi_tau_frames=phi_tau_frames,
@@ -1129,7 +1132,7 @@ class QuantumSimulationApp:
             slit_center_offset=cfg.slit_center_offset,
             v_est=v_est,
 
-            sigmaT=float(getattr(cfg, "POSTHOC_TRF_SIGMAT", sigma_init)),
+            sigmaT=sigmaT_value,
             tau_step=tau_step,
             K_JITTER=int(getattr(cfg, "K_JITTER", 13)),
 
