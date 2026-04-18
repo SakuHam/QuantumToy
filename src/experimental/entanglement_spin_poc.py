@@ -51,6 +51,10 @@ def safe_frame_normalize(arr: np.ndarray, eps: float = 1e-30) -> np.ndarray:
     return arr / amax
 
 
+def ensure_parent_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
 # ============================================================
 # Spin matrices
 # ============================================================
@@ -360,7 +364,6 @@ def channel_component_densities(
 
 def component_peak_xy(arr: np.ndarray, x: np.ndarray) -> tuple[float, float, float]:
     iy, ix = np.unravel_index(np.argmax(arr), arr.shape)
-    # arr shape is (xB, xA) because meshgrid(indexing="xy")
     return float(x[ix]), float(x[iy]), float(arr[iy, ix])
 
 
@@ -375,7 +378,6 @@ def build_voronoi_detector_for_frame(
         xa, xb, amp = component_peak_xy(comps[ch], solver.x)
         peaks[ch] = (xa, xb, amp)
 
-    # grid coords in (xB, xA) array layout
     XA = solver.XA
     XB = solver.XB
 
@@ -386,7 +388,7 @@ def build_voronoi_detector_for_frame(
         d2 = (XA - xa) ** 2 + (XB - xb) ** 2
         dists.append(d2)
 
-    dist_stack = np.stack(dists, axis=0)  # (4, Ny, Nx)
+    dist_stack = np.stack(dists, axis=0)
     labels = np.argmin(dist_stack, axis=0)
 
     masks = {
@@ -566,23 +568,479 @@ def find_click_event(
 
 
 # ============================================================
-# Minimal placeholders for plotting so main runs
+# Plot helpers
 # ============================================================
 
-def make_detector_calibration_plot(outdir, solver, run, peaks, diag):
-    pass
+CHANNELS = ["++", "+-", "-+", "--"]
+CHANNEL_COLORS = {
+    "++": "tab:blue",
+    "+-": "tab:orange",
+    "-+": "tab:green",
+    "--": "tab:red",
+}
 
 
-def make_click_summary_plot(outdir, solver, run, detector_series, click_event):
-    pass
+def choose_click_channel(det: dict[str, float]) -> str:
+    vals = {ch: det[ch] for ch in CHANNELS}
+    return max(vals, key=vals.get)
+
+
+def joint_density_with_mask_overlay(
+    joint_density: np.ndarray,
+    masks: dict[str, np.ndarray],
+    alpha_scale: float = 0.22,
+) -> np.ndarray:
+    rho_n = safe_frame_normalize(joint_density)
+    overlay = np.zeros((*joint_density.shape, 4), dtype=float)
+
+    color_rgba = {
+        "++": np.array([0.12, 0.47, 0.71, alpha_scale]),
+        "+-": np.array([1.00, 0.50, 0.05, alpha_scale]),
+        "-+": np.array([0.17, 0.63, 0.17, alpha_scale]),
+        "--": np.array([0.84, 0.15, 0.16, alpha_scale]),
+    }
+
+    for ch in CHANNELS:
+        m = masks[ch]
+        overlay[m, :] = color_rgba[ch]
+
+    overlay[..., 3] *= np.clip(0.35 + 0.65 * rho_n, 0.0, 1.0)
+    return overlay
+
+
+def add_channel_peak_labels(ax, peaks: dict[str, tuple[float, float]]) -> None:
+    label_offsets = {
+        "++": (0.6, 0.6),
+        "+-": (0.6, -1.4),
+        "-+": (-2.2, 0.6),
+        "--": (-2.2, -1.4),
+    }
+    for ch in CHANNELS:
+        xa, xb = peaks[ch]
+        ax.scatter([xa], [xb], s=30, c=CHANNEL_COLORS[ch], edgecolors="white", linewidths=0.7, zorder=4)
+        dx, dy = label_offsets[ch]
+        ax.text(
+            xa + dx,
+            xb + dy,
+            ch,
+            color="white",
+            fontsize=10,
+            weight="bold",
+            ha="left",
+            va="bottom",
+            zorder=5,
+        )
+
+
+def detector_series_to_arrays(detector_series: list[dict[str, float]]) -> dict[str, np.ndarray]:
+    out: dict[str, np.ndarray] = {}
+    for key in ["++", "+-", "-+", "--", "pp_raw", "pm_raw", "mp_raw", "mm_raw", "total_weight"]:
+        out[key] = np.array([d[key] for d in detector_series], dtype=float)
+    return out
+
+
+# ============================================================
+# Plotting
+# ============================================================
+
+def make_detector_calibration_plot(outdir, solver, run, detector_series, diag_series):
+    outpath = Path(outdir) / "detector_calibration.png"
+    ensure_parent_dir(outpath)
+
+    times = run["times"]
+    det_arr = detector_series_to_arrays(detector_series)
+    psi_frames = run["psi_frames"]
+
+    born = {ch: [] for ch in CHANNELS}
+    basis = {ch: [] for ch in CHANNELS}
+    errs = []
+    e_det = []
+    e_born = []
+
+    for i, psi in enumerate(psi_frames):
+        psi128 = psi.astype(np.complex128)
+        jp = joint_spin_probs(psi128, solver)
+        bp = full_basis_component_probs(psi128, solver)
+        for ch in CHANNELS:
+            born[ch].append(jp[ch])
+            basis[ch].append(bp[ch])
+        errs.append(diag_series[i]["err"])
+        e_det.append(diag_series[i]["E_det_cond"])
+        e_born.append(diag_series[i]["E_proj"])
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10), constrained_layout=True)
+
+    ax = axes[0, 0]
+    for ch in CHANNELS:
+        ax.plot(times, det_arr[ch], label=f"det {ch}", color=CHANNEL_COLORS[ch], linewidth=2)
+    ax.set_title("Detector conditional channel probabilities")
+    ax.set_xlabel("time")
+    ax.set_ylabel("probability")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.25)
+    ax.legend(ncol=2, fontsize=9)
+
+    ax = axes[0, 1]
+    for ch in CHANNELS:
+        ax.plot(times, born[ch], label=f"Born {ch}", color=CHANNEL_COLORS[ch], linewidth=2)
+        ax.plot(times, basis[ch], linestyle="--", color=CHANNEL_COLORS[ch], alpha=0.75, linewidth=1.5)
+    ax.set_title("Born global (solid) vs rotated-basis mass (dashed)")
+    ax.set_xlabel("time")
+    ax.set_ylabel("probability / mass")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.25)
+    ax.legend(ncol=2, fontsize=9)
+
+    ax = axes[1, 0]
+    ax.plot(times, det_arr["total_weight"], label="detector total weight", linewidth=2)
+    ax.set_title("Detector total coincidence weight")
+    ax.set_xlabel("time")
+    ax.set_ylabel("weight")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+
+    ax = axes[1, 1]
+    ax.plot(times, errs, label="sum sq. error(det vs Born)", linewidth=2)
+    ax.plot(times, e_det, label="E_det_cond", linewidth=2)
+    ax.plot(times, e_born, label="E_proj", linewidth=2, linestyle="--")
+    ax.set_title("Calibration diagnostics")
+    ax.set_xlabel("time")
+    ax.set_ylabel("value")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+
+    fig.suptitle("Voronoi detector calibration summary", fontsize=16)
+    fig.savefig(outpath, dpi=160)
+    plt.close(fig)
+    print(f"[PLOT] saved {outpath}")
+
+
+def make_click_summary_plot(outdir, solver, run, detector_series, click_event, masks_series, peaks_series):
+    if click_event is None:
+        return
+
+    outpath = Path(outdir) / "click_summary.png"
+    ensure_parent_dir(outpath)
+
+    idx = int(click_event["frame_idx"])
+    t_click = float(click_event["time"])
+    psi_click = run["psi_frames"][idx].astype(np.complex128)
+    joint = total_density(psi_click)
+    det = detector_series[idx]
+    born = joint_spin_probs(psi_click, solver)
+    weights = np.array([d["total_weight"] for d in detector_series], dtype=float)
+    click_channel = choose_click_channel(det)
+
+    fig = plt.figure(figsize=(15, 8))
+    gs = fig.add_gridspec(2, 2, height_ratios=[2.2, 1.0], width_ratios=[1.25, 1.0])
+
+    ax_img = fig.add_subplot(gs[0, 0])
+    ax_bar = fig.add_subplot(gs[0, 1])
+    ax_w = fig.add_subplot(gs[1, :])
+
+    extent = [solver.x[0], solver.x[-1], solver.x[0], solver.x[-1]]
+
+    im = ax_img.imshow(
+        safe_frame_normalize(joint),
+        origin="lower",
+        extent=extent,
+        cmap="magma",
+        aspect="auto",
+        vmin=0.0,
+        vmax=1.0,
+    )
+    overlay = joint_density_with_mask_overlay(joint, masks_series[idx], alpha_scale=0.18)
+    ax_img.imshow(overlay, origin="lower", extent=extent, aspect="auto")
+    add_channel_peak_labels(ax_img, peaks_series[idx])
+    cbar = fig.colorbar(im, ax=ax_img, fraction=0.046, pad=0.04)
+    cbar.set_label("frame-normalized density")
+
+    info_text = (
+        "CLICK FRAME\n"
+        f"E_click={click_event['E_born']:.4f}\n"
+        f"P++={click_event['det_pp']:.3f}, P+-={click_event['det_pm']:.3f}\n"
+        f"P-+={click_event['det_mp']:.3f}, P--={click_event['det_mm']:.3f}"
+    )
+    ax_img.text(
+        0.015,
+        0.985,
+        info_text,
+        transform=ax_img.transAxes,
+        va="top",
+        ha="left",
+        fontsize=11,
+        color="black",
+        bbox=dict(facecolor="white", alpha=0.85, edgecolor="0.2"),
+    )
+    ax_img.set_title("Joint density")
+    ax_img.set_xlabel("x_A")
+    ax_img.set_ylabel("x_B")
+
+    x = np.arange(len(CHANNELS))
+    det_vals = [det[ch] for ch in CHANNELS]
+    born_vals = [born[ch] for ch in CHANNELS]
+    ax_bar.bar(x, det_vals, color=[CHANNEL_COLORS[ch] for ch in CHANNELS], alpha=0.95)
+    ax_bar.scatter(x, born_vals, s=110, facecolors="none", edgecolors="black", linewidths=1.4, label="Born click")
+    ax_bar.set_xticks(x, CHANNELS)
+    ax_bar.set_ylim(0.0, 1.0)
+    ax_bar.set_ylabel("probability")
+    ax_bar.set_title(
+        f"Detector vs Born click channels\nW={click_event['total_weight']:.3e} | {click_channel} CLICK"
+    )
+    ax_bar.legend(loc="upper right")
+    ax_bar.grid(True, axis="y", alpha=0.25)
+
+    times = run["times"]
+    ax_w.plot(times, weights, label="detector total weight", linewidth=2)
+    ax_w.axhline(click_event["threshold"], linestyle="--", linewidth=1.2, label="click threshold")
+    ax_w.axvline(t_click, linestyle="--", linewidth=1.2, label=f"click @ t={t_click:.2f}")
+    ax_w.scatter([t_click], [click_event["total_weight"]], s=35, zorder=5)
+    ax_w.set_title("Detector coincidence weight")
+    ax_w.set_xlabel("time")
+    ax_w.set_ylabel("weight")
+    ax_w.grid(True, alpha=0.25)
+    ax_w.legend()
+
+    fig.suptitle(f"t={t_click:.2f} [{click_channel} click]", fontsize=16)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=160)
+    plt.close(fig)
+    print(f"[PLOT] saved {outpath}")
 
 
 def make_click_channels_plot(outdir, solver, run, detector_series, click_event):
-    pass
+    if click_event is None:
+        return
+
+    outpath = Path(outdir) / "click_channels_timeseries.png"
+    ensure_parent_dir(outpath)
+
+    times = run["times"]
+    det_arr = detector_series_to_arrays(detector_series)
+    psi_frames = run["psi_frames"]
+
+    born = {ch: [] for ch in CHANNELS}
+    for psi in psi_frames:
+        psi128 = psi.astype(np.complex128)
+        jp = joint_spin_probs(psi128, solver)
+        for ch in CHANNELS:
+            born[ch].append(jp[ch])
+
+    idx_click = int(click_event["frame_idx"])
+    t_click = float(click_event["time"])
+
+    fig, axes = plt.subplots(3, 1, figsize=(13, 11), sharex=True, constrained_layout=True)
+
+    ax = axes[0]
+    for ch in CHANNELS:
+        ax.plot(times, det_arr[ch], color=CHANNEL_COLORS[ch], label=f"det {ch}", linewidth=2)
+    ax.axvline(t_click, color="k", linestyle="--", alpha=0.7)
+    ax.set_title("Detector conditional channel probabilities")
+    ax.set_ylabel("probability")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.25)
+    ax.legend(ncol=4, fontsize=9)
+
+    ax = axes[1]
+    for ch in CHANNELS:
+        ax.plot(times, born[ch], color=CHANNEL_COLORS[ch], label=f"Born {ch}", linewidth=2)
+    ax.axvline(t_click, color="k", linestyle="--", alpha=0.7)
+    ax.set_title("Born global channel probabilities")
+    ax.set_ylabel("probability")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.25)
+    ax.legend(ncol=4, fontsize=9)
+
+    ax = axes[2]
+    ax.plot(times, det_arr["total_weight"], label="detector total weight", linewidth=2)
+    ax.axhline(click_event["threshold"], color="tab:red", linestyle="--", label="threshold")
+    ax.axvline(t_click, color="k", linestyle="--", alpha=0.7, label=f"click @ {t_click:.3f}")
+    ax.scatter([t_click], [det_arr["total_weight"][idx_click]], zorder=5, s=35)
+    ax.set_title("Click trigger series")
+    ax.set_xlabel("time")
+    ax.set_ylabel("weight")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+
+    fig.savefig(outpath, dpi=160)
+    plt.close(fig)
+    print(f"[PLOT] saved {outpath}")
 
 
-def make_animation(outdir, solver, run, detector_series, click_event):
-    pass
+def make_animation(outdir, solver, run, detector_series, click_event, masks_series, peaks_series):
+    if click_event is None:
+        print("[ANIM] skipped: no click event")
+        return
+
+    outdir = Path(outdir)
+    out_mp4 = outdir / "click_animation.mp4"
+    out_gif = outdir / "click_animation.gif"
+
+    times = run["times"]
+    joint_frames = run["joint_frames"]
+    weights = np.array([d["total_weight"] for d in detector_series], dtype=float)
+    click_idx = int(click_event["frame_idx"])
+    click_time = float(click_event["time"])
+
+    fig = plt.figure(figsize=(15, 8))
+    gs = fig.add_gridspec(2, 2, height_ratios=[2.2, 1.0], width_ratios=[1.25, 1.0])
+
+    ax_img = fig.add_subplot(gs[0, 0])
+    ax_bar = fig.add_subplot(gs[0, 1])
+    ax_w = fig.add_subplot(gs[1, :])
+
+    extent = [solver.x[0], solver.x[-1], solver.x[0], solver.x[-1]]
+
+    rho0 = joint_frames[0]
+    im = ax_img.imshow(
+        safe_frame_normalize(rho0),
+        origin="lower",
+        extent=extent,
+        cmap="magma",
+        aspect="auto",
+        vmin=0.0,
+        vmax=1.0,
+        animated=True,
+    )
+    overlay0 = joint_density_with_mask_overlay(rho0, masks_series[0], alpha_scale=0.18)
+    im_overlay = ax_img.imshow(
+        overlay0,
+        origin="lower",
+        extent=extent,
+        aspect="auto",
+        animated=True,
+    )
+
+    peak_scatters = {}
+    peak_texts = {}
+    for ch in CHANNELS:
+        xa, xb = peaks_series[0][ch]
+        sc = ax_img.scatter([xa], [xb], s=30, c=CHANNEL_COLORS[ch], edgecolors="white", linewidths=0.7, zorder=4)
+        peak_scatters[ch] = sc
+        txt = ax_img.text(xa, xb, ch, color="white", fontsize=10, weight="bold", zorder=5)
+        peak_texts[ch] = txt
+
+    ax_img.set_title("Joint density")
+    ax_img.set_xlabel("x_A")
+    ax_img.set_ylabel("x_B")
+    cbar = fig.colorbar(im, ax=ax_img, fraction=0.046, pad=0.04)
+    cbar.set_label("frame-normalized density")
+
+    info_box = ax_img.text(
+        0.015,
+        0.985,
+        "",
+        transform=ax_img.transAxes,
+        va="top",
+        ha="left",
+        fontsize=11,
+        color="black",
+        bbox=dict(facecolor="white", alpha=0.85, edgecolor="0.2"),
+    )
+
+    x = np.arange(len(CHANNELS))
+    bars = ax_bar.bar(x, [0.0] * 4, color=[CHANNEL_COLORS[ch] for ch in CHANNELS], alpha=0.95)
+    born_scatter = ax_bar.scatter(
+        x, [0.0] * 4, s=110, facecolors="none", edgecolors="black", linewidths=1.4, label="Born click"
+    )
+    ax_bar.set_xticks(x, CHANNELS)
+    ax_bar.set_ylim(0.0, 1.0)
+    ax_bar.set_ylabel("probability")
+    ax_bar.set_title("Detector vs Born click channels")
+    ax_bar.legend(loc="upper right")
+    ax_bar.grid(True, axis="y", alpha=0.25)
+
+    w_line, = ax_w.plot(times, weights, label="detector total weight", linewidth=2)
+    th_line = ax_w.axhline(click_event["threshold"], linestyle="--", linewidth=1.2, label="click threshold")
+    click_vline = ax_w.axvline(click_time, linestyle="--", linewidth=1.2, label=f"click @ t={click_time:.2f}")
+    current_dot, = ax_w.plot([times[0]], [weights[0]], marker="o", linestyle="None", markersize=5)
+    ax_w.set_title("Detector coincidence weight")
+    ax_w.set_xlabel("time")
+    ax_w.set_ylabel("weight")
+    ax_w.grid(True, alpha=0.25)
+    ax_w.legend()
+
+    frame_vline = ax_w.axvline(times[0], color="tab:gray", linestyle=":", linewidth=1.4, alpha=0.9)
+
+    def update_peak_annotations(peaks):
+        label_offsets = {
+            "++": (0.6, 0.6),
+            "+-": (0.6, -1.4),
+            "-+": (-2.2, 0.6),
+            "--": (-2.2, -1.4),
+        }
+        for ch in CHANNELS:
+            xa, xb = peaks[ch]
+            peak_scatters[ch].set_offsets(np.array([[xa, xb]]))
+            dx, dy = label_offsets[ch]
+            peak_texts[ch].set_position((xa + dx, xb + dy))
+
+    def update(frame_idx: int):
+        rho = joint_frames[frame_idx]
+        im.set_data(safe_frame_normalize(rho))
+        im_overlay.set_data(joint_density_with_mask_overlay(rho, masks_series[frame_idx], alpha_scale=0.18))
+        update_peak_annotations(peaks_series[frame_idx])
+
+        det = detector_series[frame_idx]
+        psi = run["psi_frames"][frame_idx].astype(np.complex128)
+        born = joint_spin_probs(psi, solver)
+        click_channel = choose_click_channel(det)
+
+        for rect, ch in zip(bars, CHANNELS):
+            rect.set_height(det[ch])
+
+        born_scatter.set_offsets(np.column_stack([x, [born[ch] for ch in CHANNELS]]))
+
+        info_text = (
+            f"{'CLICK FRAME' if frame_idx == click_idx else 'FRAME'}\n"
+            f"E_click={born['++'] + born['--'] - born['+-'] - born['-+']:.4f}\n"
+            f"P++={det['++']:.3f}, P+-={det['+-']:.3f}\n"
+            f"P-+={det['-+']:.3f}, P--={det['--']:.3f}"
+        )
+        info_box.set_text(info_text)
+
+        ttl = f"t={times[frame_idx]:.2f}"
+        if frame_idx == click_idx:
+            ttl += f" [{click_channel} click]"
+        elif frame_idx > click_idx:
+            ttl += " [post-click]"
+        fig.suptitle(ttl, fontsize=16)
+
+        ax_bar.set_title(
+            f"Detector vs Born click channels\nW={det['total_weight']:.3e}"
+            + (f" | {click_channel} CLICK" if frame_idx == click_idx else "")
+        )
+
+        frame_vline.set_xdata([times[frame_idx], times[frame_idx]])
+        current_dot.set_data([times[frame_idx]], [weights[frame_idx]])
+
+        artists = [im, im_overlay, info_box, born_scatter, current_dot, frame_vline]
+        artists.extend(list(bars))
+        artists.extend(peak_scatters.values())
+        artists.extend(peak_texts.values())
+        return artists
+
+    anim = FuncAnimation(fig, update, frames=len(times), interval=60, blit=False)
+
+    saved = False
+    try:
+        anim.save(out_mp4, dpi=140, fps=15)
+        saved = True
+        print(f"[ANIM] saved {out_mp4}")
+    except Exception as e:
+        print(f"[ANIM] mp4 save failed: {e}")
+        try:
+            from matplotlib.animation import PillowWriter
+            anim.save(out_gif, writer=PillowWriter(fps=15), dpi=120)
+            saved = True
+            print(f"[ANIM] saved {out_gif}")
+        except Exception as e2:
+            print(f"[ANIM] gif save failed: {e2}")
+
+    plt.close(fig)
+
+    if not saved:
+        print("[ANIM] animation was not saved")
 
 
 # ============================================================
@@ -710,7 +1168,6 @@ def main() -> int:
             + det_click["mm_raw"]
         )
 
-        # Optional diagnostic: total component mass in each Voronoi region, regardless of label
         region_total = float(
             np.sum((comps_click["++"] + comps_click["+-"] + comps_click["-+"] + comps_click["--"]) *
                    (masks_click["++"] | masks_click["+-"] | masks_click["-+"] | masks_click["--"])) * dx2
@@ -799,6 +1256,15 @@ def main() -> int:
             "[TOTAL CHECK] "
             f"full={total_full:.6f}, det_sum={total_det:.6f}, region_total={region_total:.6f}"
         )
+
+    # plots
+    make_detector_calibration_plot(outdir, solver, run, detector_series, diag_series)
+    if click_event is not None:
+        make_click_summary_plot(outdir, solver, run, detector_series, click_event, masks_series, peaks_series)
+        make_click_channels_plot(outdir, solver, run, detector_series, click_event)
+
+    if not cfg.no_anim and click_event is not None:
+        make_animation(outdir, solver, run, detector_series, click_event, masks_series, peaks_series)
 
     return 0
 
