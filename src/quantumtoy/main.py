@@ -458,6 +458,15 @@ class QuantumSimulationApp:
         cfg = self.cfg
         cfg.dump_selected()
 
+        if os.environ.get("DT") is not None:
+            cfg.dt = float(os.environ["DT"])
+
+        if os.environ.get("SAVE_EVERY") is not None:
+            cfg.save_every = int(os.environ["SAVE_EVERY"])
+
+        if os.environ.get("N_STEPS") is not None:
+            cfg.n_steps = int(os.environ["N_STEPS"])
+
         grid = build_grid(
             visible_lx=cfg.VISIBLE_LX,
             visible_ly=cfg.VISIBLE_LY,

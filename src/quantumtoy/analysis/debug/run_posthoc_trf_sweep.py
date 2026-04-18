@@ -76,7 +76,7 @@ def safe_case_name(s: str) -> str:
 
 
 def build_cases() -> list[SweepCase]:
-    seeds = list(range(2001, 2051))
+    seeds = list(range(2040, 2050))
 
     cases: list[SweepCase] = []
     for seed in seeds:
