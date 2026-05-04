@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import time
+import os
 
 import numpy as np
-import os
+
 from config import AppConfig
 from core.grid import build_grid
-from core.potentials import build_double_slit_and_caps
 from core.packets import PacketFactory
 from core.utils import norm_prob
 from core.simulation_types import PotentialSpec
@@ -26,8 +26,11 @@ from analysis.emix import (
     make_emix_density,
 )
 from analysis.posthoc_trf import (
-    run_posthoc_trf_selection,
+    PosthocTRFConfig,
     PosthocTRFResult,
+    run_posthoc_trf,
+    build_trf_corridor_masks_vis,
+    make_rho_from_density_product,
 )
 from analysis.ridge import compute_ridge_xy
 from analysis.current import alignment_and_diagnostics_from_state_frames
@@ -392,6 +395,7 @@ class BatchSamplerRuntime:
 class ForwardRunResult:
     frames_density: np.ndarray
     state_vis_frames: np.ndarray | None
+    posthoc_gamma_like_frames: np.ndarray | None
     times: np.ndarray
     norms: np.ndarray
     detector_diags: list[dict]
@@ -439,6 +443,10 @@ class BohmianResult:
 @dataclass
 class PosthocProducts:
     result: PosthocTRFResult | None = None
+    base_rho: np.ndarray | None = None
+    rho_selected: np.ndarray | None = None
+    corridor_upper_mask: np.ndarray | None = None
+    corridor_lower_mask: np.ndarray | None = None
 
 
 # ============================================================
@@ -580,8 +588,12 @@ class QuantumSimulationApp:
         batch_runtime = self.maybe_build_batch_sampler(setup)
         batch_cfg = self.build_batch_sampler_config()
 
+        save_posthoc_gamma_like = bool(getattr(cfg, "POSTHOC_SAVE_GAMMA_LIKE", True))
+        can_export_posthoc_fields = hasattr(theory, "compute_posthoc_support_fields")
+
         frames_density = []
         state_vis_frames = []
+        posthoc_gamma_like_frames = []
         times = []
         norms = []
 
@@ -630,10 +642,12 @@ class QuantumSimulationApp:
                 rho = theory.density(state)
                 norm_now = norm_prob(rho, grid.dx, grid.dy)
 
-                frames_density.append(rho[grid.ys, grid.xs].copy())
+                rho_vis = rho[grid.ys, grid.xs].copy()
+                frames_density.append(rho_vis)
                 times.append(t_now)
                 norms.append(norm_now)
 
+                state_vis = None
                 if cfg.SAVE_COMPLEX_STATE_FRAMES:
                     if state.ndim == 2:
                         state_vis = state[grid.ys, grid.xs].copy()
@@ -643,6 +657,25 @@ class QuantumSimulationApp:
                         raise ValueError(f"Unsupported state ndim={state.ndim}")
 
                     state_vis_frames.append(state_vis)
+
+                if save_posthoc_gamma_like and can_export_posthoc_fields:
+                    if state_vis is None:
+                        if state.ndim == 2:
+                            state_vis_for_posthoc = state[grid.ys, grid.xs]
+                        elif state.ndim == 3:
+                            state_vis_for_posthoc = state[:, grid.ys, grid.xs]
+                        else:
+                            raise ValueError(f"Unsupported state ndim={state.ndim}")
+                    else:
+                        state_vis_for_posthoc = state_vis
+
+                    try:
+                        support = theory.compute_posthoc_support_fields(state_vis_for_posthoc)
+                        gamma_like = support.get("gamma_like", None)
+                        if gamma_like is not None:
+                            posthoc_gamma_like_frames.append(np.asarray(gamma_like, dtype=np.float32))
+                    except Exception as e:
+                        print(f"[POSTHOC SUPPORT] skipped at save step {n}: {e}")
 
                 t_density += time.perf_counter() - t0
 
@@ -696,6 +729,11 @@ class QuantumSimulationApp:
         else:
             state_vis_frames = None
 
+        if len(posthoc_gamma_like_frames) > 0:
+            posthoc_gamma_like_frames = np.asarray(posthoc_gamma_like_frames, dtype=np.float32)
+        else:
+            posthoc_gamma_like_frames = None
+
         print("Forward done.")
 
         if batch_runtime.sampler is not None:
@@ -714,6 +752,7 @@ class QuantumSimulationApp:
         return ForwardRunResult(
             frames_density=frames_density,
             state_vis_frames=state_vis_frames,
+            posthoc_gamma_like_frames=posthoc_gamma_like_frames,
             times=times,
             norms=norms,
             detector_diags=detector_diags,
@@ -1119,35 +1158,55 @@ class QuantumSimulationApp:
         t_gap = L_gap / (abs(v_est) + 1e-12)
         sigma_init = 0.60 * t_gap
 
+        sigmaT_env = os.environ.get("POSTHOC_TRF_SIGMAT", None)
+        sigmaT_value = float(sigmaT_env) if sigmaT_env is not None else sigma_init
+
+        base_field_mode = str(getattr(cfg, "POSTHOC_TRF_BASE_FIELD", "density")).lower()
         rho_mode = getattr(cfg, "POSTHOC_TRF_RHO_MODE", "density_product_oldstyle")
         use_worldline = bool(getattr(cfg, "POSTHOC_USE_WORLDLINE", True))
 
-        sigmaT_env = os.environ.get("POSTHOC_TRF_SIGMAT", None)
-        sigmaT_value = float(sigmaT_env) if sigmaT_env is not None else sigma_init
-        
-        result = run_posthoc_trf_selection(
-            frames_psi=forward.state_vis_frames,
+        Emix_amp = build_Emix_from_phi_tau(
             phi_tau_frames=phi_tau_frames,
             times=forward.times,
             t_det=click.t_det,
-            dx=grid.dx,
-            dy=grid.dy,
-            X_vis=grid.X_vis,
-            Y_vis=grid.Y_vis,
-
-            x0=cfg.x0,
-            barrier_center_x=cfg.barrier_center_x,
-            screen_center_x=cfg.screen_center_x,
-            slit_center_offset=cfg.slit_center_offset,
-            v_est=v_est,
-
             sigmaT=sigmaT_value,
             tau_step=tau_step,
             K_JITTER=int(getattr(cfg, "K_JITTER", 13)),
+        )
 
-            make_rho_mode=rho_mode,
-            blend_alpha=float(getattr(cfg, "RHO_BLEND_ALPHA", 0.5)),
+        Emix_density = build_Emix_density_from_phi_tau(
+            phi_tau_frames=phi_tau_frames,
+            times=forward.times,
+            t_det=click.t_det,
+            sigmaT=sigmaT_value,
+            tau_step=tau_step,
+            K_JITTER=int(getattr(cfg, "K_JITTER", 13)),
+        )
 
+        if base_field_mode == "gamma_like":
+            if forward.posthoc_gamma_like_frames is None:
+                print("[POSTHOC] gamma_like requested but no posthoc_gamma_like_frames available; falling back to density.")
+                base_field_mode = "density"
+            else:
+                base_rho = make_rho_from_density_product(
+                    frames_density=forward.posthoc_gamma_like_frames,
+                    Emix_density=Emix_density,
+                    dx=grid.dx,
+                    dy=grid.dy,
+                )
+        if base_field_mode == "density":
+            base_rho = make_rho(
+                frames_psi=forward.state_vis_frames,
+                Emix=Emix_amp,
+                Emix_density=Emix_density,
+                dx=grid.dx,
+                dy=grid.dy,
+                mode=rho_mode,
+                blend_alpha=float(getattr(cfg, "RHO_BLEND_ALPHA", 0.5)),
+            )
+
+        posthoc_cfg = PosthocTRFConfig(
+            enabled=True,
             use_adaptive_ref=bool(getattr(cfg, "POSTHOC_TRF_USE_ADAPTIVE_REF", True)),
             ref_t_min_frac=float(getattr(cfg, "POSTHOC_TRF_REF_T_MIN_FRAC", 0.30)),
             ref_t_max_frac=float(getattr(cfg, "POSTHOC_TRF_REF_T_MAX_FRAC", 0.95)),
@@ -1155,17 +1214,48 @@ class QuantumSimulationApp:
             corridor_y_sigma=float(getattr(cfg, "POSTHOC_TRF_CORRIDOR_Y_SIGMA", 1.3)),
             corridor_x_weight_power=float(getattr(cfg, "POSTHOC_TRF_CORRIDOR_X_WEIGHT_POWER", 2.5)),
             valid_total_evidence_eps=float(getattr(cfg, "POSTHOC_TRF_VALID_TOTAL_EVIDENCE_EPS", 1e-12)),
-
-            use_worldline=use_worldline,
-            worldline_track_radius_px=int(getattr(cfg, "POSTHOC_WL_TRACK_RADIUS_PX", 20)),
-            worldline_min_local_rel=float(getattr(cfg, "POSTHOC_WL_MIN_LOCAL_REL", 0.03)),
-            worldline_tube_sigma_px=float(getattr(cfg, "POSTHOC_WL_TUBE_SIGMA_PX", 10.0)),
-            worldline_gain_strength=float(getattr(cfg, "POSTHOC_WL_GAIN_STRENGTH", 2.0)),
-            worldline_outside_damp=float(getattr(cfg, "POSTHOC_WL_OUTSIDE_DAMP", 0.20)),
-            worldline_time_ramp_frac=float(getattr(cfg, "POSTHOC_WL_TIME_RAMP_FRAC", 0.12)),
+            use_posthoc_worldline=use_worldline,
+            wl_track_radius_px=int(getattr(cfg, "POSTHOC_WL_TRACK_RADIUS_PX", 20)),
+            wl_min_local_rel=float(getattr(cfg, "POSTHOC_WL_MIN_LOCAL_REL", 0.03)),
+            wl_tube_sigma_px=float(getattr(cfg, "POSTHOC_WL_TUBE_SIGMA_PX", 10.0)),
+            wl_gain_strength=float(getattr(cfg, "POSTHOC_WL_GAIN_STRENGTH", 2.0)),
+            wl_outside_damp=float(getattr(cfg, "POSTHOC_WL_OUTSIDE_DAMP", 0.20)),
+            wl_time_ramp_frac=float(getattr(cfg, "POSTHOC_WL_TIME_RAMP_FRAC", 0.12)),
         )
 
-        return PosthocProducts(result=result)
+        result = run_posthoc_trf(
+            base_rho=base_rho,
+            times=forward.times,
+            X_vis=grid.X_vis,
+            Y_vis=grid.Y_vis,
+            barrier_center_x=cfg.barrier_center_x,
+            screen_center_x=cfg.screen_center_x,
+            slit_center_offset=cfg.slit_center_offset,
+            dx=grid.dx,
+            dy=grid.dy,
+            cfg=posthoc_cfg,
+        )
+
+        corridor_upper_mask, corridor_lower_mask, _ = build_trf_corridor_masks_vis(
+            X_vis=grid.X_vis,
+            Y_vis=grid.Y_vis,
+            barrier_center_x=cfg.barrier_center_x,
+            screen_center_x=cfg.screen_center_x,
+            slit_center_offset=cfg.slit_center_offset,
+            cfg=posthoc_cfg,
+        )
+
+        rho_selected = result.aux.get("rho_worldline", None)
+        if rho_selected is not None:
+            rho_selected = np.asarray(rho_selected)
+
+        return PosthocProducts(
+            result=result,
+            base_rho=np.asarray(base_rho),
+            rho_selected=rho_selected,
+            corridor_upper_mask=np.asarray(corridor_upper_mask),
+            corridor_lower_mask=np.asarray(corridor_lower_mask),
+        )
 
     def print_posthoc_summary(self, posthoc: PosthocProducts):
         if posthoc.result is None:
@@ -1173,32 +1263,30 @@ class QuantumSimulationApp:
             return
 
         res = posthoc.result
-        trf = res.trf_info
 
         print(
             "[POSTHOC TRF] "
-            f"valid={trf.valid} "
-            f"chosen={trf.chosen_side} "
-            f"ref_idx={trf.ref_idx} "
-            f"ref_time={trf.ref_time:.6f} "
-            f"upper_ev={trf.upper_evidence:.6e} "
-            f"lower_ev={trf.lower_evidence:.6e} "
-            f"total_ev={trf.total_evidence:.6e} "
-            f"abs_margin={trf.abs_margin:.6e} "
-            f"rel_margin={trf.rel_margin:.6f} "
-            f"dominance={trf.dominance:.6f} "
-            f"ratio={trf.ratio:.6f} "
-            f"adaptive_score={trf.adaptive_score:.6e}"
+            f"valid={res.valid} "
+            f"chosen={res.chosen_side} "
+            f"ref_idx={res.ref_idx} "
+            f"ref_time={res.ref_time:.6f} "
+            f"upper_ev={res.upper_evidence:.6e} "
+            f"lower_ev={res.lower_evidence:.6e} "
+            f"total_ev={res.total_evidence:.6e} "
+            f"abs_margin={res.abs_margin:.6e} "
+            f"rel_margin={res.rel_margin:.6f} "
+            f"dominance={res.dominance:.6f} "
+            f"ratio={res.ratio:.6f} "
+            f"adaptive_score={res.adaptive_score:.6e}"
         )
 
-        if res.worldline is not None:
-            wl = res.worldline
+        if res.worldline_used:
             print(
                 "[POSTHOC WL] "
                 f"used=True "
-                f"seed_side={wl.seed_side} "
-                f"seed_x={wl.seed_x:.6f} "
-                f"seed_y={wl.seed_y:.6f}"
+                f"seed_side={res.worldline_seed_side} "
+                f"seed_x={res.worldline_seed_x:.6f} "
+                f"seed_y={res.worldline_seed_y:.6f}"
             )
         else:
             print("[POSTHOC WL] used=False")
@@ -1419,49 +1507,40 @@ class QuantumSimulationApp:
 
         if posthoc.result is not None:
             res = posthoc.result
-            trf = res.trf_info
 
-            posthoc_base_rho = res.base_rho
-            posthoc_selected_rho = res.rho_selected
-
-            if res.corridor_masks is not None:
-                posthoc_corridor_upper_mask = res.corridor_masks.upper
-                posthoc_corridor_lower_mask = res.corridor_masks.lower
+            posthoc_base_rho = posthoc.base_rho
+            posthoc_selected_rho = posthoc.rho_selected
+            posthoc_corridor_upper_mask = posthoc.corridor_upper_mask
+            posthoc_corridor_lower_mask = posthoc.corridor_lower_mask
 
             posthoc_trf_info = {
-                "valid": bool(trf.valid),
-                "ref_idx": int(trf.ref_idx),
-                "ref_time": float(trf.ref_time),
-                "chosen_side": trf.chosen_side,
+                "valid": bool(res.valid),
+                "ref_idx": None if res.ref_idx is None else int(res.ref_idx),
+                "ref_time": None if res.ref_time is None else float(res.ref_time),
+                "chosen_side": res.chosen_side,
 
-                "upper_evidence": float(trf.upper_evidence),
-                "lower_evidence": float(trf.lower_evidence),
-                "total_evidence": float(trf.total_evidence),
+                "upper_evidence": float(res.upper_evidence),
+                "lower_evidence": float(res.lower_evidence),
+                "total_evidence": float(res.total_evidence),
 
-                "abs_margin": float(trf.abs_margin),
-                "rel_margin": float(trf.rel_margin),
-                "ratio": float(trf.ratio),
-                "dominance": float(trf.dominance),
-                "adaptive_score": float(trf.adaptive_score),
+                "abs_margin": float(res.abs_margin),
+                "rel_margin": float(res.rel_margin),
+                "ratio": float(res.ratio),
+                "dominance": float(res.dominance),
+                "adaptive_score": float(res.adaptive_score),
 
-                "upper_seed_x": float(trf.upper_seed_x),
-                "upper_seed_y": float(trf.upper_seed_y),
-                "lower_seed_x": float(trf.lower_seed_x),
-                "lower_seed_y": float(trf.lower_seed_y),
+                "upper_seed_x": None if res.upper_seed_x is None else float(res.upper_seed_x),
+                "upper_seed_y": None if res.upper_seed_y is None else float(res.upper_seed_y),
+                "lower_seed_x": None if res.lower_seed_x is None else float(res.lower_seed_x),
+                "lower_seed_y": None if res.lower_seed_y is None else float(res.lower_seed_y),
             }
 
-            if res.worldline is not None:
-                wl = res.worldline
-                posthoc_worldline_info = {
-                    "used": True,
-                    "seed_x": float(wl.seed_x),
-                    "seed_y": float(wl.seed_y),
-                    "seed_side": str(wl.seed_side),
-                }
-            else:
-                posthoc_worldline_info = {
-                    "used": False,
-                }
+            posthoc_worldline_info = {
+                "used": bool(res.worldline_used),
+                "seed_x": None if res.worldline_seed_x is None else float(res.worldline_seed_x),
+                "seed_y": None if res.worldline_seed_y is None else float(res.worldline_seed_y),
+                "seed_side": res.worldline_seed_side,
+            }
 
         save_run_bundle(
             output_prefix=self.get_output_prefix(),
@@ -1495,7 +1574,6 @@ class QuantumSimulationApp:
             bohm_traj_y=bohm.bohm_traj_y,
             bohm_traj_alive=bohm.bohm_traj_alive,
             bohm_init_points=bohm.bohm_init_points,
-
             posthoc_base_rho=posthoc_base_rho,
             posthoc_selected_rho=posthoc_selected_rho,
             posthoc_corridor_upper_mask=posthoc_corridor_upper_mask,
@@ -1503,7 +1581,7 @@ class QuantumSimulationApp:
             posthoc_trf_info=posthoc_trf_info,
             posthoc_worldline_info=posthoc_worldline_info,
         )
-        
+
     # --------------------------------------------------------
     # Full run
     # --------------------------------------------------------
@@ -1571,13 +1649,13 @@ class QuantumSimulationApp:
             click=click,
         )
         self.print_posthoc_summary(posthoc)
-        if posthoc.result is not None:
+        if posthoc.result is not None and posthoc.base_rho is not None:
             print(
                 "[POSTHOC SAVE READY] "
-                f"base_rho_shape={posthoc.result.base_rho.shape} "
-                f"selected_rho={'yes' if posthoc.result.rho_selected is not None else 'no'}"
+                f"base_rho_shape={posthoc.base_rho.shape} "
+                f"selected_rho={'yes' if posthoc.rho_selected is not None else 'no'}"
             )
-            
+
         sigma_products = self.build_sigma_products(
             setup=setup,
             forward=forward,
@@ -1612,17 +1690,13 @@ class QuantumSimulationApp:
         print("frame0 Emix density max:", np.max(make_emix_density(sigma_products.Emix_init)[0]))
         print("frame0 overlap rho max:", np.max(sigma_products.rho_init[0]))
 
-        if posthoc.result is not None:
-            print("frame0 posthoc base_rho max:", np.max(posthoc.result.base_rho[0]))
-            if posthoc.result.rho_selected is not None:
-                print("frame0 posthoc selected_rho max:", np.max(posthoc.result.rho_selected[0]))
+        if posthoc.base_rho is not None:
+            print("frame0 posthoc base_rho max:", np.max(posthoc.base_rho[0]))
+            if posthoc.rho_selected is not None:
+                print("frame0 posthoc selected_rho max:", np.max(posthoc.rho_selected[0]))
 
         print("Simulation done.")
         print("Use visualize.py for animation, slider and debug plots.")
-
-    # --------------------------------------------------------
-    # Entry point wrapper
-    # --------------------------------------------------------
 
 
 # ============================================================

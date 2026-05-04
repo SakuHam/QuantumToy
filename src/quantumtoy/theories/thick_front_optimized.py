@@ -70,6 +70,7 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         5) competition can be boosted near the detector / screen region
         6) flow competition is sped up by evaluating only active pixels
         7) optional subclass hook can inject worldline / frozen-bias effects
+        8) post hoc helper can export lightweight support fields for saved frames
     """
 
     # --------------------------------------------------------
@@ -154,6 +155,12 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
     front_debug_plot_every: int = 1
     front_debug_quiver_stride: int = 24
     front_debug_abs2_floor: float = 1e-10
+
+    # --------------------------------------------------------
+    # Post hoc export helper
+    # --------------------------------------------------------
+
+    front_export_posthoc_fields: bool = False
 
     # --------------------------------------------------------
     # Validation
@@ -255,6 +262,11 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         _assert(
             self.front_branch_detector_gate_boost >= 0.0,
             "front_branch_detector_gate_boost must be >= 0",
+        )
+
+        _assert(
+            isinstance(self.front_export_posthoc_fields, bool),
+            "front_export_posthoc_fields must be bool",
         )
 
         self._debug_plot_counter = 0
@@ -585,17 +597,11 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
 
         gamma_like = self._make_gamma_like(rho, align_real)
 
-        # ----------------------------------------------------
-        # Active pixels only
-        # ----------------------------------------------------
         active = valid_mask.copy()
-
-        # Optional extra restriction: if gamma_like is exactly zero, it cannot compete anyway
         active &= (gamma_like > 0.0)
 
         ys, xs = np.where(active)
 
-        # If no active pixels, return zero fields quickly
         if ys.size == 0:
             zero = np.zeros_like(gamma_like, dtype=float)
             one_gate = np.ones_like(gamma_like, dtype=float)
@@ -612,7 +618,6 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         ux_a = ux[ys, xs]
         uy_a = uy[ys, xs]
 
-        # local normal direction n = (-uy, ux)
         nx_a = -uy_a
         ny_a = ux_a
 
@@ -630,16 +635,12 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
             uy_s = self._wrapped_take(uy, ys, xs, dy, dx)
             valid_s = self._wrapped_take(valid_mask, ys, xs, dy, dx)
 
-            # Direction mismatch:
-            # 0 = same/opposite line direction if abs(dot)=1
-            # 1 = orthogonal
             dot_dir = np.clip(ux_a * ux_s + uy_a * uy_s, -1.0, 1.0)
             dir_mismatch = np.maximum(1.0 - np.abs(dot_dir), 0.0)
 
             if mismatch_pow != 1.0:
                 dir_mismatch = dir_mismatch ** mismatch_pow
 
-            # Prefer competitors across the local flow, not along it
             transverse = np.abs(nx_a * ox + ny_a * oy)
 
             if transverse_pow != 1.0 and transverse_pow > 0.0:
@@ -678,7 +679,6 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         else:
             competition_gate = np.ones_like(gamma_like, dtype=float)
 
-        # Scatter back to full-size fields
         neighbor_max = np.zeros_like(gamma_like, dtype=float)
         competition_raw = np.zeros_like(gamma_like, dtype=float)
         transverse_best = np.zeros_like(gamma_like, dtype=float)
@@ -770,6 +770,50 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         return psi_new, {}
 
     # --------------------------------------------------------
+    # Post hoc support export
+    # --------------------------------------------------------
+
+    def compute_posthoc_support_fields(self, state: np.ndarray) -> dict:
+        """
+        Compute lightweight fields for post hoc TRF analysis.
+
+        Intended use:
+            call this only on saved frames in the main run loop.
+
+        Returned fields are based on the current state, not on hidden internal
+        psi_tmp from _front_sharpen. That keeps the API simple and avoids
+        bloating TheoryStepResult aux with large 2D arrays every step.
+        """
+        _assert_complex_array_2d(state, "state(posthoc_support_fields)")
+
+        align_real, rho, _ = self._coherence_alignment_score(state)
+        gamma_like = self._make_gamma_like(rho, align_real)
+
+        out = {
+            "rho": rho.astype(np.float32),
+            "align_real": align_real.astype(np.float32),
+            "gamma_like": gamma_like.astype(np.float32),
+        }
+
+        if self.front_branch_use_flow_direction:
+            (
+                _jx,
+                _jy,
+                _rho2,
+                speed,
+                ux,
+                uy,
+                valid_mask,
+            ) = self._flow_direction_field(state)
+
+            out["speed"] = speed.astype(np.float32)
+            out["ux"] = ux.astype(np.float32)
+            out["uy"] = uy.astype(np.float32)
+            out["flow_valid_mask"] = valid_mask.astype(np.uint8)
+
+        return out
+
+    # --------------------------------------------------------
     # Front operator
     # --------------------------------------------------------
 
@@ -821,22 +865,13 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         gain_dt = np.clip(gain * dt, -self.front_clip, self.front_clip)
         _assert_real_array_2d(gain_dt, "gain_dt")
 
-        # --------------------------------------------
-        # First stage: sharpening
-        # --------------------------------------------
         psi_tmp = psi * np.exp(gain_dt)
         _assert_complex_array_2d(psi_tmp, "psi_tmp")
 
         prob_after_gain = self._state_probability(psi_tmp)
 
-        # --------------------------------------------
-        # Recompute coherence from sharpened psi_tmp
-        # --------------------------------------------
         align_real_tmp, rho_tmp, u_local_tmp = self._coherence_alignment_score(psi_tmp)
 
-        # --------------------------------------------
-        # Flow field from sharpened psi_tmp
-        # --------------------------------------------
         jx_tmp = None
         jy_tmp = None
         speed_tmp = None
@@ -871,9 +906,6 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         transverse_best = None
         direction_mismatch_best = None
 
-        # --------------------------------------------
-        # Second stage: competition from psi_tmp
-        # --------------------------------------------
         if self.front_branch_competition_strength > 0.0:
             (
                 gamma_like,
@@ -919,9 +951,6 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         _assert_complex_array_2d(psi_new, "psi_new(after competition)")
         prob_after_comp = self._state_probability(psi_new)
 
-        # --------------------------------------------
-        # Optional subclass worldline / frozen-bias hook
-        # --------------------------------------------
         psi_new, aux_worldline = self._apply_optional_worldline_bias(
             psi_new=psi_new,
             psi_tmp=psi_tmp,
@@ -933,9 +962,6 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         _assert_complex_array_2d(psi_new, "psi_new(after worldline hook)")
         prob_after_worldline = self._state_probability(psi_new)
 
-        # --------------------------------------------
-        # Optional tiny phase pull toward sharpened local coherent phase
-        # --------------------------------------------
         if self.front_phase_relax_strength > 0.0:
             amp = np.abs(psi_new)
             u = psi_new / np.maximum(amp, self.front_eps)
@@ -1024,6 +1050,18 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
 
         if aux_worldline:
             aux_front["worldline"] = aux_worldline
+
+        if self.front_export_posthoc_fields:
+            aux_front["posthoc_fields"] = {
+                "rho_tmp": rho_tmp.astype(np.float32),
+                "align_real_tmp": align_real_tmp.astype(np.float32),
+                "gamma_like": gamma_like.astype(np.float32),
+            }
+            if speed_tmp is not None:
+                aux_front["posthoc_fields"]["speed_tmp"] = speed_tmp.astype(np.float32)
+                aux_front["posthoc_fields"]["ux_tmp"] = ux_tmp.astype(np.float32)
+                aux_front["posthoc_fields"]["uy_tmp"] = uy_tmp.astype(np.float32)
+                aux_front["posthoc_fields"]["flow_valid_mask"] = flow_valid_mask.astype(np.uint8)
 
         if self.front_debug_plot_enabled and (competition_raw is not None):
             comp_max = float(np.max(competition_raw))
@@ -1136,6 +1174,8 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
             "front_branch_detector_gate_center_x": float(self.front_branch_detector_gate_center_x),
             "front_branch_detector_gate_width": float(self.front_branch_detector_gate_width),
             "front_branch_detector_gate_boost": float(self.front_branch_detector_gate_boost),
+
+            "front_export_posthoc_fields": bool(self.front_export_posthoc_fields),
 
             "prob_after_base": float(prob_after_base),
             "prob_before_norm": float(prob_before_norm),
@@ -1316,66 +1356,48 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
     worldline_bias_enabled: bool = True
     worldline_bias_mode: str = "forced_weaker_branch"
 
-    # peak picking
     worldline_peak_radius_px: int = 18
     worldline_peak_rel_threshold: float = 0.03
     worldline_top_peaks_to_print: int = 3
     worldline_print_peak_info: bool = True
 
-    # bias field shape
     worldline_bias_sigma_px: float = 10.0
     worldline_bias_gain_strength: float = 2.0
     worldline_bias_competition_strength: float = 0.20
 
-    # gate from current local structure
     worldline_bias_gamma_power: float = 1.0
     worldline_bias_align_power: float = 1.0
     worldline_bias_blur_sigma: float = 1.0
 
-    # runtime / persistence
     worldline_bias_persistent: bool = True
     worldline_time_ramp_strength: float = 1.0
 
-    # internal runtime state
     def __post_init__(self):
         super().__post_init__()
 
         valid_modes = {"off", "gain", "competition", "both", "forced_weaker_branch"}
-        _assert(self.worldline_bias_mode in valid_modes,
-                f"worldline_bias_mode must be one of {sorted(valid_modes)}, got {self.worldline_bias_mode}")
+        _assert(
+            self.worldline_bias_mode in valid_modes,
+            f"worldline_bias_mode must be one of {sorted(valid_modes)}, got {self.worldline_bias_mode}",
+        )
 
-        _assert(isinstance(self.worldline_peak_radius_px, int),
-                "worldline_peak_radius_px must be int")
-        _assert(self.worldline_peak_radius_px >= 1,
-                "worldline_peak_radius_px must be >= 1")
+        _assert(isinstance(self.worldline_peak_radius_px, int), "worldline_peak_radius_px must be int")
+        _assert(self.worldline_peak_radius_px >= 1, "worldline_peak_radius_px must be >= 1")
 
-        _assert(self.worldline_peak_rel_threshold >= 0.0,
-                "worldline_peak_rel_threshold must be >= 0")
-        _assert(self.worldline_top_peaks_to_print >= 1,
-                "worldline_top_peaks_to_print must be >= 1")
-        _assert(self.worldline_bias_sigma_px > 0.0,
-                "worldline_bias_sigma_px must be > 0")
-        _assert(self.worldline_bias_gain_strength >= 0.0,
-                "worldline_bias_gain_strength must be >= 0")
-        _assert(self.worldline_bias_competition_strength >= 0.0,
-                "worldline_bias_competition_strength must be >= 0")
-        _assert(self.worldline_bias_gamma_power >= 0.0,
-                "worldline_bias_gamma_power must be >= 0")
-        _assert(self.worldline_bias_align_power >= 0.0,
-                "worldline_bias_align_power must be >= 0")
-        _assert(self.worldline_bias_blur_sigma >= 0.0,
-                "worldline_bias_blur_sigma must be >= 0")
-        _assert(self.worldline_time_ramp_strength >= 0.0,
-                "worldline_time_ramp_strength must be >= 0")
+        _assert(self.worldline_peak_rel_threshold >= 0.0, "worldline_peak_rel_threshold must be >= 0")
+        _assert(self.worldline_top_peaks_to_print >= 1, "worldline_top_peaks_to_print must be >= 1")
+        _assert(self.worldline_bias_sigma_px > 0.0, "worldline_bias_sigma_px must be > 0")
+        _assert(self.worldline_bias_gain_strength >= 0.0, "worldline_bias_gain_strength must be >= 0")
+        _assert(self.worldline_bias_competition_strength >= 0.0, "worldline_bias_competition_strength must be >= 0")
+        _assert(self.worldline_bias_gamma_power >= 0.0, "worldline_bias_gamma_power must be >= 0")
+        _assert(self.worldline_bias_align_power >= 0.0, "worldline_bias_align_power must be >= 0")
+        _assert(self.worldline_bias_blur_sigma >= 0.0, "worldline_bias_blur_sigma must be >= 0")
+        _assert(self.worldline_time_ramp_strength >= 0.0, "worldline_time_ramp_strength must be >= 0")
 
         self._worldline_bias_initialized = False
         self._worldline_bias_field = None
         self._worldline_selected_peak = None
         self._worldline_step_counter = 0
-
-    # --------------------------------------------------------
-    # Public helper
-    # --------------------------------------------------------
 
     def reset_runtime_state(self):
         """
@@ -1387,10 +1409,6 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
         self._worldline_step_counter = 0
         self._debug_plot_counter = 0
         self._debug_plot_done = False
-
-    # --------------------------------------------------------
-    # Local helpers
-    # --------------------------------------------------------
 
     def _build_gaussian_mask_px(self, iy_center: int, ix_center: int, shape, sigma_px: float):
         ny, nx = shape
@@ -1480,8 +1498,6 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
                 mode="wrap",
             )
 
-        # Zero-mean signed field:
-        # positive near selected branch / path, negative elsewhere.
         field = bump - float(np.mean(bump))
 
         maxabs = float(np.max(np.abs(field)))
@@ -1522,10 +1538,6 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
 
         _assert_real_array_2d(gate, "worldline_gate")
         return gate
-
-    # --------------------------------------------------------
-    # Hook override
-    # --------------------------------------------------------
 
     def _apply_optional_worldline_bias(
         self,
