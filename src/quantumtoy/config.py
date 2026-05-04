@@ -58,7 +58,7 @@ class AppConfig:
     # ============================================================
     # Theory
     # ============================================================
-    THEORY_NAME: str = "thick_front_optimized"
+    THEORY_NAME: str = "thick_front_entanglement"
 
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5

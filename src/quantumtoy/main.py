@@ -49,6 +49,62 @@ from core.potentials import build_potential
 # Standalone helpers
 # ============================================================
 
+def state_density_for_runner(state, theory=None):
+    """
+    Return scalar 2D density rho[y, x] for all supported theory states.
+    """
+    if theory is not None and hasattr(theory, "density"):
+        try:
+            rho = theory.density(state)
+            rho = np.asarray(rho, dtype=float)
+            if rho.ndim == 2:
+                return rho
+        except Exception:
+            pass
+
+    if not isinstance(state, np.ndarray):
+        raise TypeError(f"state must be np.ndarray, got {type(state)}")
+
+    if state.ndim == 2:
+        return np.abs(state) ** 2
+
+    if state.ndim == 3 and state.shape[0] == 2:
+        return np.sum(np.abs(state) ** 2, axis=0)
+
+    if state.ndim == 4 and state.shape[-2:] == (2, 2):
+        return np.sum(np.abs(state) ** 2, axis=(-2, -1))
+
+    raise ValueError(f"Unsupported state shape for density: {state.shape}")
+
+def detector_compatible_state(state: np.ndarray) -> np.ndarray:
+    if not isinstance(state, np.ndarray):
+        return state
+
+    if state.ndim == 4 and state.shape[-2:] == (2, 2):
+        rho = np.sum(np.abs(state) ** 2, axis=(-2, -1)).astype(float)
+        amp = np.sqrt(np.maximum(rho, 0.0))
+
+        # Use phase of locally strongest spin component.
+        comp_abs2 = np.abs(state) ** 2
+        flat_idx = np.argmax(comp_abs2.reshape(state.shape[0], state.shape[1], 4), axis=-1)
+
+        comps = [
+            state[:, :, 0, 0],
+            state[:, :, 0, 1],
+            state[:, :, 1, 0],
+            state[:, :, 1, 1],
+        ]
+
+        phase_src = np.zeros(state.shape[:2], dtype=np.complex128)
+        for k, comp in enumerate(comps):
+            mask = flat_idx == k
+            phase_src[mask] = comp[mask]
+
+        phase = phase_src / np.maximum(np.abs(phase_src), 1e-12)
+        return (amp * phase).astype(np.complex128)
+
+    return state
+
 def estimate_slit_separation_from_masks(grid, potential):
     """
     Estimate slit separation d from slit masks.
@@ -630,7 +686,7 @@ class QuantumSimulationApp:
                 t_batch += time.perf_counter() - t0
 
             t0 = time.perf_counter()
-            det_res = detector.step(state, cfg.dt, t=t_now)
+            det_res = detector.step(detector_compatible_state(state), cfg.dt, t=t_now)
             t_detector += time.perf_counter() - t0
 
             detector_diags.append(det_res.aux if det_res.aux is not None else {})
@@ -649,12 +705,7 @@ class QuantumSimulationApp:
 
                 state_vis = None
                 if cfg.SAVE_COMPLEX_STATE_FRAMES:
-                    if state.ndim == 2:
-                        state_vis = state[grid.ys, grid.xs].copy()
-                    elif state.ndim == 3:
-                        state_vis = state[:, grid.ys, grid.xs].copy()
-                    else:
-                        raise ValueError(f"Unsupported state ndim={state.ndim}")
+                    state_vis = state_density_for_runner(state, theory=theory)
 
                     state_vis_frames.append(state_vis)
 

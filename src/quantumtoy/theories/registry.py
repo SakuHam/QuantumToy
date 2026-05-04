@@ -13,6 +13,7 @@ from theories.thick_front_measurement_guided import ThickFrontMeasurementGuidedT
 from theories.metric_aware_schrodinger import MetricAwareSchrodingerTheory
 from theories.tensor_metric_aware_schrodinger import TensorMetricAwareSchrodingerTheory
 from theories.rotating_tensor_metric_aware_schrodinger import RotatingTensorMetricAwareSchrodingerTheory
+from theories.thick_front_entanglement import ThickFrontEntanglementTheory
 
 # ============================================================
 # Validation helpers
@@ -210,6 +211,14 @@ def build_theory(cfg, grid, potential):
     
     elif theory_name == "thick_front":
         theory = ThickFrontTheory(
+            grid=grid,
+            potential=potential,
+            m_mass=m_mass,
+            hbar=hbar,
+        )
+
+    elif theory_name == "thick_front_entanglement":
+        theory = ThickFrontEntanglementTheory(
             grid=grid,
             potential=potential,
             m_mass=m_mass,
