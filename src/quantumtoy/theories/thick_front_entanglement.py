@@ -544,6 +544,91 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         self._ent_selected_peak = None
         self._ent_initialized = False
         self._ent_step_counter = 0
+
+    def initialize_click_state(
+        self,
+        x_click: float,
+        y_click: float,
+        sigma_click: float,
+    ) -> np.ndarray:
+        """
+        Build a 4D entangled/spin-channel click state for backward propagation.
+
+        The spatial part is a scalar Gaussian click packet centered at
+        (x_click, y_click). Then it is lifted into the same spin structure
+        as initialize_state().
+
+        Returns:
+            phi.shape == (Ny, Nx, 2, 2)
+        """
+        x = self.grid.X
+        y = self.grid.Y
+
+        sigma_click = _assert_positive_scalar(sigma_click, "sigma_click")
+
+        spatial = np.exp(
+            -0.5 * (
+                ((x - float(x_click)) / sigma_click) ** 2
+                + ((y - float(y_click)) / sigma_click) ** 2
+            )
+        ).astype(np.complex128)
+
+        mode = str(self.ent_initial_spin_state)
+
+        if mode == "singlet":
+            phi = self.make_singlet_spinor_state(spatial)
+
+        elif mode == "plus_plus":
+            phi = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
+            phi[:, :, 0, 0] = spatial
+
+        elif mode == "plus_minus":
+            phi = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
+            phi[:, :, 0, 1] = spatial
+
+        elif mode == "minus_plus":
+            phi = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
+            phi[:, :, 1, 0] = spatial
+
+        elif mode == "minus_minus":
+            phi = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
+            phi[:, :, 1, 1] = spatial
+
+        elif mode == "product":
+            if self.ent_initial_spin_a is None:
+                spin_a = np.asarray([1.0, 0.0], dtype=np.complex128)
+            else:
+                spin_a = np.asarray(self.ent_initial_spin_a, dtype=np.complex128)
+
+            if self.ent_initial_spin_b is None:
+                spin_b = np.asarray([1.0, 0.0], dtype=np.complex128)
+            else:
+                spin_b = np.asarray(self.ent_initial_spin_b, dtype=np.complex128)
+
+            phi = self.make_product_spinor_state(
+                spatial=spatial,
+                spin_a=spin_a,
+                spin_b=spin_b,
+            )
+
+        else:
+            raise ValueError(f"Unknown ent_initial_spin_state={mode!r}")
+
+        phi, norm_factor = _normalize_unit_spinor_4d(phi, self.grid.dx, self.grid.dy)
+        phi = phi.astype(np.complex128)
+
+        if self.front_debug_checks:
+            prob = self._state_probability(phi)
+            _assert(
+                np.isclose(prob, 1.0, atol=self.front_norm_tol),
+                f"initialize_click_state normalized probability should be 1, got {prob}",
+            )
+            _assert(
+                np.isfinite(float(norm_factor)) and float(norm_factor) > 0.0,
+                f"initialize_click_state norm_factor invalid: {norm_factor}",
+            )
+
+        return phi
         
     # --------------------------------------------------------
     # Runtime reset

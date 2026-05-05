@@ -303,11 +303,15 @@ def run_diagnostics(
 
     phi0_full = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
     if phi0_full.ndim == 2:
-        phi0_vis_ref = phi0_full[grid.ys, grid.xs]
+        phi0_vis_ref = np.abs(phi0_full) ** 2
     elif phi0_full.ndim == 3:
-        phi0_vis_ref = phi0_full[:, grid.ys, grid.xs]
+        # Dirac-like / component-first spinor: (C, Ny, Nx)
+        phi0_vis_ref = np.sum(np.abs(phi0_full) ** 2, axis=0)
+    elif phi0_full.ndim == 4 and phi0_full.shape[-2:] == (2, 2):
+        # Entangled spinor: (Ny, Nx, 2, 2)
+        phi0_vis_ref = np.sum(np.abs(phi0_full) ** 2, axis=(-2, -1))
     else:
-        raise ValueError(f"Unsupported phi0_full ndim={phi0_full.ndim}")
+        raise ValueError(f"Unsupported phi0_full shape={phi0_full.shape}")
 
     phi0_diff = float(np.max(np.abs(phi_tau_frames[0] - phi0_vis_ref)))
     print(f"[DIAG D3] phi_tau_frames[0] max abs diff vs click-state crop = {phi0_diff:.6e}")

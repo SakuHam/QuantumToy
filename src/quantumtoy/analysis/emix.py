@@ -48,15 +48,23 @@ def _assert_visible_shapes(
     _assert(frames_density.ndim == 3, f"frames_density must have ndim=3, got {frames_density.ndim}")
     Nt, Ny, Nx = frames_density.shape
 
-    _assert(screen_mask_vis.shape == (Ny, Nx),
-            f"screen_mask_vis shape {screen_mask_vis.shape} must match visible frame shape {(Ny, Nx)}")
-    _assert(X_vis.shape == (Ny, Nx),
-            f"X_vis shape {X_vis.shape} must match visible frame shape {(Ny, Nx)}")
-    _assert(Y_vis.shape == (Ny, Nx),
-            f"Y_vis shape {Y_vis.shape} must match visible frame shape {(Ny, Nx)}")
+    _assert(
+        screen_mask_vis.shape == (Ny, Nx),
+        f"screen_mask_vis shape {screen_mask_vis.shape} must match visible frame shape {(Ny, Nx)}",
+    )
+    _assert(
+        X_vis.shape == (Ny, Nx),
+        f"X_vis shape {X_vis.shape} must match visible frame shape {(Ny, Nx)}",
+    )
+    _assert(
+        Y_vis.shape == (Ny, Nx),
+        f"Y_vis shape {Y_vis.shape} must match visible frame shape {(Ny, Nx)}",
+    )
 
-    _assert(np.issubdtype(screen_mask_vis.dtype, np.bool_),
-            f"screen_mask_vis must be boolean, got dtype={screen_mask_vis.dtype}")
+    _assert(
+        np.issubdtype(screen_mask_vis.dtype, np.bool_),
+        f"screen_mask_vis must be boolean, got dtype={screen_mask_vis.dtype}",
+    )
     _assert(np.all(np.isfinite(frames_density)), "frames_density contains non-finite values")
     _assert(np.all(frames_density >= -1e-14), "frames_density contains significantly negative values")
     _assert(np.all(np.isfinite(X_vis)), "X_vis contains non-finite values")
@@ -64,51 +72,141 @@ def _assert_visible_shapes(
     _assert(Nt > 0 and Ny > 0 and Nx > 0, "frames_density must be non-empty in all dimensions")
 
 
+def _grid_shape(grid) -> tuple[int, int]:
+    """
+    Return full-grid shape as (Ny, Nx).
+
+    Supports both grid.Ny/grid.Nx and grid.y/grid.x style grids.
+    """
+    if hasattr(grid, "Ny") and hasattr(grid, "Nx"):
+        return int(grid.Ny), int(grid.Nx)
+
+    if hasattr(grid, "y") and hasattr(grid, "x"):
+        return int(np.asarray(grid.y).size), int(np.asarray(grid.x).size)
+
+    raise AttributeError("grid must expose either Ny/Nx or y/x")
+
+
+def _visible_shape(grid) -> tuple[int, int]:
+    """
+    Return visible-grid shape as (Ny_vis, Nx_vis).
+    """
+    return int(grid.n_visible_y), int(grid.n_visible_x)
+
+
 def _assert_state_shape_matches_grid(state: np.ndarray, grid, name: str):
+    """
+    Validate state shape against full grid.
+
+    Supported full-grid states:
+      - scalar Schrödinger:      (Ny, Nx)
+      - Dirac-like spinor:       (C, Ny, Nx)
+      - entangled spinor:        (Ny, Nx, 2, 2)
+    """
     _assert(isinstance(state, np.ndarray), f"{name} must be np.ndarray")
-    _assert(state.ndim in (2, 3), f"{name} ndim must be 2 or 3, got {state.ndim}")
+
+    Ny, Nx = _grid_shape(grid)
 
     if state.ndim == 2:
         _assert(
-            state.shape == (grid.Ny, grid.Nx),
-            f"{name} scalar state shape {state.shape} != full-grid shape {(grid.Ny, grid.Nx)}",
+            state.shape == (Ny, Nx),
+            f"{name} scalar state shape {state.shape} != full-grid shape {(Ny, Nx)}",
         )
-    else:
+        return
+
+    if state.ndim == 3:
         _assert(
-            state.shape[1:] == (grid.Ny, grid.Nx),
-            f"{name} spinor state spatial shape {state.shape[1:]} != full-grid shape {(grid.Ny, grid.Nx)}",
+            state.shape[1:] == (Ny, Nx),
+            f"{name} spinor state spatial shape {state.shape[1:]} != full-grid shape {(Ny, Nx)}",
         )
         _assert(state.shape[0] >= 1, f"{name} must have at least 1 component")
+        return
+
+    if state.ndim == 4:
+        _assert(
+            state.shape == (Ny, Nx, 2, 2),
+            f"{name} entangled spinor shape {state.shape} != full-grid shape {(Ny, Nx, 2, 2)}",
+        )
+        return
+
+    raise AssertionError(
+        f"{name} ndim must be 2, 3, or 4, got ndim={state.ndim}, shape={state.shape}"
+    )
 
 
 def _assert_phi_tau_shape(phi_tau_frames: np.ndarray, Nt: int):
+    """
+    Validate backward-library frame shape.
+
+    Supported:
+      - scalar:      (Nt, Ny_vis, Nx_vis)
+      - Dirac-like:  (Nt, C, Ny_vis, Nx_vis)
+      - entangled:   (Nt, Ny_vis, Nx_vis, 2, 2)
+    """
     _assert(isinstance(phi_tau_frames, np.ndarray), "phi_tau_frames must be np.ndarray")
-    _assert(phi_tau_frames.ndim in (3, 4),
-            f"phi_tau_frames ndim must be 3 or 4, got {phi_tau_frames.ndim}")
-    _assert(phi_tau_frames.shape[0] == Nt,
-            f"phi_tau_frames first dim {phi_tau_frames.shape[0]} must equal Nt={Nt}")
+    _assert(
+        phi_tau_frames.ndim in (3, 4, 5),
+        f"phi_tau_frames ndim must be 3, 4, or 5, got {phi_tau_frames.ndim}",
+    )
+    _assert(
+        phi_tau_frames.shape[0] == Nt,
+        f"phi_tau_frames first dim {phi_tau_frames.shape[0]} must equal Nt={Nt}",
+    )
+
+    if phi_tau_frames.ndim == 5:
+        _assert(
+            phi_tau_frames.shape[-2:] == (2, 2),
+            f"5D phi_tau_frames must end with spin axes (2,2), got {phi_tau_frames.shape}",
+        )
+
     _assert(np.all(np.isfinite(phi_tau_frames.real)), "phi_tau_frames.real contains non-finite values")
     _assert(np.all(np.isfinite(phi_tau_frames.imag)), "phi_tau_frames.imag contains non-finite values")
 
 
 def _assert_frames_psi_emix_compatible(frames_psi: np.ndarray, Emix: np.ndarray):
+    """
+    Validate forward frames and Emix compatibility.
+
+    Supported:
+      - scalar:      frames_psi, Emix shape (Nt, Ny, Nx)
+      - Dirac-like:  frames_psi, Emix shape (Nt, C, Ny, Nx)
+      - entangled:   frames_psi, Emix shape (Nt, Ny, Nx, 2, 2)
+    """
     _assert(isinstance(frames_psi, np.ndarray), "frames_psi must be np.ndarray")
     _assert(isinstance(Emix, np.ndarray), "Emix must be np.ndarray")
-    _assert(frames_psi.shape[0] == Emix.shape[0],
-            "frames_psi and Emix must have same number of time frames")
+    _assert(
+        frames_psi.shape[0] == Emix.shape[0],
+        "frames_psi and Emix must have same number of time frames",
+    )
 
     if frames_psi.ndim == 3 and Emix.ndim == 3:
-        _assert(frames_psi.shape == Emix.shape,
-                f"Schrödinger shapes must match, got {frames_psi.shape} vs {Emix.shape}")
+        _assert(
+            frames_psi.shape == Emix.shape,
+            f"Schrödinger shapes must match, got {frames_psi.shape} vs {Emix.shape}",
+        )
         return
 
     if frames_psi.ndim == 4 and Emix.ndim == 4:
-        _assert(frames_psi.shape == Emix.shape,
-                f"Dirac shapes must match, got {frames_psi.shape} vs {Emix.shape}")
+        _assert(
+            frames_psi.shape == Emix.shape,
+            f"Dirac-like shapes must match, got {frames_psi.shape} vs {Emix.shape}",
+        )
+        return
+
+    if frames_psi.ndim == 5 and Emix.ndim == 5:
+        _assert(
+            frames_psi.shape == Emix.shape,
+            f"Entangled spinor shapes must match, got {frames_psi.shape} vs {Emix.shape}",
+        )
+        _assert(
+            frames_psi.shape[-2:] == (2, 2),
+            f"Entangled frames_psi must end with (2,2), got {frames_psi.shape}",
+        )
         return
 
     raise ValueError(
-        f"Incompatible shapes: frames_psi.ndim={frames_psi.ndim}, Emix.ndim={Emix.ndim}"
+        f"Incompatible shapes: frames_psi.ndim={frames_psi.ndim}, Emix.ndim={Emix.ndim}; "
+        f"frames_psi.shape={frames_psi.shape}, Emix.shape={Emix.shape}"
     )
 
 
@@ -117,6 +215,65 @@ def _assert_nonnegative_density_cube(arr: np.ndarray, name: str):
     _assert(arr.ndim == 3, f"{name} must have ndim=3, got {arr.ndim}")
     _assert(np.all(np.isfinite(arr)), f"{name} contains non-finite values")
     _assert(np.all(arr >= -1e-14), f"{name} contains significantly negative values")
+
+
+# ============================================================
+# Generic state density helpers
+# ============================================================
+
+def _state_density(state_vis: np.ndarray) -> np.ndarray:
+    """
+    Convert a visible state to scalar 2D density.
+
+    Supported visible states:
+      - scalar:      (Ny, Nx)
+      - Dirac-like:  (C, Ny, Nx)
+      - entangled:   (Ny, Nx, 2, 2)
+    """
+    _assert(isinstance(state_vis, np.ndarray), "state_vis must be np.ndarray")
+
+    if state_vis.ndim == 2:
+        rho = (np.abs(state_vis) ** 2).astype(float)
+
+    elif state_vis.ndim == 3:
+        rho = np.sum(np.abs(state_vis) ** 2, axis=0).astype(float)
+
+    elif state_vis.ndim == 4 and state_vis.shape[-2:] == (2, 2):
+        rho = np.sum(np.abs(state_vis) ** 2, axis=(-2, -1)).astype(float)
+
+    else:
+        raise AssertionError(f"Unsupported state_vis shape for density: {state_vis.shape}")
+
+    _assert(np.all(np.isfinite(rho)), "_state_density produced non-finite values")
+    _assert(np.all(rho >= -1e-14), "_state_density produced significantly negative density")
+    return rho
+
+
+def _frames_density_from_complex_frames(frames: np.ndarray) -> np.ndarray:
+    """
+    Convert complex frames to scalar density frames.
+
+    Supported:
+      - scalar:      (Nt, Ny, Nx)
+      - Dirac-like:  (Nt, C, Ny, Nx)
+      - entangled:   (Nt, Ny, Nx, 2, 2)
+    """
+    _assert(isinstance(frames, np.ndarray), "frames must be np.ndarray")
+
+    if frames.ndim == 3:
+        rho = (np.abs(frames) ** 2).astype(float)
+
+    elif frames.ndim == 4:
+        rho = np.sum(np.abs(frames) ** 2, axis=1).astype(float)
+
+    elif frames.ndim == 5 and frames.shape[-2:] == (2, 2):
+        rho = np.sum(np.abs(frames) ** 2, axis=(-2, -1)).astype(float)
+
+    else:
+        raise AssertionError(f"Unsupported complex frame shape for density: {frames.shape}")
+
+    _assert_nonnegative_density_cube(rho, "_frames_density_from_complex_frames output")
+    return rho
 
 
 # ============================================================
@@ -146,8 +303,10 @@ def gaussian_weights(Tk: np.ndarray, mu: float, sigma: float) -> np.ndarray:
     w = w / s
     _assert(np.all(np.isfinite(w)), "gaussian_weights produced non-finite values")
     _assert(np.all(w >= 0.0), "gaussian_weights produced negative weights")
-    _assert(np.isclose(np.sum(w), 1.0, atol=1e-12),
-            f"gaussian_weights must sum to 1, got {np.sum(w)}")
+    _assert(
+        np.isclose(np.sum(w), 1.0, atol=1e-12),
+        f"gaussian_weights must sum to 1, got {np.sum(w)}",
+    )
     return w
 
 
@@ -188,8 +347,10 @@ def _nearest_detector_cell_to_point(
     x_click = float(X_vis[iy_vis, ix_vis])
     y_click = float(Y_vis[iy_vis, ix_vis])
 
-    _assert(screen_mask_vis[iy_vis, ix_vis],
-            "nearest forced click cell lies outside screen_mask_vis")
+    _assert(
+        screen_mask_vis[iy_vis, ix_vis],
+        "nearest forced click cell lies outside screen_mask_vis",
+    )
 
     return iy_vis, ix_vis, x_click, y_click
 
@@ -228,11 +389,15 @@ def detect_click_from_screen(
     _assert_positive_scalar(dx, "dx")
     _assert_positive_scalar(dy, "dy")
     _assert_visible_shapes(frames_density, screen_mask_vis, X_vis, Y_vis)
-    _assert(frames_density.shape[0] == len(times),
-            f"frames_density Nt={frames_density.shape[0]} must equal len(times)={len(times)}")
+    _assert(
+        frames_density.shape[0] == len(times),
+        f"frames_density Nt={frames_density.shape[0]} must equal len(times)={len(times)}",
+    )
     _assert(np.any(screen_mask_vis), "screen_mask_vis is empty")
-    _assert(click_mode in {"born", "forced_point"},
-            f"click_mode must be 'born' or 'forced_point', got {click_mode!r}")
+    _assert(
+        click_mode in {"born", "forced_point"},
+        f"click_mode must be 'born' or 'forced_point', got {click_mode!r}",
+    )
 
     if click_mode == "forced_point":
         _assert(force_click_x is not None, "force_click_x is required for click_mode='forced_point'")
@@ -254,8 +419,10 @@ def detect_click_from_screen(
     t_det = float(times[idx_det])
 
     w = frames_density[idx_det].copy()
-    _assert(w.shape == screen_mask_vis.shape,
-            "detection frame and screen_mask_vis shape mismatch")
+    _assert(
+        w.shape == screen_mask_vis.shape,
+        "detection frame and screen_mask_vis shape mismatch",
+    )
 
     w = np.where(screen_mask_vis, w, 0.0)
     w = np.clip(w, 0.0, None)
@@ -268,15 +435,19 @@ def detect_click_from_screen(
         p = (w / wsum).ravel()
         _assert(np.all(np.isfinite(p)), "click probability vector contains non-finite values")
         _assert(np.all(p >= 0.0), "click probability vector contains negative values")
-        _assert(np.isclose(np.sum(p), 1.0, atol=1e-12),
-                f"click probability vector must sum to 1, got {np.sum(p)}")
+        _assert(
+            np.isclose(np.sum(p), 1.0, atol=1e-12),
+            f"click probability vector must sum to 1, got {np.sum(p)}",
+        )
 
         rng = np.random.default_rng(rng_seed)
         flat_idx = int(rng.choice(p.size, p=p))
         iy_vis, ix_vis = np.unravel_index(flat_idx, w.shape)
 
-        _assert(screen_mask_vis[iy_vis, ix_vis],
-                "chosen click point lies outside screen_mask_vis")
+        _assert(
+            screen_mask_vis[iy_vis, ix_vis],
+            "chosen click point lies outside screen_mask_vis",
+        )
 
         x_click = float(X_vis[iy_vis, ix_vis])
         y_click = float(Y_vis[iy_vis, ix_vis])
@@ -293,8 +464,10 @@ def detect_click_from_screen(
     else:
         raise ValueError(f"Unsupported click_mode: {click_mode}")
 
-    _assert(np.isfinite(x_click) and np.isfinite(y_click),
-            f"click coordinates must be finite, got ({x_click}, {y_click})")
+    _assert(
+        np.isfinite(x_click) and np.isfinite(y_click),
+        f"click coordinates must be finite, got ({x_click}, {y_click})",
+    )
 
     return idx_det, t_det, x_click, y_click, screen_int
 
@@ -310,36 +483,37 @@ def _crop_visible_state(state, grid):
     Supports:
         - Schrödinger-like scalar state: shape (Ny, Nx)
         - Dirac-like spinor state:       shape (C, Ny, Nx)
+        - entangled spinor state:        shape (Ny, Nx, 2, 2)
     """
     _assert_state_shape_matches_grid(state, grid, "state")
 
+    Ny_vis, Nx_vis = _visible_shape(grid)
+
     if state.ndim == 2:
         out = state[grid.ys, grid.xs].copy()
-        _assert(out.shape == (grid.n_visible_y, grid.n_visible_x),
-                f"cropped scalar visible shape mismatch: {out.shape}")
+        _assert(
+            out.shape == (Ny_vis, Nx_vis),
+            f"cropped scalar visible shape mismatch: {out.shape}",
+        )
         return out
 
     if state.ndim == 3:
         out = state[:, grid.ys, grid.xs].copy()
-        _assert(out.shape[1:] == (grid.n_visible_y, grid.n_visible_x),
-                f"cropped spinor visible shape mismatch: {out.shape}")
+        _assert(
+            out.shape[1:] == (Ny_vis, Nx_vis),
+            f"cropped spinor visible shape mismatch: {out.shape}",
+        )
+        return out
+
+    if state.ndim == 4:
+        out = state[grid.ys, grid.xs, :, :].copy()
+        _assert(
+            out.shape == (Ny_vis, Nx_vis, 2, 2),
+            f"cropped entangled visible shape mismatch: {out.shape}",
+        )
         return out
 
     raise ValueError(f"Unsupported state ndim={state.ndim}")
-
-
-def _state_density(state_vis: np.ndarray) -> np.ndarray:
-    _assert(isinstance(state_vis, np.ndarray), "state_vis must be np.ndarray")
-    _assert(state_vis.ndim in (2, 3), f"Unsupported state_vis ndim={state_vis.ndim}")
-
-    if state_vis.ndim == 2:
-        rho = (np.abs(state_vis) ** 2).astype(float)
-    else:
-        rho = np.sum(np.abs(state_vis) ** 2, axis=0).astype(float)
-
-    _assert(np.all(np.isfinite(rho)), "_state_density produced non-finite values")
-    _assert(np.all(rho >= -1e-14), "_state_density produced significantly negative density")
-    return rho
 
 
 # ============================================================
@@ -362,7 +536,8 @@ def build_backward_library(
 
     Output:
         - Schrödinger: array shape (Nt, Ny_vis, Nx_vis), complex128
-        - Dirac:       array shape (Nt, C, Ny_vis, Nx_vis), complex128
+        - Dirac-like:  array shape (Nt, C, Ny_vis, Nx_vis), complex128
+        - Entangled:   array shape (Nt, Ny_vis, Nx_vis, 2, 2), complex128
 
     Frame i corresponds to backward-evolved click-state at:
         tau = i * tau_step
@@ -370,10 +545,14 @@ def build_backward_library(
     _assert_times(times)
     _assert_positive_scalar(tau_step, "tau_step")
     _assert_positive_scalar(sigma_click, "sigma_click")
-    _assert(isinstance(save_every, int) and save_every >= 1,
-            f"save_every must be int >= 1, got {save_every}")
-    _assert(isinstance(print_every_frames, int) and print_every_frames >= 1,
-            f"print_every_frames must be int >= 1, got {print_every_frames}")
+    _assert(
+        isinstance(save_every, int) and save_every >= 1,
+        f"save_every must be int >= 1, got {save_every}",
+    )
+    _assert(
+        isinstance(print_every_frames, int) and print_every_frames >= 1,
+        f"print_every_frames must be int >= 1, got {print_every_frames}",
+    )
     _assert_finite_scalar(x_click, "x_click")
     _assert_finite_scalar(y_click, "y_click")
 
@@ -381,33 +560,27 @@ def build_backward_library(
 
     if Nt >= 2:
         dt_saved = float(times[1] - times[0])
-        _assert(np.isclose(dt_saved, tau_step, rtol=1e-10, atol=1e-12),
-                f"tau_step={tau_step} must match saved-frame spacing dt_saved={dt_saved}")
+        _assert(
+            np.isclose(dt_saved, tau_step, rtol=1e-10, atol=1e-12),
+            f"tau_step={tau_step} must match saved-frame spacing dt_saved={dt_saved}",
+        )
 
     phi_cur = theory.initialize_click_state(x_click, y_click, sigma_click)
     _assert_state_shape_matches_grid(phi_cur, grid, "phi_cur(initialized click state)")
 
     phi0_vis = _crop_visible_state(phi_cur, grid)
-
-    if phi0_vis.ndim == 2:
-        phi_tau_frames = np.zeros(
-            (Nt, grid.n_visible_y, grid.n_visible_x),
-            dtype=np.complex128,
-        )
-    elif phi0_vis.ndim == 3:
-        ncomp = phi0_vis.shape[0]
-        phi_tau_frames = np.zeros(
-            (Nt, ncomp, grid.n_visible_y, grid.n_visible_x),
-            dtype=np.complex128,
-        )
-    else:
-        raise ValueError(f"Unsupported visible backward state ndim={phi0_vis.ndim}")
+    phi_tau_frames = np.zeros((Nt,) + phi0_vis.shape, dtype=np.complex128)
 
     dt_small = tau_step / save_every
     _assert_positive_scalar(dt_small, "dt_small")
 
     for i in range(Nt):
         phi_vis = _crop_visible_state(phi_cur, grid)
+        _assert(
+            phi_vis.shape == phi0_vis.shape,
+            f"phi_vis shape changed at frame {i}: {phi_vis.shape} != {phi0_vis.shape}",
+        )
+
         phi_tau_frames[i] = phi_vis
 
         _assert(np.all(np.isfinite(phi_vis.real)), f"phi_vis.real non-finite at frame {i}")
@@ -415,8 +588,11 @@ def build_backward_library(
 
         if (i % print_every_frames) == 0 or i == Nt - 1:
             rho_full = theory.density(phi_cur)
-            _assert(rho_full.shape == (grid.Ny, grid.Nx),
-                    f"theory.density(phi_cur) shape {rho_full.shape} != {(grid.Ny, grid.Nx)}")
+            Ny, Nx = _grid_shape(grid)
+            _assert(
+                rho_full.shape == (Ny, Nx),
+                f"theory.density(phi_cur) shape {rho_full.shape} != {(Ny, Nx)}",
+            )
             _assert(np.all(np.isfinite(rho_full)), f"rho_full non-finite at backward frame {i}")
             _assert(np.all(rho_full >= -1e-14), f"rho_full negative at backward frame {i}")
 
@@ -427,11 +603,15 @@ def build_backward_library(
         if i < Nt - 1:
             for sub in range(save_every):
                 res = theory.step_backward_adjoint(phi_cur, dt_small)
-                _assert(hasattr(res, "state"),
-                        "theory.step_backward_adjoint(...) must return object with .state")
+                _assert(
+                    hasattr(res, "state"),
+                    "theory.step_backward_adjoint(...) must return object with .state",
+                )
                 phi_cur = res.state
                 _assert_state_shape_matches_grid(
-                    phi_cur, grid, f"phi_cur(after backward substep {sub} at frame {i})"
+                    phi_cur,
+                    grid,
+                    f"phi_cur(after backward substep {sub} at frame {i})",
                 )
 
     _assert_phi_tau_shape(phi_tau_frames, Nt)
@@ -460,14 +640,17 @@ def build_Emix_from_phi_tau(
 
     Returns:
         - Schrödinger: complex array (Nt, Ny, Nx)
-        - Dirac:       complex array (Nt, C, Ny, Nx)
+        - Dirac-like:  complex array (Nt, C, Ny, Nx)
+        - Entangled:   complex array (Nt, Ny, Nx, 2, 2)
     """
     _assert_times(times)
     _assert_finite_scalar(t_det, "t_det")
     _assert_finite_scalar(sigmaT, "sigmaT")
     _assert_positive_scalar(tau_step, "tau_step")
-    _assert(isinstance(K_JITTER, int) and K_JITTER >= 1,
-            f"K_JITTER must be int >= 1, got {K_JITTER}")
+    _assert(
+        isinstance(K_JITTER, int) and K_JITTER >= 1,
+        f"K_JITTER must be int >= 1, got {K_JITTER}",
+    )
 
     Nt_ = len(times)
     _assert_phi_tau_shape(phi_tau_frames, Nt_)
@@ -482,8 +665,10 @@ def build_Emix_from_phi_tau(
 
     _assert(k_inds.size >= 1, "k_inds must be non-empty")
     Tk = times[k_inds]
-    _assert(np.all(Tk >= times[0]) and np.all(Tk <= times[-1]),
-            "Tk values out of times range")
+    _assert(
+        np.all(Tk >= times[0]) and np.all(Tk <= times[-1]),
+        "Tk values out of times range",
+    )
 
     w_full = gaussian_weights(Tk, t_det, sigmaT)
     _assert(w_full.shape == Tk.shape, "w_full shape must match Tk")
@@ -508,7 +693,6 @@ def build_Emix_from_phi_tau(
         if not np.any(wv > 0.0):
             continue
 
-        # Match old working code: nearest saved backward frame
         j = np.rint(tau_valid / tau_step).astype(int)
         j = np.clip(j, 0, Nt_ - 1)
 
@@ -519,6 +703,9 @@ def build_Emix_from_phi_tau(
 
         elif phi_tau_frames.ndim == 4:
             Emix[i] = np.sum(wv[:, None, None, None] * phi_tau_frames[j], axis=0)
+
+        elif phi_tau_frames.ndim == 5:
+            Emix[i] = np.sum(wv[:, None, None, None, None] * phi_tau_frames[j], axis=0)
 
         else:
             raise ValueError(f"Unsupported phi_tau_frames ndim={phi_tau_frames.ndim}")
@@ -556,8 +743,10 @@ def build_Emix_density_from_phi_tau(
     _assert_finite_scalar(t_det, "t_det")
     _assert_finite_scalar(sigmaT, "sigmaT")
     _assert_positive_scalar(tau_step, "tau_step")
-    _assert(isinstance(K_JITTER, int) and K_JITTER >= 1,
-            f"K_JITTER must be int >= 1, got {K_JITTER}")
+    _assert(
+        isinstance(K_JITTER, int) and K_JITTER >= 1,
+        f"K_JITTER must be int >= 1, got {K_JITTER}",
+    )
 
     Nt_ = len(times)
     _assert_phi_tau_shape(phi_tau_frames, Nt_)
@@ -575,13 +764,7 @@ def build_Emix_density_from_phi_tau(
     Tk = times[k_inds]
     w_full = gaussian_weights(Tk, t_det, sigmaT)
 
-    if phi_tau_frames.ndim == 3:
-        phi_tau_density = (np.abs(phi_tau_frames) ** 2).astype(float)
-    elif phi_tau_frames.ndim == 4:
-        phi_tau_density = np.sum(np.abs(phi_tau_frames) ** 2, axis=1).astype(float)
-    else:
-        raise ValueError(f"Unsupported phi_tau_frames ndim={phi_tau_frames.ndim}")
-
+    phi_tau_density = _frames_density_from_complex_frames(phi_tau_frames)
     _assert_nonnegative_density_cube(phi_tau_density, "phi_tau_density")
 
     Emix_density = np.zeros_like(phi_tau_density, dtype=float)
@@ -596,13 +779,13 @@ def build_Emix_density_from_phi_tau(
         tau_valid = tau[valid]
         wv = w_full[valid].astype(float)
 
+        _assert(np.all(tau_valid >= 0.0), "density tau_valid must be non-negative")
         _assert(np.all(np.isfinite(wv)), "density weights contain non-finite values")
         _assert(np.all(wv >= 0.0), "density weights contain negative values")
 
         if not np.any(wv > 0.0):
             continue
 
-        # Match old working code: nearest saved backward frame
         j = np.rint(tau_valid / tau_step).astype(int)
         j = np.clip(j, 0, Nt_ - 1)
 
@@ -610,10 +793,8 @@ def build_Emix_density_from_phi_tau(
 
         Emix_density[i] = np.sum(wv[:, None, None] * phi_tau_density[j], axis=0)
 
-        _assert(np.all(np.isfinite(Emix_density[i])),
-                f"Emix_density non-finite at frame {i}")
-        _assert(np.all(Emix_density[i] >= -1e-14),
-                f"Emix_density negative at frame {i}")
+        _assert(np.all(np.isfinite(Emix_density[i])), f"Emix_density non-finite at frame {i}")
+        _assert(np.all(Emix_density[i] >= -1e-14), f"Emix_density negative at frame {i}")
 
     return Emix_density
 
@@ -629,8 +810,11 @@ def local_amplitude_overlap(frames_psi, Emix: np.ndarray) -> np.ndarray:
     For Schrödinger:
         A(x,y,t) = conj(Emix) * psi
 
-    For Dirac:
+    For Dirac-like:
         A(x,y,t) = sum_a conj(Emix_a) * psi_a
+
+    For entangled spinor:
+        A(x,y,t) = sum_ab conj(Emix_ab) * psi_ab
 
     Returns:
         complex array shape (Nt, Ny, Nx)
@@ -639,8 +823,13 @@ def local_amplitude_overlap(frames_psi, Emix: np.ndarray) -> np.ndarray:
 
     if frames_psi.ndim == 3 and Emix.ndim == 3:
         out = np.conjugate(Emix) * frames_psi
+
     elif frames_psi.ndim == 4 and Emix.ndim == 4:
         out = np.sum(np.conjugate(Emix) * frames_psi, axis=1)
+
+    elif frames_psi.ndim == 5 and Emix.ndim == 5:
+        out = np.sum(np.conjugate(Emix) * frames_psi, axis=(-2, -1))
+
     else:
         raise ValueError(
             f"Incompatible shapes: frames_psi.ndim={frames_psi.ndim}, Emix.ndim={Emix.ndim}"
@@ -658,15 +847,13 @@ def make_emix_density(Emix: np.ndarray) -> np.ndarray:
 
     Returns:
         - Schrödinger: |Emix|^2
-        - Dirac:       sum_a |Emix_a|^2
+        - Dirac-like:  sum_a |Emix_a|^2
+        - Entangled:   sum_ab |Emix_ab|^2
     """
     _assert(isinstance(Emix, np.ndarray), "Emix must be np.ndarray")
-    _assert(Emix.ndim in (3, 4), f"Unsupported Emix ndim={Emix.ndim}")
+    _assert(Emix.ndim in (3, 4, 5), f"Unsupported Emix ndim={Emix.ndim}")
 
-    if Emix.ndim == 3:
-        rho = (np.abs(Emix) ** 2).astype(float)
-    else:
-        rho = np.sum(np.abs(Emix) ** 2, axis=1).astype(float)
+    rho = _frames_density_from_complex_frames(Emix)
 
     _assert_nonnegative_density_cube(rho, "make_emix_density output")
     return rho
@@ -678,16 +865,10 @@ def _forward_density_from_frames(frames_psi) -> np.ndarray:
 
     Supports:
         - Schrödinger: (Nt, Ny, Nx)
-        - Dirac:       (Nt, C, Ny, Nx)
+        - Dirac-like:  (Nt, C, Ny, Nx)
+        - Entangled:   (Nt, Ny, Nx, 2, 2)
     """
-    _assert(isinstance(frames_psi, np.ndarray), "frames_psi must be np.ndarray")
-    _assert(frames_psi.ndim in (3, 4), f"Unsupported frames_psi ndim={frames_psi.ndim}")
-
-    if frames_psi.ndim == 3:
-        rho = (np.abs(frames_psi) ** 2).astype(float)
-    else:
-        rho = np.sum(np.abs(frames_psi) ** 2, axis=1).astype(float)
-
+    rho = _frames_density_from_complex_frames(frames_psi)
     _assert_nonnegative_density_cube(rho, "_forward_density_from_frames output")
     return rho
 
@@ -708,8 +889,10 @@ def _normalize_framewise(rho: np.ndarray, dx: float, dy: float) -> np.ndarray:
             ri = ri / s
             s2 = float(np.sum(ri) * dx * dy)
             _assert(np.isfinite(s2), f"normalized frame sum non-finite at i={i}")
-            _assert(np.isclose(s2, 1.0, atol=1e-10),
-                    f"normalized frame integral must be 1 at i={i}, got {s2}")
+            _assert(
+                np.isclose(s2, 1.0, atol=1e-10),
+                f"normalized frame integral must be 1 at i={i}, got {s2}",
+            )
 
         out[i] = ri
 
@@ -740,8 +923,10 @@ def make_rho_density_product(frames_psi, Emix: np.ndarray, dx: float, dy: float)
     rho_fwd = _forward_density_from_frames(frames_psi)
     rho_emix = make_emix_density(Emix)
 
-    _assert(rho_fwd.shape == rho_emix.shape,
-            f"rho_fwd shape {rho_fwd.shape} != rho_emix shape {rho_emix.shape}")
+    _assert(
+        rho_fwd.shape == rho_emix.shape,
+        f"rho_fwd shape {rho_fwd.shape} != rho_emix shape {rho_emix.shape}",
+    )
 
     rho = (rho_fwd * rho_emix).astype(float)
     return _normalize_framewise(rho, dx, dy)
@@ -763,8 +948,10 @@ def make_rho_density_product_oldstyle(
     rho_fwd = _forward_density_from_frames(frames_psi)
     _assert_nonnegative_density_cube(Emix_density, "Emix_density")
 
-    _assert(rho_fwd.shape == Emix_density.shape,
-            f"rho_fwd shape {rho_fwd.shape} != Emix_density shape {Emix_density.shape}")
+    _assert(
+        rho_fwd.shape == Emix_density.shape,
+        f"rho_fwd shape {rho_fwd.shape} != Emix_density shape {Emix_density.shape}",
+    )
 
     rho = (rho_fwd * Emix_density).astype(float)
     return _normalize_framewise(rho, dx, dy)
@@ -790,8 +977,10 @@ def make_rho_blended(
     rho_dp = make_rho_density_product(frames_psi, Emix, dx, dy)
     rho_ao = make_rho_amplitude_overlap(frames_psi, Emix, dx, dy)
 
-    _assert(rho_dp.shape == rho_ao.shape,
-            f"rho_dp shape {rho_dp.shape} != rho_ao shape {rho_ao.shape}")
+    _assert(
+        rho_dp.shape == rho_ao.shape,
+        f"rho_dp shape {rho_dp.shape} != rho_ao shape {rho_ao.shape}",
+    )
 
     rho = (1.0 - a) * rho_dp + a * rho_ao
     return _normalize_framewise(rho, dx, dy)
@@ -823,12 +1012,15 @@ def make_rho(
     "blended"
         rho = (1-a)*density_product + a*amplitude_overlap
     """
-    _assert(mode in {
-        "amplitude_overlap",
-        "density_product",
-        "density_product_oldstyle",
-        "blended",
-    }, f"Unknown make_rho mode: {mode}")
+    _assert(
+        mode in {
+            "amplitude_overlap",
+            "density_product",
+            "density_product_oldstyle",
+            "blended",
+        },
+        f"Unknown make_rho mode: {mode}",
+    )
 
     if mode == "amplitude_overlap":
         if Emix is None:
