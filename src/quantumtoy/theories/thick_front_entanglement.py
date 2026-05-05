@@ -314,11 +314,16 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
     # --------------------------------------------------------
 
     # "singlet", "product", "plus_plus", "plus_minus", "minus_plus", "minus_minus"
-    ent_initial_spin_state: str = "singlet"
+#    ent_initial_spin_state: str = "singlet"
 
     # Used only when ent_initial_spin_state == "product"
-    ent_initial_spin_a: object | None = None
-    ent_initial_spin_b: object | None = None
+#    ent_initial_spin_a: object | None = None
+#    ent_initial_spin_b: object | None = None
+
+    ent_initial_spin_state = "product"
+
+    ent_initial_spin_a = [0.70710678118, 0.70710678118]
+    ent_initial_spin_b = [1.0, 0.0]
 
     # --------------------------------------------------------
     # Debug / export

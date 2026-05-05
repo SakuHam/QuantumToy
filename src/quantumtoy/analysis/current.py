@@ -144,6 +144,28 @@ def _center_crop_slices_from_shapes(
     return slice(y0, y1), slice(x0, x1)
 
 
+def _theory_hbar_mass(theory) -> tuple[float, float]:
+    """
+    Extract hbar and mass from theory with robust fallbacks.
+    """
+    hbar = float(getattr(theory, "hbar", 1.0))
+    mass = float(
+        getattr(
+            theory,
+            "m_mass",
+            getattr(theory, "mass", getattr(theory, "m", 1.0)),
+        )
+    )
+
+    if not np.isfinite(hbar):
+        hbar = 1.0
+
+    if (not np.isfinite(mass)) or abs(mass) <= 1e-30:
+        mass = 1.0
+
+    return hbar, mass
+
+
 # ============================================================
 # Local Dirac velocity from spinor
 # ============================================================
@@ -177,7 +199,7 @@ def _dirac_velocity_from_spinor_frame(
     rho = (np.abs(psi1) ** 2 + np.abs(psi2) ** 2).astype(float)
     overlap = np.conjugate(psi1) * psi2
 
-    c = float(theory.c_light)
+    c = float(getattr(theory, "c_light", 1.0))
 
     jx = (2.0 * c * np.real(overlap)).astype(float)
     jy = (2.0 * c * np.imag(overlap)).astype(float)
@@ -202,6 +224,120 @@ def _dirac_velocity_from_spinor_frame(
 
 
 # ============================================================
+# Local Schrödinger-like velocity from scalar frame
+# ============================================================
+
+def _schrodinger_velocity_from_scalar_frame(
+    theory,
+    scalar_frame: np.ndarray,
+    dx: float,
+    dy: float,
+    eps_rho: float,
+):
+    """
+    Compute Schrödinger/Bohm-like velocity directly from a scalar complex frame.
+
+        rho = |psi|^2
+        j   = (hbar/m) Im(conj(psi) grad psi)
+        v   = j / rho
+
+    This is useful for visible/cropped scalar frames when theory.velocity()
+    expects a full-grid state.
+    """
+    psi = np.asarray(scalar_frame, dtype=np.complex128)
+
+    if psi.ndim != 2:
+        raise ValueError(f"scalar_frame must be 2D, got shape={psi.shape}")
+
+    hbar, mass = _theory_hbar_mass(theory)
+
+    rho = (np.abs(psi) ** 2).astype(float)
+
+    dpsi_dy = np.gradient(psi, float(dy), axis=0)
+    dpsi_dx = np.gradient(psi, float(dx), axis=1)
+
+    pref = hbar / mass
+
+    jx = (pref * np.imag(np.conjugate(psi) * dpsi_dx)).astype(float)
+    jy = (pref * np.imag(np.conjugate(psi) * dpsi_dy)).astype(float)
+
+    denom = np.maximum(rho, float(eps_rho))
+
+    vx = jx / denom
+    vy = jy / denom
+    sp = np.hypot(vx, vy)
+
+    return vx.astype(float), vy.astype(float), sp.astype(float)
+
+
+# ============================================================
+# Local entangled velocity from 4D spinor frame
+# ============================================================
+
+def _entangled_velocity_from_spinor_frame(
+    theory,
+    ent_frame: np.ndarray,
+    dx: float,
+    dy: float,
+    eps_rho: float,
+):
+    """
+    Compute Schrödinger-like velocity for an entangled spinor frame.
+
+    Input:
+        ent_frame.shape == (H, W, 2, 2)
+
+    Formula:
+        rho[y,x] = sum_ab |psi[y,x,a,b]|^2
+
+        jx[y,x] = (hbar/m) Im sum_ab conj(psi[y,x,a,b]) dpsi[y,x,a,b]/dx
+        jy[y,x] = (hbar/m) Im sum_ab conj(psi[y,x,a,b]) dpsi[y,x,a,b]/dy
+
+        v = j / rho
+
+    This treats the spin labels as internal components and sums the current
+    over those components.
+    """
+    psi = np.asarray(ent_frame, dtype=np.complex128)
+
+    if psi.ndim != 4 or psi.shape[-2:] != (2, 2):
+        raise ValueError(
+            f"entangled frame must have shape (H, W, 2, 2), got {psi.shape}"
+        )
+
+    hbar, mass = _theory_hbar_mass(theory)
+
+    rho = np.sum(np.abs(psi) ** 2, axis=(-2, -1)).astype(float)
+
+    dpsi_dy = np.gradient(psi, float(dy), axis=0)
+    dpsi_dx = np.gradient(psi, float(dx), axis=1)
+
+    pref = hbar / mass
+
+    jx = (
+        pref
+        * np.imag(
+            np.sum(np.conjugate(psi) * dpsi_dx, axis=(-2, -1))
+        )
+    ).astype(float)
+
+    jy = (
+        pref
+        * np.imag(
+            np.sum(np.conjugate(psi) * dpsi_dy, axis=(-2, -1))
+        )
+    ).astype(float)
+
+    denom = np.maximum(rho, float(eps_rho))
+
+    vx = jx / denom
+    vy = jy / denom
+    sp = np.hypot(vx, vy)
+
+    return vx.astype(float), vy.astype(float), sp.astype(float)
+
+
+# ============================================================
 # Velocity field extraction
 # ============================================================
 
@@ -210,19 +346,28 @@ def _extract_visible_velocity_fields(
     state_frame: np.ndarray,
     vis_hw: tuple[int, int],
     eps_rho: float,
+    dx: float,
+    dy: float,
 ):
     """
     Compute velocity fields for one frame, then crop to visible shape if needed.
 
     Supported input frame shapes:
-      - scalar visible/full field: (H, W)
-      - Dirac visible/full state:  (2, H, W)
+      - scalar visible/full field:
+          (H, W)
 
-    Important Dirac rule:
-      - full spinor: may use theory.velocity(full_frame), then crop
-      - visible/cropped spinor: compute local Dirac velocity directly
-        from the cropped spinor, because theory.velocity() expects the
-        full theory.grid shape.
+      - Dirac visible/full state:
+          (2, H, W)
+
+      - entangled visible/full state:
+          (H, W, 2, 2)
+
+    Important:
+      - visible/cropped scalar and entangled frames are computed locally
+        from current formulas.
+      - visible/cropped Dirac spinors are computed locally from the Dirac
+        current formula.
+      - full-grid frames may use theory.velocity(...) when safe, then crop.
     """
     frame = np.asarray(state_frame)
 
@@ -233,12 +378,54 @@ def _extract_visible_velocity_fields(
         expected_full = (int(theory.grid.Ny), int(theory.grid.Nx))
 
     # --------------------------------------------------------
-    # Dirac / spinor frame
+    # Entangled spinor frame: (H, W, 2, 2)
+    # --------------------------------------------------------
+    if frame.ndim == 4 and frame.shape[-2:] == (2, 2):
+        h, w = frame.shape[0], frame.shape[1]
+
+        # Visible-size cropped entangled frame -> compute locally.
+        if (h, w) == (vis_h, vis_w):
+            return _entangled_velocity_from_spinor_frame(
+                theory=theory,
+                ent_frame=frame,
+                dx=dx,
+                dy=dy,
+                eps_rho=eps_rho,
+            )
+
+        # Full-size entangled frame.
+        # Prefer theory.velocity if it supports this shape; otherwise compute
+        # locally and center-crop.
+        if expected_full is not None and (h, w) == expected_full:
+            try:
+                vx_full, vy_full, sp_full = theory.velocity(frame, eps_rho=eps_rho)
+            except Exception:
+                vx_full, vy_full, sp_full = _entangled_velocity_from_spinor_frame(
+                    theory=theory,
+                    ent_frame=frame,
+                    dx=dx,
+                    dy=dy,
+                    eps_rho=eps_rho,
+                )
+
+            sy, sx = _center_crop_slices_from_shapes((h, w), (vis_h, vis_w))
+            return vx_full[sy, sx], vy_full[sy, sx], sp_full[sy, sx]
+
+        raise ValueError(
+            f"Unsupported entangled frame shape {frame.shape}. "
+            f"Expected either ({vis_h}, {vis_w}, 2, 2) visible or "
+            f"({expected_full[0]}, {expected_full[1]}, 2, 2) full."
+            if expected_full is not None
+            else f"Unsupported entangled frame shape {frame.shape}."
+        )
+
+    # --------------------------------------------------------
+    # Dirac / component-first spinor frame: (2, H, W)
     # --------------------------------------------------------
     if frame.ndim == 3 and frame.shape[0] == 2:
         h, w = frame.shape[1], frame.shape[2]
 
-        # Visible-size cropped spinor -> compute locally, do NOT call theory.velocity
+        # Visible-size cropped spinor -> compute locally.
         if (h, w) == (vis_h, vis_w):
             return _dirac_velocity_from_spinor_frame(
                 theory=theory,
@@ -246,9 +433,17 @@ def _extract_visible_velocity_fields(
                 eps_rho=eps_rho,
             )
 
-        # Full-size spinor -> compute on full grid, then crop
+        # Full-size spinor -> compute on full grid, then crop.
         if expected_full is not None and (h, w) == expected_full:
-            vx_full, vy_full, sp_full = theory.velocity(frame, eps_rho=eps_rho)
+            try:
+                vx_full, vy_full, sp_full = theory.velocity(frame, eps_rho=eps_rho)
+            except Exception:
+                vx_full, vy_full, sp_full = _dirac_velocity_from_spinor_frame(
+                    theory=theory,
+                    spinor_frame=frame,
+                    eps_rho=eps_rho,
+                )
+
             sy, sx = _center_crop_slices_from_shapes((h, w), (vis_h, vis_w))
             return vx_full[sy, sx], vy_full[sy, sx], sp_full[sy, sx]
 
@@ -261,19 +456,42 @@ def _extract_visible_velocity_fields(
         )
 
     # --------------------------------------------------------
-    # Scalar frame
+    # Scalar frame: (H, W)
     # --------------------------------------------------------
     if frame.ndim == 2:
         h, w = frame.shape
 
-        # Visible scalar field
+        # Visible scalar field.
+        # Prefer direct local current formula; theory.velocity may expect full grid.
         if (h, w) == (vis_h, vis_w):
-            vx, vy, sp = theory.velocity(frame, eps_rho=eps_rho)
-            return vx, vy, sp
+            try:
+                vx, vy, sp = theory.velocity(frame, eps_rho=eps_rho)
+                if vx.shape == (vis_h, vis_w) and vy.shape == (vis_h, vis_w):
+                    return vx, vy, sp
+            except Exception:
+                pass
 
-        # Full scalar field -> compute then crop
+            return _schrodinger_velocity_from_scalar_frame(
+                theory=theory,
+                scalar_frame=frame,
+                dx=dx,
+                dy=dy,
+                eps_rho=eps_rho,
+            )
+
+        # Full scalar field -> compute then crop.
         if expected_full is not None and (h, w) == expected_full:
-            vx_full, vy_full, sp_full = theory.velocity(frame, eps_rho=eps_rho)
+            try:
+                vx_full, vy_full, sp_full = theory.velocity(frame, eps_rho=eps_rho)
+            except Exception:
+                vx_full, vy_full, sp_full = _schrodinger_velocity_from_scalar_frame(
+                    theory=theory,
+                    scalar_frame=frame,
+                    dx=dx,
+                    dy=dy,
+                    eps_rho=eps_rho,
+                )
+
             sy, sx = _center_crop_slices_from_shapes((h, w), (vis_h, vis_w))
             return vx_full[sy, sx], vy_full[sy, sx], sp_full[sy, sx]
 
@@ -313,16 +531,23 @@ def alignment_and_diagnostics_from_state_frames(
     Compute velocity alignment diagnostics along ridge.
 
     Supports:
-      - scalar frame stacks: (T, H, W)
-      - Dirac/spinor frame stacks: (T, 2, H, W)
+      - scalar frame stacks:
+          (T, H, W)
+
+      - Dirac/spinor frame stacks:
+          (T, 2, H, W)
+
+      - entangled spinor frame stacks:
+          (T, H, W, 2, 2)
 
     If frames are full-grid, velocity is computed first and then center-cropped.
-    If Dirac frames are already visible/cropped, velocity is computed directly
-    from the cropped spinor using local current formulas.
+    If frames are already visible/cropped, velocity is computed directly from
+    local current formulas.
     """
     state_vis_frames = np.asarray(state_vis_frames)
 
     Nt_ = len(ridge_x)
+
     if len(ridge_y) != Nt_:
         raise ValueError("ridge_x and ridge_y must have the same length")
 
@@ -332,8 +557,20 @@ def alignment_and_diagnostics_from_state_frames(
             f"ridge length ({Nt_})"
         )
 
+    if state_vis_frames.ndim not in (3, 4, 5):
+        raise ValueError(
+            f"state_vis_frames must have ndim 3, 4, or 5, got "
+            f"shape={state_vis_frames.shape}"
+        )
+
     vis_h = len(y_vis_1d)
     vis_w = len(x_vis_1d)
+
+    if not np.isfinite(float(dx)) or float(dx) <= 0.0:
+        raise ValueError(f"dx must be positive finite, got {dx}")
+
+    if not np.isfinite(float(dy)) or float(dy) <= 0.0:
+        raise ValueError(f"dy must be positive finite, got {dy}")
 
     cos_th = np.full(Nt_, np.nan, dtype=float)
     speed = np.full(Nt_, np.nan, dtype=float)
@@ -352,7 +589,13 @@ def alignment_and_diagnostics_from_state_frames(
             state_frame=state_frame,
             vis_hw=(vis_h, vis_w),
             eps_rho=align_eps_rho,
+            dx=dx,
+            dy=dy,
         )
+
+        vx = np.asarray(vx, dtype=float)
+        vy = np.asarray(vy, dtype=float)
+        sp = np.asarray(sp, dtype=float)
 
         if vx.shape != (vis_h, vis_w) or vy.shape != (vis_h, vis_w) or sp.shape != (vis_h, vis_w):
             raise ValueError(
@@ -360,6 +603,15 @@ def alignment_and_diagnostics_from_state_frames(
                 f"vx={vx.shape}, vy={vy.shape}, sp={sp.shape}, "
                 f"expected {(vis_h, vis_w)}"
             )
+
+        if not np.all(np.isfinite(vx)):
+            raise ValueError(f"vx contains non-finite values at frame {i}")
+
+        if not np.all(np.isfinite(vy)):
+            raise ValueError(f"vy contains non-finite values at frame {i}")
+
+        if not np.all(np.isfinite(sp)):
+            raise ValueError(f"speed contains non-finite values at frame {i}")
 
         ix = int(np.argmin(np.abs(x_vis_1d - ridge_x[i])))
         iy = int(np.argmin(np.abs(y_vis_1d - ridge_y[i])))
@@ -398,7 +650,8 @@ def alignment_and_diagnostics_from_state_frames(
 
         if enable_divergence:
             div_v = divergence_of_velocity(vx, vy, dx, dy)
-            div_v_at_ridge[i] = float(div_v[iy, ix])
+            if np.isfinite(div_v[iy, ix]):
+                div_v_at_ridge[i] = float(div_v[iy, ix])
 
     # ============================================================
     # Temporal smoothing
