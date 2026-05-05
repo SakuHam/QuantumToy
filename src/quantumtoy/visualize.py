@@ -32,13 +32,14 @@ from viz.visual_debug import (
     debug_plot_metric_fields_vis,
 )
 
+
 RENDER_MODES = (
-    "density",                  # current visible rho (current pipeline)
-    "forward_density",          # |psi_fwd|^2 only
-    "backward_density",         # |phi_tau|^2 only
-    "overlap_density",          # |psi_fwd * conj(Emix)|^2 style amplitude
-    "posthoc_base_rho",         # saved posthoc base rho
-    "posthoc_selected_rho",     # saved posthoc worldline-selected rho
+    "density",
+    "forward_density",
+    "backward_density",
+    "overlap_density",
+    "posthoc_base_rho",
+    "posthoc_selected_rho",
     "phase",
     "phase_contours",
     "ridge_phase",
@@ -110,6 +111,7 @@ def _iter_barrier_components(potential):
 
 def _component_center_xy(grid, comp):
     core = getattr(comp, "barrier_core", None)
+
     if core is None or not np.any(core):
         wall_mask = getattr(comp, "wall_mask", None)
         if wall_mask is None or not np.any(wall_mask):
@@ -214,18 +216,12 @@ def _draw_component_mask_mode(ax, grid, comp, extent, cfg):
 
 
 def _draw_component_potential_mode(ax, grid, comp, extent, cfg):
-    """
-    Potential mode now uses wall_mask geometry for solid shape, but still
-    overlays contours from V_real if desired. This avoids wide smooth tails
-    appearing as giant blocks.
-    """
     artists = []
 
     wall_vis = _get_component_wall_vis(grid, comp)
     if wall_vis is None:
         return artists
 
-    alpha_min = float(_cfg_get(cfg, "BARRIER_POTENTIAL_ALPHA_MIN", 0.18))
     alpha_max = float(_cfg_get(cfg, "BARRIER_POTENTIAL_ALPHA_MAX", 0.55))
     alpha = np.where(wall_vis > 0.5, alpha_max, 0.0)
 
@@ -265,7 +261,6 @@ def _draw_component_potential_mode(ax, grid, comp, extent, cfg):
                 except Exception:
                     pass
 
-    # Hard wall outline on top
     if np.any(wall_vis > 0.5):
         try:
             cs2 = ax.contour(
@@ -320,11 +315,6 @@ def _draw_component_contour_only_mode(ax, grid, comp, extent, cfg):
 
 
 def draw_static_geometry(ax, grid, potential, cfg, extent):
-    """
-    Draw screen/CAP/barrier geometry using structured barrier components when available.
-    Uses wall_mask for solid barrier visualization.
-    Returns a list of static matplotlib artists.
-    """
     artists = []
 
     if potential is None:
@@ -334,6 +324,7 @@ def draw_static_geometry(ax, grid, potential, cfg, extent):
 
     if _cfg_get(cfg, "SHOW_SCREEN_OVERLAY", True):
         screen_vis = potential.screen_mask_vis.astype(float)
+
         if np.any(screen_vis > 0.5):
             alpha_scale = float(_cfg_get(cfg, "SCREEN_ALPHA", 0.16))
 
@@ -366,6 +357,7 @@ def draw_static_geometry(ax, grid, potential, cfg, extent):
     if _cfg_get(cfg, "SHOW_CAP_OVERLAY", True):
         W_vis = _get_visible_field(grid, potential.W)
         wmax = float(np.max(W_vis))
+
         if wmax > 0.0:
             Wn = W_vis / (wmax + 1e-30)
             alpha_scale = float(_cfg_get(cfg, "CAP_ALPHA", 0.10))
@@ -427,6 +419,7 @@ def gamma_display(
     m = float(np.max(arr))
     if m <= 0:
         return arr
+
     return (arr / m) ** gamma
 
 
@@ -471,35 +464,160 @@ def build_potential_from_flag(grid, cfg, debug_free_case: bool):
 
 
 def density_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
+    """
+    Convert one visible state frame to scalar density.
+
+    Supported:
+      - scalar:      (Ny, Nx)
+      - Dirac-like:  (C, Ny, Nx)
+      - entangled:   (Ny, Nx, 2, 2)
+    """
     if state_vis.ndim == 2:
-        return np.abs(state_vis) ** 2
+        return (np.abs(state_vis) ** 2).astype(float)
+
     if state_vis.ndim == 3:
-        return np.sum(np.abs(state_vis) ** 2, axis=0)
-    raise ValueError(f"Unsupported state_vis ndim={state_vis.ndim}")
+        return np.sum(np.abs(state_vis) ** 2, axis=0).astype(float)
+
+    if state_vis.ndim == 4 and state_vis.shape[-2:] == (2, 2):
+        return np.sum(np.abs(state_vis) ** 2, axis=(-2, -1)).astype(float)
+
+    raise ValueError(f"Unsupported state_vis shape={state_vis.shape}")
+
+
+def effective_scalar_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
+    """
+    Convert one visible state frame into an effective scalar complex field
+    for phase visualization.
+
+    For entangled spinor:
+      amplitude = sqrt(sum_ab |psi_ab|^2)
+      phase     = phase of locally strongest spin component
+    """
+    if state_vis.ndim == 2:
+        return state_vis
+
+    if state_vis.ndim == 3:
+        rho = np.sum(np.abs(state_vis) ** 2, axis=0).astype(float)
+        amp = np.sqrt(np.maximum(rho, 0.0))
+
+        comp_abs2 = np.abs(state_vis) ** 2
+        idx = np.argmax(comp_abs2, axis=0)
+
+        phase_src = np.zeros(state_vis.shape[1:], dtype=np.complex128)
+        for k in range(state_vis.shape[0]):
+            mask = idx == k
+            phase_src[mask] = state_vis[k][mask]
+
+        phase_abs = np.abs(phase_src)
+        phase = np.ones_like(phase_src, dtype=np.complex128)
+        valid = phase_abs > 1e-12
+        phase[valid] = phase_src[valid] / phase_abs[valid]
+
+        return (amp * phase).astype(np.complex128)
+
+    if state_vis.ndim == 4 and state_vis.shape[-2:] == (2, 2):
+        rho = np.sum(np.abs(state_vis) ** 2, axis=(-2, -1)).astype(float)
+        amp = np.sqrt(np.maximum(rho, 0.0))
+
+        flat = state_vis.reshape(state_vis.shape[0], state_vis.shape[1], 4)
+        idx = np.argmax(np.abs(flat) ** 2, axis=-1)
+
+        phase_src = np.zeros(state_vis.shape[:2], dtype=np.complex128)
+        for k in range(4):
+            mask = idx == k
+            comp = flat[:, :, k]
+            phase_src[mask] = comp[mask]
+
+        phase_abs = np.abs(phase_src)
+        phase = np.ones_like(phase_src, dtype=np.complex128)
+        valid = phase_abs > 1e-12
+        phase[valid] = phase_src[valid] / phase_abs[valid]
+
+        return (amp * phase).astype(np.complex128)
+
+    raise ValueError(f"Unsupported state_vis shape={state_vis.shape}")
 
 
 def phase_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
-    if state_vis.ndim == 2:
-        return np.angle(state_vis)
-    if state_vis.ndim == 3:
-        return np.angle(state_vis[0])
-    raise ValueError(f"Unsupported state_vis ndim={state_vis.ndim}")
+    scalar = effective_scalar_from_state_vis(state_vis)
+    return np.angle(scalar)
 
 
 def forward_density_frames_from_state_vis(state_vis_frames: np.ndarray) -> np.ndarray:
+    """
+    Convert visible complex state frames to scalar density frames.
+
+    Supported:
+      - scalar:      (Nt, Ny, Nx)
+      - Dirac-like:  (Nt, C, Ny, Nx)
+      - entangled:   (Nt, Ny, Nx, 2, 2)
+    """
     if state_vis_frames.ndim == 3:
         return (np.abs(state_vis_frames) ** 2).astype(float)
+
     if state_vis_frames.ndim == 4:
         return np.sum(np.abs(state_vis_frames) ** 2, axis=1).astype(float)
-    raise ValueError(f"Unsupported state_vis_frames ndim={state_vis_frames.ndim}")
+
+    if state_vis_frames.ndim == 5 and state_vis_frames.shape[-2:] == (2, 2):
+        return np.sum(np.abs(state_vis_frames) ** 2, axis=(-2, -1)).astype(float)
+
+    raise ValueError(f"Unsupported state_vis_frames shape={state_vis_frames.shape}")
 
 
 def backward_density_frames_from_emix(emix_frames: np.ndarray) -> np.ndarray:
+    """
+    Convert Emix complex frames to scalar density frames.
+
+    Supported:
+      - scalar:      (Nt, Ny, Nx)
+      - Dirac-like:  (Nt, C, Ny, Nx)
+      - entangled:   (Nt, Ny, Nx, 2, 2)
+    """
     if emix_frames.ndim == 3:
         return (np.abs(emix_frames) ** 2).astype(float)
+
     if emix_frames.ndim == 4:
         return np.sum(np.abs(emix_frames) ** 2, axis=1).astype(float)
-    raise ValueError(f"Unsupported emix_frames ndim={emix_frames.ndim}")
+
+    if emix_frames.ndim == 5 and emix_frames.shape[-2:] == (2, 2):
+        return np.sum(np.abs(emix_frames) ** 2, axis=(-2, -1)).astype(float)
+
+    raise ValueError(f"Unsupported emix_frames shape={emix_frames.shape}")
+
+
+def make_overlap_complex_frames(
+    state_vis_frames: np.ndarray,
+    emix_frames: np.ndarray,
+) -> np.ndarray:
+    """
+    Local complex overlap frames.
+
+    Scalar:
+      z[t,y,x] = psi * conj(emix)
+
+    Dirac-like:
+      z[t,y,x] = sum_c psi_c * conj(emix_c)
+
+    Entangled:
+      z[t,y,x] = sum_ab psi_ab * conj(emix_ab)
+    """
+    if state_vis_frames.shape != emix_frames.shape:
+        raise ValueError(
+            f"State/Emix shape mismatch: {state_vis_frames.shape} vs {emix_frames.shape}"
+        )
+
+    if state_vis_frames.ndim == 3 and emix_frames.ndim == 3:
+        return state_vis_frames * np.conj(emix_frames)
+
+    if state_vis_frames.ndim == 4 and emix_frames.ndim == 4:
+        return np.sum(state_vis_frames * np.conj(emix_frames), axis=1)
+
+    if state_vis_frames.ndim == 5 and emix_frames.ndim == 5:
+        return np.sum(state_vis_frames * np.conj(emix_frames), axis=(-2, -1))
+
+    raise ValueError(
+        f"Unsupported State/Emix ndim: {state_vis_frames.ndim=} {emix_frames.ndim=}"
+    )
 
 
 def overlap_density_frames(
@@ -527,22 +645,8 @@ def make_phase_density_rgb(
 
     hsv = np.stack([hue, sat, value], axis=-1)
     rgb = hsv_to_rgb(hsv)
+
     return rgb, rho_norm
-
-
-def make_overlap_complex_frames(
-    state_vis_frames: np.ndarray,
-    emix_frames: np.ndarray,
-) -> np.ndarray:
-    if state_vis_frames.ndim == 3 and emix_frames.ndim == 3:
-        return state_vis_frames * np.conj(emix_frames)
-
-    if state_vis_frames.ndim == 4 and emix_frames.ndim == 4:
-        return np.sum(state_vis_frames * np.conj(emix_frames), axis=1)
-
-    raise ValueError(
-        f"State/Emix ndim mismatch: {state_vis_frames.ndim=} {emix_frames.ndim=}"
-    )
 
 
 def make_phase_density_rgb_from_complex_frames(
@@ -552,6 +656,10 @@ def make_phase_density_rgb_from_complex_frames(
     density_floor: float = 1e-12,
 ) -> tuple[np.ndarray, np.ndarray]:
     z = complex_frames[i]
+
+    if z.ndim != 2:
+        raise ValueError(f"complex_frames[i] must be 2D scalar complex field, got shape={z.shape}")
+
     amp2 = np.abs(z) ** 2
     phase = np.angle(z)
 
@@ -564,14 +672,35 @@ def make_phase_density_rgb_from_complex_frames(
 
     hsv = np.stack([hue, sat, value], axis=-1)
     rgb = hsv_to_rgb(hsv)
+
     return rgb, rho_norm
 
 
 def _default_frame_vref(frames: np.ndarray) -> float:
     if frames is None:
         return 1.0
+
     m = float(np.max(frames[0])) if len(frames) > 0 else 0.0
     return max(m, 1e-30)
+
+
+def make_forward_ridge_surrogate_frames(state_vis_frames: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build scalar surrogate frames for --ridge-source forward.
+
+    compute_ridge_xy expects amplitude overlap machinery. To make Gamma equal
+    forward density, use:
+
+      frames_psi = sqrt(rho_forward)
+      Emix       = ones
+
+    Then:
+      Gamma = |conj(1) * sqrt(rho)|^2 = rho
+    """
+    rho = forward_density_frames_from_state_vis(state_vis_frames)
+    amp = np.sqrt(np.maximum(rho, 0.0)).astype(np.complex128)
+    ones = np.ones_like(amp, dtype=np.complex128)
+    return amp, ones
 
 
 def build_render_image(
@@ -601,6 +730,7 @@ def build_render_image(
     if mode == "forward_density":
         if forward_density_current is None:
             raise RuntimeError("forward_density render mode requires forward density frames")
+
         img = gamma_display(
             forward_density_current[i],
             vref=_default_frame_vref(forward_density_current),
@@ -612,6 +742,7 @@ def build_render_image(
     if mode == "backward_density":
         if backward_density_current is None:
             raise RuntimeError("backward_density render mode requires backward density frames")
+
         img = gamma_display(
             backward_density_current[i],
             vref=_default_frame_vref(backward_density_current),
@@ -623,6 +754,7 @@ def build_render_image(
     if mode == "overlap_density":
         if overlap_density_current is None:
             raise RuntimeError("overlap_density render mode requires overlap density frames")
+
         img = gamma_display(
             overlap_density_current[i],
             vref=_default_frame_vref(overlap_density_current),
@@ -634,6 +766,7 @@ def build_render_image(
     if mode == "posthoc_base_rho":
         if posthoc_base_rho is None:
             raise RuntimeError("posthoc_base_rho render mode requires saved posthoc_base_rho")
+
         img = gamma_display(
             posthoc_base_rho[i],
             vref=_default_frame_vref(posthoc_base_rho),
@@ -645,6 +778,7 @@ def build_render_image(
     if mode == "posthoc_selected_rho":
         if posthoc_selected_rho is None:
             raise RuntimeError("posthoc_selected_rho render mode requires saved posthoc_selected_rho")
+
         img = gamma_display(
             posthoc_selected_rho[i],
             vref=_default_frame_vref(posthoc_selected_rho),
@@ -656,6 +790,7 @@ def build_render_image(
     if mode == "phase":
         if state_vis_frames is None:
             raise RuntimeError("phase render mode requires state_vis_frames")
+
         rgb, _rho_norm = make_phase_density_rgb(
             state_vis_frames[i],
             density_gamma=0.35,
@@ -666,6 +801,7 @@ def build_render_image(
     if mode == "phase_contours":
         if state_vis_frames is None:
             raise RuntimeError("phase_contours render mode requires state_vis_frames")
+
         rgb, rho_norm = make_phase_density_rgb(
             state_vis_frames[i],
             density_gamma=0.35,
@@ -676,6 +812,7 @@ def build_render_image(
     if mode == "ridge_phase":
         if ridge_complex_current is None:
             raise RuntimeError("ridge_phase render mode requires overlap complex frames")
+
         rgb, _rho_norm = make_phase_density_rgb_from_complex_frames(
             ridge_complex_current,
             i=i,
@@ -687,6 +824,7 @@ def build_render_image(
     if mode == "ridge_phase_contours":
         if ridge_complex_current is None:
             raise RuntimeError("ridge_phase_contours render mode requires overlap complex frames")
+
         rgb, rho_norm = make_phase_density_rgb_from_complex_frames(
             ridge_complex_current,
             i=i,
@@ -720,10 +858,22 @@ def compute_click_frame_idx(times: np.ndarray, t_det) -> int | None:
 
     if t_det <= float(times[0]):
         return 0
+
     if t_det > float(times[-1]):
         return None
 
     return int(np.searchsorted(times, t_det, side="left"))
+
+
+def safe_debug_state_for_phase_tools(state_vis: np.ndarray) -> np.ndarray:
+    """
+    Existing viz.visual_debug helpers may only understand scalar / simple spinor.
+    Use effective scalar for entangled state.
+    """
+    if state_vis.ndim == 4 and state_vis.shape[-2:] == (2, 2):
+        return effective_scalar_from_state_vis(state_vis)
+
+    return state_vis
 
 
 def main():
@@ -773,7 +923,7 @@ def main():
         "--ridge-source",
         choices=("overlap", "forward"),
         default="overlap",
-        help="Use overlap-based ridge (current behavior) or forward-density-only ridge",
+        help="Use overlap-based ridge or forward-density-only ridge",
     )
 
     parser.add_argument(
@@ -903,6 +1053,12 @@ def main():
     posthoc_worldline_info = bundle.get("posthoc_worldline_info", None)
 
     print(
+        "[LOAD SHAPES] "
+        f"state_vis_frames={None if state_vis_frames is None else state_vis_frames.shape} "
+        f"phi_tau_frames={None if phi_tau_frames is None else phi_tau_frames.shape}"
+    )
+
+    print(
         "[POSTHOC LOAD] "
         f"base_rho={'yes' if posthoc_base_rho_saved is not None else 'no'} "
         f"selected_rho={'yes' if posthoc_selected_rho_saved is not None else 'no'} "
@@ -919,7 +1075,7 @@ def main():
     if state_vis_frames is not None:
         dbg_i = args.debug_frame if args.debug_frame >= 0 else (len(state_vis_frames) - 1)
         dbg_i = max(0, min(dbg_i, len(state_vis_frames) - 1))
-        state_dbg = state_vis_frames[dbg_i]
+        state_dbg = safe_debug_state_for_phase_tools(state_vis_frames[dbg_i])
 
         if args.debug_phase:
             debug_plot_phase_density_composite_vis(
@@ -991,10 +1147,12 @@ def main():
                 radius=cfg.LOCALMAX_RADIUS,
                 alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
             )
+
         elif ridge_source == "forward":
+            fwd_amp, fwd_ones = make_forward_ridge_surrogate_frames(state_vis_frames)
             rx, ry, rs = compute_ridge_xy(
-                frames_psi=state_vis_frames,
-                Emix=None,
+                frames_psi=fwd_amp,
+                Emix=fwd_ones,
                 x_vis_1d=grid.x_vis_1d,
                 y_vis_1d=grid.y_vis_1d,
                 mode=cfg.RIDGE_MODE,
@@ -1002,29 +1160,33 @@ def main():
                 radius=cfg.LOCALMAX_RADIUS,
                 alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
             )
+
         else:
             raise ValueError(f"Unsupported ridge_source={ridge_source!r}")
 
         cos_th = speed = ux = uy = div_v = None
 
-        cos_th, speed, ux, uy, div_v = alignment_and_diagnostics_from_state_frames(
-            theory=theory,
-            state_vis_frames=state_vis_frames,
-            ridge_x=rx,
-            ridge_y=ry,
-            x_vis_1d=grid.x_vis_1d,
-            y_vis_1d=grid.y_vis_1d,
-            dx=grid.dx,
-            dy=grid.dy,
-            enable_divergence=cfg.ENABLE_DIVERGENCE_DIAGNOSTIC,
-            arrow_spatial_avg=cfg.ARROW_SPATIAL_AVG,
-            arrow_avg_radius=cfg.ARROW_AVG_RADIUS,
-            arrow_avg_gauss_sigma=cfg.ARROW_AVG_GAUSS_SIGMA,
-            arrow_temporal_smooth=cfg.ARROW_TEMPORAL_SMOOTH,
-            arrow_smooth_alpha=cfg.ARROW_SMOOTH_ALPHA,
-            align_eps_rho=cfg.ALIGN_EPS_RHO,
-            align_eps_speed=cfg.ALIGN_EPS_SPEED,
-        )
+        try:
+            cos_th, speed, ux, uy, div_v = alignment_and_diagnostics_from_state_frames(
+                theory=theory,
+                state_vis_frames=state_vis_frames,
+                ridge_x=rx,
+                ridge_y=ry,
+                x_vis_1d=grid.x_vis_1d,
+                y_vis_1d=grid.y_vis_1d,
+                dx=grid.dx,
+                dy=grid.dy,
+                enable_divergence=cfg.ENABLE_DIVERGENCE_DIAGNOSTIC,
+                arrow_spatial_avg=cfg.ARROW_SPATIAL_AVG,
+                arrow_avg_radius=cfg.ARROW_AVG_RADIUS,
+                arrow_avg_gauss_sigma=cfg.ARROW_AVG_GAUSS_SIGMA,
+                arrow_temporal_smooth=cfg.ARROW_TEMPORAL_SMOOTH,
+                arrow_smooth_alpha=cfg.ARROW_SMOOTH_ALPHA,
+                align_eps_rho=cfg.ALIGN_EPS_RHO,
+                align_eps_speed=cfg.ALIGN_EPS_SPEED,
+            )
+        except Exception as e:
+            print(f"[ALIGN] skipped in visualize: {e}")
 
         return rho, Emix, rx, ry, rs, cos_th, speed, ux, uy, div_v
 
@@ -1130,7 +1292,6 @@ def main():
             )
             contour_artists = list(cs.collections)
 
-        # Optional posthoc corridor overlay for posthoc render modes
         posthoc_corridor_artists = []
         if mode in {"posthoc_base_rho", "posthoc_selected_rho"}:
             if posthoc_corridor_upper_mask is not None:
@@ -1311,10 +1472,12 @@ def main():
                 artist.remove()
             except Exception:
                 pass
+
         panel["contour_artists"] = []
 
     def update_panel_image(panel: dict, i: int):
         mode = panel["mode"]
+
         img, rho_norm, _img_kind = build_render_image(
             mode=mode,
             i=i,
@@ -1329,9 +1492,11 @@ def main():
             vref=vref,
             cfg=cfg,
         )
+
         panel["im"].set_data(img)
 
         clear_contours(panel)
+
         if mode_has_contours(mode) and rho_norm is not None:
             cs = panel["ax"].contour(
                 grid.X_vis,
@@ -1593,8 +1758,10 @@ def main():
 
     if args.save_mp4:
         output_mp4 = args.output_mp4
+
         if output_mp4 is None:
             output_mp4 = getattr(cfg, "OUTPUT_MP4", str(Path(args.npz_path).with_suffix(".mp4")))
+
         print(f"[SAVE] animation -> {output_mp4}")
         ani.save(output_mp4, writer="ffmpeg", fps=25, dpi=150)
 

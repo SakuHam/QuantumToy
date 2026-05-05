@@ -52,6 +52,11 @@ from core.potentials import build_potential
 def state_density_for_runner(state, theory=None):
     """
     Return scalar 2D density rho[y, x] for all supported theory states.
+
+    Supported:
+      - scalar:      (Ny, Nx)
+      - Dirac-like:  (C, Ny, Nx)
+      - entangled:   (Ny, Nx, 2, 2)
     """
     if theory is not None and hasattr(theory, "density"):
         try:
@@ -68,7 +73,7 @@ def state_density_for_runner(state, theory=None):
     if state.ndim == 2:
         return np.abs(state) ** 2
 
-    if state.ndim == 3 and state.shape[0] == 2:
+    if state.ndim == 3:
         return np.sum(np.abs(state) ** 2, axis=0)
 
     if state.ndim == 4 and state.shape[-2:] == (2, 2):
@@ -76,7 +81,65 @@ def state_density_for_runner(state, theory=None):
 
     raise ValueError(f"Unsupported state shape for density: {state.shape}")
 
+
+def frames_density_for_runner(frames: np.ndarray) -> np.ndarray:
+    """
+    Convert complex visible frames to scalar density frames.
+
+    Supported:
+      - scalar frames:     (Nt, Ny, Nx)
+      - Dirac frames:      (Nt, C, Ny, Nx)
+      - entangled frames:  (Nt, Ny, Nx, 2, 2)
+    """
+    if not isinstance(frames, np.ndarray):
+        raise TypeError(f"frames must be np.ndarray, got {type(frames)}")
+
+    if frames.ndim == 3:
+        return (np.abs(frames) ** 2).astype(float)
+
+    if frames.ndim == 4:
+        return np.sum(np.abs(frames) ** 2, axis=1).astype(float)
+
+    if frames.ndim == 5 and frames.shape[-2:] == (2, 2):
+        return np.sum(np.abs(frames) ** 2, axis=(-2, -1)).astype(float)
+
+    raise ValueError(f"Unsupported frames shape for density: {frames.shape}")
+
+
+def crop_state_visible(state: np.ndarray, grid) -> np.ndarray:
+    """
+    Crop full-grid state to visible window.
+
+    Supported:
+      - scalar:      (Ny, Nx)        -> (Ny_vis, Nx_vis)
+      - Dirac-like:  (C, Ny, Nx)     -> (C, Ny_vis, Nx_vis)
+      - entangled:   (Ny, Nx, 2, 2)  -> (Ny_vis, Nx_vis, 2, 2)
+    """
+    if not isinstance(state, np.ndarray):
+        raise TypeError(f"state must be np.ndarray, got {type(state)}")
+
+    if state.ndim == 2:
+        return state[grid.ys, grid.xs].copy()
+
+    if state.ndim == 3:
+        return state[:, grid.ys, grid.xs].copy()
+
+    if state.ndim == 4 and state.shape[-2:] == (2, 2):
+        return state[grid.ys, grid.xs, :, :].copy()
+
+    raise ValueError(f"Unsupported state shape for visible crop: {state.shape}")
+
+
 def detector_compatible_state(state: np.ndarray) -> np.ndarray:
+    """
+    Convert theory state into something EmergentDetector understands.
+
+    Entangled spinor:
+      (Ny, Nx, 2, 2) -> effective scalar psi[y, x]
+
+    The effective scalar has total spinor density and phase copied from the
+    locally strongest spin component.
+    """
     if not isinstance(state, np.ndarray):
         return state
 
@@ -84,9 +147,11 @@ def detector_compatible_state(state: np.ndarray) -> np.ndarray:
         rho = np.sum(np.abs(state) ** 2, axis=(-2, -1)).astype(float)
         amp = np.sqrt(np.maximum(rho, 0.0))
 
-        # Use phase of locally strongest spin component.
         comp_abs2 = np.abs(state) ** 2
-        flat_idx = np.argmax(comp_abs2.reshape(state.shape[0], state.shape[1], 4), axis=-1)
+        flat_idx = np.argmax(
+            comp_abs2.reshape(state.shape[0], state.shape[1], 4),
+            axis=-1,
+        )
 
         comps = [
             state[:, :, 0, 0],
@@ -96,14 +161,20 @@ def detector_compatible_state(state: np.ndarray) -> np.ndarray:
         ]
 
         phase_src = np.zeros(state.shape[:2], dtype=np.complex128)
+
         for k, comp in enumerate(comps):
             mask = flat_idx == k
             phase_src[mask] = comp[mask]
 
-        phase = phase_src / np.maximum(np.abs(phase_src), 1e-12)
+        phase_abs = np.abs(phase_src)
+        phase = np.ones(state.shape[:2], dtype=np.complex128)
+        valid = phase_abs > 1e-12
+        phase[valid] = phase_src[valid] / phase_abs[valid]
+
         return (amp * phase).astype(np.complex128)
 
     return state
+
 
 def estimate_slit_separation_from_masks(grid, potential):
     """
@@ -121,8 +192,6 @@ def estimate_slit_separation_from_masks(grid, potential):
 
     y1 = np.mean(grid.Y[slit1])
     y2 = np.mean(grid.Y[slit2])
-
-    d = abs(y2 - y1)
 
     y1_vals = grid.Y[potential.slit1_mask]
     y2_vals = grid.Y[potential.slit2_mask]
@@ -146,7 +215,7 @@ def estimate_group_velocity(cfg, theory) -> float:
     """
     Estimate packet group velocity for sigmaT initialization.
 
-    For Dirac-like theories (spinor state), use relativistic estimate:
+    For Dirac-like theories, use relativistic estimate:
         v = c^2 p / E,   p = hbar * k0x
         E = sqrt((c p)^2 + (m c^2)^2)
 
@@ -168,11 +237,15 @@ def estimate_group_velocity(cfg, theory) -> float:
 
 
 def _forward_density_from_state_vis_frames(state_vis_frames: np.ndarray) -> np.ndarray:
-    if state_vis_frames.ndim == 3:
-        return (np.abs(state_vis_frames) ** 2).astype(float)
-    if state_vis_frames.ndim == 4:
-        return np.sum(np.abs(state_vis_frames) ** 2, axis=1).astype(float)
-    raise ValueError(f"Unsupported state_vis_frames ndim={state_vis_frames.ndim}")
+    """
+    Convert visible complex state frames to density.
+
+    Supported:
+      - scalar:      (Nt, Ny, Nx)
+      - Dirac-like:  (Nt, C, Ny, Nx)
+      - entangled:   (Nt, Ny, Nx, 2, 2)
+    """
+    return frames_density_for_runner(state_vis_frames)
 
 
 def build_Emix_density_reference(
@@ -208,18 +281,13 @@ def build_Emix_density_reference(
         if s > 0:
             w = w / s
 
-    if phi_tau_frames.ndim == 3:
-        phi_tau_density = (np.abs(phi_tau_frames) ** 2).astype(float)
-    elif phi_tau_frames.ndim == 4:
-        phi_tau_density = np.sum(np.abs(phi_tau_frames) ** 2, axis=1).astype(float)
-    else:
-        raise ValueError(f"Unsupported phi_tau_frames ndim={phi_tau_frames.ndim}")
-
+    phi_tau_density = frames_density_for_runner(phi_tau_frames)
     out = np.zeros_like(phi_tau_density, dtype=float)
 
     for i, ti in enumerate(times):
         tau = Tk - ti
         valid = tau >= 0.0
+
         if not np.any(valid):
             continue
 
@@ -288,6 +356,7 @@ def run_diagnostics(
         (np.abs(grid.X_vis - x_click) < 0.5 * grid.dx + 1e-12) &
         (np.abs(grid.Y_vis - y_click) < 0.5 * grid.dy + 1e-12)
     )
+
     n_click_cells = int(np.count_nonzero(click_mask))
     print(f"[DIAG D2] click cell matches on visible grid = {n_click_cells}")
     assert np.any(click_mask), "Click does not land on any visible-grid cell"
@@ -301,35 +370,49 @@ def run_diagnostics(
     assert dx_screen < (cfg.screen_eval_width + grid.dx), \
         f"x_click={x_click} seems too far from detector screen center {cfg.screen_center_x}"
 
+    # --------------------------------------------------------
+    # D3: backward-library frame 0 must equal visible crop of
+    # freshly initialized complex click state.
+    # --------------------------------------------------------
+
     phi0_full = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
-    if phi0_full.ndim == 2:
-        phi0_vis_ref = np.abs(phi0_full) ** 2
-    elif phi0_full.ndim == 3:
-        # Dirac-like / component-first spinor: (C, Ny, Nx)
-        phi0_vis_ref = np.sum(np.abs(phi0_full) ** 2, axis=0)
-    elif phi0_full.ndim == 4 and phi0_full.shape[-2:] == (2, 2):
-        # Entangled spinor: (Ny, Nx, 2, 2)
-        phi0_vis_ref = np.sum(np.abs(phi0_full) ** 2, axis=(-2, -1))
-    else:
-        raise ValueError(f"Unsupported phi0_full shape={phi0_full.shape}")
+    phi0_vis_ref = crop_state_visible(phi0_full, grid)
+
+    if phi_tau_frames[0].shape != phi0_vis_ref.shape:
+        raise ValueError(
+            "phi_tau_frames[0] and phi0_vis_ref shape mismatch: "
+            f"{phi_tau_frames[0].shape} vs {phi0_vis_ref.shape}"
+        )
 
     phi0_diff = float(np.max(np.abs(phi_tau_frames[0] - phi0_vis_ref)))
     print(f"[DIAG D3] phi_tau_frames[0] max abs diff vs click-state crop = {phi0_diff:.6e}")
     assert np.allclose(phi_tau_frames[0], phi0_vis_ref, rtol=1e-12, atol=1e-12), \
         f"phi_tau_frames[0] mismatch: max abs diff = {phi0_diff}"
 
+    rho_phi0_lib = state_density_for_runner(phi_tau_frames[0])
+    rho_phi0_ref = state_density_for_runner(phi0_vis_ref)
+    rho0_diff = float(np.max(np.abs(rho_phi0_lib - rho_phi0_ref)))
+    print(f"[DIAG D3b] phi_tau_frames[0] density max abs diff = {rho0_diff:.6e}")
+
+    # --------------------------------------------------------
+    # D4: replay backward evolution.
+    # --------------------------------------------------------
+
     ncheck = min(5, Nt - 1)
+
     for i in range(ncheck):
         phi_test = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
+
         for _ in range((i + 1) * cfg.save_every):
             phi_test = theory.step_backward_adjoint(phi_test, cfg.dt).state
 
-        if phi_test.ndim == 2:
-            phi_test_vis = phi_test[grid.ys, grid.xs]
-        elif phi_test.ndim == 3:
-            phi_test_vis = phi_test[:, grid.ys, grid.xs]
-        else:
-            raise ValueError(f"Unsupported phi_test ndim={phi_test.ndim}")
+        phi_test_vis = crop_state_visible(phi_test, grid)
+
+        if phi_tau_frames[i + 1].shape != phi_test_vis.shape:
+            raise ValueError(
+                f"Backward replay shape mismatch at frame {i + 1}: "
+                f"{phi_tau_frames[i + 1].shape} vs {phi_test_vis.shape}"
+            )
 
         step_diff = float(np.max(np.abs(phi_tau_frames[i + 1] - phi_test_vis)))
         print(f"[DIAG D4] backward replay frame {i+1} max abs diff = {step_diff:.6e}")
@@ -382,12 +465,14 @@ def run_diagnostics(
             f"rho_oldstyle mismatch: max abs diff = {rho_old_diff}"
 
     check_ids = sorted(set([0, Nt // 2, Nt - 1]))
+
     for i in check_ids:
         fi = frames_density[i]
         assert np.all(np.isfinite(fi)), f"frames_density[{i}] non-finite"
         assert np.max(fi) > 0.0, f"frames_density[{i}] is all zeros"
 
         argmax_ij = np.unravel_index(np.argmax(fi), fi.shape)
+
         print(
             f"[DIAG D7/FWD] i={i:4d} t={times[i]:7.3f} "
             f"sum={np.sum(fi) * grid.dx * grid.dy:.6e} "
@@ -410,6 +495,7 @@ def run_diagnostics(
             dx=grid.dx,
             dy=grid.dy,
         )
+
         for i in check_ids:
             rr = rho_old_ref[i]
             print(
@@ -584,6 +670,7 @@ class QuantumSimulationApp:
 
     def build_batch_sampler_config(self) -> BatchSamplerConfig:
         cfg = self.cfg
+
         return BatchSamplerConfig(
             enabled=bool(getattr(cfg, "ENABLE_FLUX_BATCH_SAMPLER", True)),
             num_samples=int(getattr(cfg, "FLUX_BATCH_NUM_SAMPLES", 10_000)),
@@ -696,10 +783,11 @@ class QuantumSimulationApp:
             detector_diags.append(det_res.aux if det_res.aux is not None else {})
 
             need_save = (n % cfg.save_every == 0)
+
             if need_save:
                 t0 = time.perf_counter()
 
-                rho = theory.density(state)
+                rho = state_density_for_runner(state, theory=theory)
                 norm_now = norm_prob(rho, grid.dx, grid.dy)
 
                 rho_vis = rho[grid.ys, grid.xs].copy()
@@ -708,19 +796,17 @@ class QuantumSimulationApp:
                 norms.append(norm_now)
 
                 state_vis = None
-                if cfg.SAVE_COMPLEX_STATE_FRAMES:
-                    state_vis = state_density_for_runner(state, theory=theory)
 
+                if cfg.SAVE_COMPLEX_STATE_FRAMES:
+                    # IMPORTANT:
+                    # This must be the complex visible state, not density.
+                    # Post-hoc Emix/ridge/overlap analysis needs amplitudes.
+                    state_vis = crop_state_visible(state, grid)
                     state_vis_frames.append(state_vis)
 
                 if save_posthoc_gamma_like and can_export_posthoc_fields:
                     if state_vis is None:
-                        if state.ndim == 2:
-                            state_vis_for_posthoc = state[grid.ys, grid.xs]
-                        elif state.ndim == 3:
-                            state_vis_for_posthoc = state[:, grid.ys, grid.xs]
-                        else:
-                            raise ValueError(f"Unsupported state ndim={state.ndim}")
+                        state_vis_for_posthoc = crop_state_visible(state, grid)
                     else:
                         state_vis_for_posthoc = state_vis
 
@@ -853,6 +939,7 @@ class QuantumSimulationApp:
             x_peak = grid.X_vis[iy, ix]
             y_peak = grid.Y_vis[iy, ix]
             mass_vis = np.sum(fi) * grid.dx * grid.dy
+
             print(
                 f"[FWDCHK] i={i:4d} t={times[i]:8.4f} "
                 f"mass_vis={mass_vis:.6e} "
@@ -887,20 +974,23 @@ class QuantumSimulationApp:
         if forward.state_vis_frames is None:
             return
 
-        rms_mean, rms_max, abs_max = continuity_residual_from_state_frames(
-            theory=theory,
-            state_vis_frames=forward.state_vis_frames,
-            dx=grid.dx,
-            dy=grid.dy,
-            dt=cfg.save_every * cfg.dt,
-        )
+        try:
+            rms_mean, rms_max, abs_max = continuity_residual_from_state_frames(
+                theory=theory,
+                state_vis_frames=forward.state_vis_frames,
+                dx=grid.dx,
+                dy=grid.dy,
+                dt=cfg.save_every * cfg.dt,
+            )
 
-        print(
-            "[CONTINUITY] "
-            f"RMS_mean≈{rms_mean:.3e}, "
-            f"RMS_max≈{rms_max:.3e}, "
-            f"ABS_max≈{abs_max:.3e}"
-        )
+            print(
+                "[CONTINUITY] "
+                f"RMS_mean≈{rms_mean:.3e}, "
+                f"RMS_max≈{rms_max:.3e}, "
+                f"ABS_max≈{abs_max:.3e}"
+            )
+        except Exception as e:
+            print(f"[CONTINUITY] skipped: {e}")
 
         if not np.any(potential.screen_mask_vis):
             print("[DEBUG] screen_mask_vis empty -> skipping click/backward/Emix analysis.")
@@ -1001,6 +1091,7 @@ class QuantumSimulationApp:
             output_prefix = str(Path(output_mp4).with_suffix(""))
 
         batch_runtime = forward.batch_runtime
+
         if batch_runtime.sampler is not None:
             batch_summary_path = f"{output_prefix}_flux_summary.json"
             batch_clicks_json_path = f"{output_prefix}_pseudo_clicks.json"
@@ -1088,24 +1179,32 @@ class QuantumSimulationApp:
                 alpha_smooth=cfg.LOCALMAX_SMOOTH_ALPHA,
             )
 
-            cos_th, speed, ux, uy, div_v = alignment_and_diagnostics_from_state_frames(
-                theory=theory,
-                state_vis_frames=state_vis_frames,
-                ridge_x=rx,
-                ridge_y=ry,
-                x_vis_1d=grid.x_vis_1d,
-                y_vis_1d=grid.y_vis_1d,
-                dx=grid.dx,
-                dy=grid.dy,
-                enable_divergence=cfg.ENABLE_DIVERGENCE_DIAGNOSTIC,
-                arrow_spatial_avg=cfg.ARROW_SPATIAL_AVG,
-                arrow_avg_radius=cfg.ARROW_AVG_RADIUS,
-                arrow_avg_gauss_sigma=cfg.ARROW_AVG_GAUSS_SIGMA,
-                arrow_temporal_smooth=cfg.ARROW_TEMPORAL_SMOOTH,
-                arrow_smooth_alpha=cfg.ARROW_SMOOTH_ALPHA,
-                align_eps_rho=cfg.ALIGN_EPS_RHO,
-                align_eps_speed=cfg.ALIGN_EPS_SPEED,
-            )
+            try:
+                cos_th, speed, ux, uy, div_v = alignment_and_diagnostics_from_state_frames(
+                    theory=theory,
+                    state_vis_frames=state_vis_frames,
+                    ridge_x=rx,
+                    ridge_y=ry,
+                    x_vis_1d=grid.x_vis_1d,
+                    y_vis_1d=grid.y_vis_1d,
+                    dx=grid.dx,
+                    dy=grid.dy,
+                    enable_divergence=cfg.ENABLE_DIVERGENCE_DIAGNOSTIC,
+                    arrow_spatial_avg=cfg.ARROW_SPATIAL_AVG,
+                    arrow_avg_radius=cfg.ARROW_AVG_RADIUS,
+                    arrow_avg_gauss_sigma=cfg.ARROW_AVG_GAUSS_SIGMA,
+                    arrow_temporal_smooth=cfg.ARROW_TEMPORAL_SMOOTH,
+                    arrow_smooth_alpha=cfg.ARROW_SMOOTH_ALPHA,
+                    align_eps_rho=cfg.ALIGN_EPS_RHO,
+                    align_eps_speed=cfg.ALIGN_EPS_SPEED,
+                )
+            except Exception as e:
+                print(f"[ALIGN] skipped: {e}")
+                cos_th = None
+                speed = None
+                ux = None
+                uy = None
+                div_v = None
 
             return rho, Emix, rx, ry, rs, cos_th, speed, ux, uy, div_v
 
@@ -1238,6 +1337,8 @@ class QuantumSimulationApp:
             K_JITTER=int(getattr(cfg, "K_JITTER", 13)),
         )
 
+        base_rho = None
+
         if base_field_mode == "gamma_like":
             if forward.posthoc_gamma_like_frames is None:
                 print("[POSTHOC] gamma_like requested but no posthoc_gamma_like_frames available; falling back to density.")
@@ -1249,6 +1350,7 @@ class QuantumSimulationApp:
                     dx=grid.dx,
                     dy=grid.dy,
                 )
+
         if base_field_mode == "density":
             base_rho = make_rho(
                 frames_psi=forward.state_vis_frames,
@@ -1259,6 +1361,9 @@ class QuantumSimulationApp:
                 mode=rho_mode,
                 blend_alpha=float(getattr(cfg, "RHO_BLEND_ALPHA", 0.5)),
             )
+
+        if base_rho is None:
+            raise RuntimeError(f"Failed to build posthoc base_rho for base_field_mode={base_field_mode!r}")
 
         posthoc_cfg = PosthocTRFConfig(
             enabled=True,
@@ -1368,53 +1473,65 @@ class QuantumSimulationApp:
 
         print("Bohmian overlay: computing velocity frames...")
 
-        vx_frames, vy_frames, rho_frames = build_velocity_frames_from_state(
-            theory=theory,
-            state_vis_frames=forward.state_vis_frames,
-            eps_rho=cfg.ALIGN_EPS_RHO,
-        )
+        try:
+            vx_frames, vy_frames, rho_frames = build_velocity_frames_from_state(
+                theory=theory,
+                state_vis_frames=forward.state_vis_frames,
+                eps_rho=cfg.ALIGN_EPS_RHO,
+            )
+        except Exception as e:
+            print(f"[BOHMIAN] skipped: velocity frame build failed: {e}")
+            return BohmianResult()
 
-        bohm_init_points = make_bohmian_initial_points(
-            mode=cfg.BOHMIAN_INIT_MODE,
-            ntraj=cfg.BOHMIAN_N_TRAJ,
-            custom_points=cfg.BOHMIAN_CUSTOM_POINTS,
-            ridge_x0=sigma_products.ridge_x_init[0],
-            ridge_y0=sigma_products.ridge_y_init[0],
-            x0_packet=cfg.x0,
-            y0_packet=cfg.y0,
-            psi0_vis=forward.state_vis_frames[0],
-            x_vis_1d=grid.x_vis_1d,
-            y_vis_1d=grid.y_vis_1d,
-            jitter=cfg.BOHMIAN_INIT_JITTER,
-            rng_seed=cfg.BOHMIAN_RNG_SEED,
-            with_replacement=cfg.BOHMIAN_WITH_REPLACEMENT,
-        )
+        try:
+            bohm_init_points = make_bohmian_initial_points(
+                mode=cfg.BOHMIAN_INIT_MODE,
+                ntraj=cfg.BOHMIAN_N_TRAJ,
+                custom_points=cfg.BOHMIAN_CUSTOM_POINTS,
+                ridge_x0=sigma_products.ridge_x_init[0],
+                ridge_y0=sigma_products.ridge_y_init[0],
+                x0_packet=cfg.x0,
+                y0_packet=cfg.y0,
+                psi0_vis=forward.state_vis_frames[0],
+                x_vis_1d=grid.x_vis_1d,
+                y_vis_1d=grid.y_vis_1d,
+                jitter=cfg.BOHMIAN_INIT_JITTER,
+                rng_seed=cfg.BOHMIAN_RNG_SEED,
+                with_replacement=cfg.BOHMIAN_WITH_REPLACEMENT,
+            )
+        except Exception as e:
+            print(f"[BOHMIAN] skipped: initial point build failed: {e}")
+            return BohmianResult()
 
         print(
             f"Bohmian overlay: integrating {len(bohm_init_points)} trajectories "
             f"({'RK4' if cfg.BOHMIAN_USE_RK4 else 'Euler'})..."
         )
 
-        bohm_traj_x, bohm_traj_y, bohm_traj_alive = integrate_bohmian_trajectories(
-            vx_frames=vx_frames,
-            vy_frames=vy_frames,
-            rho_frames=rho_frames,
-            times=forward.times,
-            tau_step=cfg.save_every * cfg.dt,
-            x_vis_1d=grid.x_vis_1d,
-            y_vis_1d=grid.y_vis_1d,
-            dx=grid.dx,
-            dy=grid.dy,
-            init_points=bohm_init_points,
-            stop_outside_visible=cfg.BOHMIAN_STOP_OUTSIDE_VISIBLE,
-            x_vis_min=grid.x_vis_min,
-            x_vis_max=grid.x_vis_max,
-            y_vis_min=grid.y_vis_min,
-            y_vis_max=grid.y_vis_max,
-            stop_on_low_rho=cfg.BOHMIAN_STOP_ON_LOW_RHO,
-            min_rho=cfg.BOHMIAN_MIN_RHO,
-            use_rk4=cfg.BOHMIAN_USE_RK4,
-        )
+        try:
+            bohm_traj_x, bohm_traj_y, bohm_traj_alive = integrate_bohmian_trajectories(
+                vx_frames=vx_frames,
+                vy_frames=vy_frames,
+                rho_frames=rho_frames,
+                times=forward.times,
+                tau_step=cfg.save_every * cfg.dt,
+                x_vis_1d=grid.x_vis_1d,
+                y_vis_1d=grid.y_vis_1d,
+                dx=grid.dx,
+                dy=grid.dy,
+                init_points=bohm_init_points,
+                stop_outside_visible=cfg.BOHMIAN_STOP_OUTSIDE_VISIBLE,
+                x_vis_min=grid.x_vis_min,
+                x_vis_max=grid.x_vis_max,
+                y_vis_min=grid.y_vis_min,
+                y_vis_max=grid.y_vis_max,
+                stop_on_low_rho=cfg.BOHMIAN_STOP_ON_LOW_RHO,
+                min_rho=cfg.BOHMIAN_MIN_RHO,
+                use_rk4=cfg.BOHMIAN_USE_RK4,
+            )
+        except Exception as e:
+            print(f"[BOHMIAN] skipped: integration failed: {e}")
+            return BohmianResult(bohm_init_points=bohm_init_points)
 
         return BohmianResult(
             bohm_traj_x=bohm_traj_x,
@@ -1502,6 +1619,7 @@ class QuantumSimulationApp:
     def get_output_prefix(self) -> str:
         cfg = self.cfg
         output_prefix = getattr(cfg, "OUTPUT_PREFIX", None)
+
         if output_prefix:
             return str(output_prefix)
 
@@ -1661,6 +1779,7 @@ class QuantumSimulationApp:
             return
 
         print("Backward library: computing phi_tau frames...")
+
         phi_tau_frames = build_backward_library(
             theory=setup.theory,
             grid=setup.grid,
@@ -1672,6 +1791,7 @@ class QuantumSimulationApp:
             save_every=self.cfg.save_every,
             print_every_frames=20,
         )
+
         print("Backward library done.")
 
         v_est_diag = estimate_group_velocity(self.cfg, setup.theory)
@@ -1703,7 +1823,9 @@ class QuantumSimulationApp:
             phi_tau_frames=phi_tau_frames,
             click=click,
         )
+
         self.print_posthoc_summary(posthoc)
+
         if posthoc.result is not None and posthoc.base_rho is not None:
             print(
                 "[POSTHOC SAVE READY] "
