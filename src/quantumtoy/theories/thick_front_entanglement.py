@@ -64,12 +64,9 @@ def _normalize_unit_spinor_4d(
     prob = float(np.sum(np.abs(psi) ** 2) * dx * dy)
     if prob <= 0.0:
         return psi, 0.0
+
     norm = float(np.sqrt(prob))
     return psi / norm, norm
-
-
-def _identity2() -> np.ndarray:
-    return np.eye(2, dtype=np.complex128)
 
 
 def _spin_basis_from_angle(theta: float) -> np.ndarray:
@@ -77,16 +74,10 @@ def _spin_basis_from_angle(theta: float) -> np.ndarray:
     Real spin-1/2 measurement basis rotation around y-axis.
 
     Columns are the + and - basis vectors in computational basis.
-
-    This is enough for quick Bell/EPR-style angle sweeps:
-        Ua = _spin_basis_from_angle(theta_a)
-        Ub = _spin_basis_from_angle(theta_b)
-
-    If you want arbitrary complex SU(2) bases later, pass custom matrices
-    through ent_Ua / ent_Ub after construction.
     """
     c = np.cos(0.5 * float(theta))
     s = np.sin(0.5 * float(theta))
+
     return np.asarray(
         [
             [c, -s],
@@ -98,12 +89,15 @@ def _spin_basis_from_angle(theta: float) -> np.ndarray:
 
 def _validate_unitary_2x2(U: np.ndarray, name: str):
     U = np.asarray(U, dtype=np.complex128)
+
     _assert(U.shape == (2, 2), f"{name} must have shape (2,2), got {U.shape}")
+
     eye = U.conj().T @ U
     _assert(
         np.allclose(eye, np.eye(2), atol=1e-8, rtol=1e-8),
         f"{name} does not look unitary: U^dagger U={eye}",
     )
+
     return U
 
 
@@ -123,12 +117,6 @@ def rotate_state_to_measurement_basis(
     Returns:
         psi_m shape:
         (Ny, Nx, 2, 2)
-
-    Uses:
-        psi_m[:, :, i, j] =
-            sum_ab conj(Ua[a,i]) conj(Ub[b,j]) psi[:, :, a, b]
-
-    Equivalent to applying Ua^dagger and Ub^dagger to the two spin indices.
     """
     _assert_complex_spinor_4d(psi, "psi(rotate)")
     Ua = _validate_unitary_2x2(Ua, "Ua")
@@ -136,6 +124,7 @@ def rotate_state_to_measurement_basis(
 
     tmp = np.einsum("ia,xyab->xyib", Ua.conj().T, psi)
     out = np.einsum("xyib,jb->xyij", tmp, Ub.conj().T)
+
     return out.astype(np.complex128)
 
 
@@ -153,6 +142,7 @@ def rotate_state_from_measurement_basis(
 
     tmp = np.einsum("ai,xyij->xyaj", Ua, psi_m)
     out = np.einsum("xyaj,bj->xyab", tmp, Ub)
+
     return out.astype(np.complex128)
 
 
@@ -191,22 +181,14 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         Schrödinger split-operator step is applied independently to each
         spin channel.
 
-    Thick-front operator:
-        scalar front sharpening is computed from total spinor density and
-        local spinor phase/coherence.
+    Stern-Gerlach effective analyzer:
+        Optional channel-dependent phase gradient:
+            V_ab(x,y) = - ent_sg_strength * sign_ab * (Y - y0) * window_x
 
-    Branch competition:
-        scalar inhibition is computed from total density/coherence and applied
-        to all spin components.
+        Forward phase:
+            exp(-i V_ab dt / hbar)
 
-    Entanglement selection:
-        state is rotated into measurement basis Ua/Ub, channel densities are
-        computed for ++,+-,-+,--, and a persistent or dynamic selected channel
-        can be amplified while non-selected channels are damped.
-
-    This gives a practical bridge between:
-        - ThickFrontOptimizedTheory-style local sharpening/competition
-        - entanglement_posthoc_trf.py channel evidence logic
+        Since F_y = -dV/dy, positive sign_ab receives positive-y force.
     """
 
     # --------------------------------------------------------
@@ -249,10 +231,52 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
     ent_theta_a: float = 0.0
     ent_theta_b: float = 0.0
 
-    # Optional custom 2x2 unitaries.
-    # If None, they are built from ent_theta_a / ent_theta_b.
     ent_Ua: object | None = None
     ent_Ub: object | None = None
+
+    # --------------------------------------------------------
+    # Effective Stern-Gerlach analyzer
+    # --------------------------------------------------------
+
+    ent_sg_enabled: bool = True
+
+    # Modes:
+    #   "off"
+    #   "A"
+    #   "B"
+    #   "sum"
+    #   "difference"
+    #
+    # A:
+    #   ++,+- receive + force; -+,-- receive - force
+    #
+    # B:
+    #   ++,-+ receive + force; +-,-- receive - force
+    #
+    # sum:
+    #   ++ -> +2, +- -> 0, -+ -> 0, -- -> -2
+    #
+    # difference:
+    #   ++ -> 0, +- -> +2, -+ -> -2, -- -> 0
+    ent_sg_mode: str = "A"
+
+    # Strength of y-force. Positive strength means positive channel sign
+    # accelerates toward +y.
+    ent_sg_strength: float = 1.0 #0.10
+
+    # Analyzer x-window.
+    ent_sg_center_x: float = -6.0 #2.0
+    ent_sg_width_x: float = 4.0
+
+    # Linear potential is proportional to (Y - ent_sg_y_center).
+    ent_sg_y_center: float = 0.0
+
+    # If true, SG signs are applied after rotating into measurement basis Ua/Ub.
+    # This is usually the natural analyzer interpretation.
+    ent_sg_use_measurement_basis: bool = True
+
+    # Optional absolute potential clipping. 0 means disabled.
+    ent_sg_clip_abs: float = 0.0
 
     # --------------------------------------------------------
     # Entanglement selection parameters
@@ -268,18 +292,13 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
     ent_channel_mode: str = "max_channel"
     ent_fixed_channel: str = "++"
 
-    # If true, channel is chosen once and then kept.
-    # If false, channel can be re-chosen every step.
     ent_channel_persistent: bool = True
 
-    # Evidence weighting:
-    #   False -> evidence = integral channel_density
-    #   True  -> evidence = integral channel_density * gamma_like
     ent_channel_evidence_use_gamma: bool = True
 
     # Spatial selection field:
-    #   "density" -> use full selected-channel density as gate
-    #   "peak_tube" -> make Gaussian tube around strongest selected-channel peak
+    #   "density"
+    #   "peak_tube"
     ent_spatial_gate_mode: str = "peak_tube"
 
     ent_peak_radius_px: int = 18
@@ -290,19 +309,11 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
     ent_gate_density_power: float = 1.0
     ent_gate_gamma_power: float = 0.5
 
-    # Channel bias strengths.
-    # Applied in measurement basis:
-    #   selected channel *= exp(+gain_dt)
-    #   other channels    *= exp(-damp_dt)
     ent_selected_gain_strength: float = 1.5
     ent_other_damp_strength: float = 0.25
 
-    # Time ramp for the entanglement bias.
-    # Effective gate grows roughly over this many steps.
     ent_time_ramp_steps: int = 50
 
-    # Optional: prefer channels consistent with singlet anti-correlation.
-    # This does not force results, it only weights evidence.
     ent_singlet_prior_enabled: bool = False
     ent_singlet_same_weight: float = 0.25
     ent_singlet_opposite_weight: float = 1.0
@@ -313,15 +324,23 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
     # Initial spin state
     # --------------------------------------------------------
 
-    # "singlet", "product", "plus_plus", "plus_minus", "minus_plus", "minus_minus"
-#    ent_initial_spin_state: str = "singlet"
+    # Allowed:
+    #   "singlet"
+    #   "product"
+    #   "plus_plus"
+    #   "plus_minus"
+    #   "minus_plus"
+    #   "minus_minus"
+    #
+    # Recommended SG tests:
+    #   singlet + ent_sg_mode="difference"
+    #   product superposition + ent_sg_mode="A"
+#    ent_initial_spin_state: str = "product"
 
-    # Used only when ent_initial_spin_state == "product"
 #    ent_initial_spin_a: object | None = None
 #    ent_initial_spin_b: object | None = None
 
     ent_initial_spin_state = "product"
-
     ent_initial_spin_a = [0.70710678118, 0.70710678118]
     ent_initial_spin_b = [1.0, 0.0]
 
@@ -348,55 +367,19 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         _assert(self.front_diag_weight >= 0.0, "front_diag_weight must be >= 0")
         _assert(self.front_gain_blur_sigma >= 0.0, "front_gain_blur_sigma must be >= 0")
 
-        _assert(
-            self.front_branch_competition_strength >= 0.0,
-            "front_branch_competition_strength must be >= 0",
-        )
-        _assert(
-            self.front_branch_competition_power >= 0.0,
-            "front_branch_competition_power must be >= 0",
-        )
-        _assert(
-            self.front_branch_gate_power >= 0.0,
-            "front_branch_gate_power must be >= 0",
-        )
-        _assert(
-            self.front_branch_density_power >= 0.0,
-            "front_branch_density_power must be >= 0",
-        )
-        _assert(
-            self.front_branch_align_power >= 0.0,
-            "front_branch_align_power must be >= 0",
-        )
-        _assert(
-            self.front_branch_competition_threshold >= 0.0,
-            "front_branch_competition_threshold must be >= 0",
-        )
+        _assert(self.front_branch_competition_strength >= 0.0, "front_branch_competition_strength must be >= 0")
+        _assert(self.front_branch_competition_power >= 0.0, "front_branch_competition_power must be >= 0")
+        _assert(self.front_branch_gate_power >= 0.0, "front_branch_gate_power must be >= 0")
+        _assert(self.front_branch_density_power >= 0.0, "front_branch_density_power must be >= 0")
+        _assert(self.front_branch_align_power >= 0.0, "front_branch_align_power must be >= 0")
+        _assert(self.front_branch_competition_threshold >= 0.0, "front_branch_competition_threshold must be >= 0")
 
-        _assert(
-            isinstance(self.front_branch_competition_radius, int),
-            "front_branch_competition_radius must be int",
-        )
-        _assert(
-            self.front_branch_competition_radius >= 1,
-            "front_branch_competition_radius must be >= 1",
-        )
-        _assert(
-            self.front_branch_competition_margin > 0.0,
-            "front_branch_competition_margin must be > 0",
-        )
-        _assert(
-            self.front_branch_competition_blur_sigma >= 0.0,
-            "front_branch_competition_blur_sigma must be >= 0",
-        )
-        _assert(
-            self.front_branch_detector_gate_width > 0.0,
-            "front_branch_detector_gate_width must be > 0",
-        )
-        _assert(
-            self.front_branch_detector_gate_boost >= 0.0,
-            "front_branch_detector_gate_boost must be >= 0",
-        )
+        _assert(isinstance(self.front_branch_competition_radius, int), "front_branch_competition_radius must be int")
+        _assert(self.front_branch_competition_radius >= 1, "front_branch_competition_radius must be >= 1")
+        _assert(self.front_branch_competition_margin > 0.0, "front_branch_competition_margin must be > 0")
+        _assert(self.front_branch_competition_blur_sigma >= 0.0, "front_branch_competition_blur_sigma must be >= 0")
+        _assert(self.front_branch_detector_gate_width > 0.0, "front_branch_detector_gate_width must be > 0")
+        _assert(self.front_branch_detector_gate_boost >= 0.0, "front_branch_detector_gate_boost must be >= 0")
 
         # --------------------------------------------------------
         # Initial spin state validation
@@ -420,20 +403,14 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         if self.ent_initial_spin_state == "product":
             if self.ent_initial_spin_a is not None:
                 spin_a = np.asarray(self.ent_initial_spin_a, dtype=np.complex128)
-                _assert(
-                    spin_a.shape == (2,),
-                    f"ent_initial_spin_a must have shape (2,), got {spin_a.shape}",
-                )
+                _assert(spin_a.shape == (2,), f"ent_initial_spin_a must have shape (2,), got {spin_a.shape}")
                 norm_a = float(np.sqrt(np.sum(np.abs(spin_a) ** 2)))
                 _assert(norm_a > 0.0, "ent_initial_spin_a norm must be > 0")
                 _assert(np.isfinite(norm_a), "ent_initial_spin_a norm must be finite")
 
             if self.ent_initial_spin_b is not None:
                 spin_b = np.asarray(self.ent_initial_spin_b, dtype=np.complex128)
-                _assert(
-                    spin_b.shape == (2,),
-                    f"ent_initial_spin_b must have shape (2,), got {spin_b.shape}",
-                )
+                _assert(spin_b.shape == (2,), f"ent_initial_spin_b must have shape (2,), got {spin_b.shape}")
                 norm_b = float(np.sqrt(np.sum(np.abs(spin_b) ** 2)))
                 _assert(norm_b > 0.0, "ent_initial_spin_b norm must be > 0")
                 _assert(np.isfinite(norm_b), "ent_initial_spin_b norm must be finite")
@@ -465,59 +442,38 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
             "ent_spatial_gate_mode must be 'density' or 'peak_tube'",
         )
 
+        _assert(isinstance(self.ent_peak_radius_px, int), "ent_peak_radius_px must be int")
+        _assert(self.ent_peak_radius_px >= 1, "ent_peak_radius_px must be >= 1")
+        _assert(self.ent_peak_rel_threshold >= 0.0, "ent_peak_rel_threshold must be >= 0")
+        _assert(self.ent_tube_sigma_px > 0.0, "ent_tube_sigma_px must be > 0")
+        _assert(self.ent_gate_blur_sigma >= 0.0, "ent_gate_blur_sigma must be >= 0")
+        _assert(self.ent_gate_density_power >= 0.0, "ent_gate_density_power must be >= 0")
+        _assert(self.ent_gate_gamma_power >= 0.0, "ent_gate_gamma_power must be >= 0")
+        _assert(self.ent_selected_gain_strength >= 0.0, "ent_selected_gain_strength must be >= 0")
+        _assert(self.ent_other_damp_strength >= 0.0, "ent_other_damp_strength must be >= 0")
+        _assert(isinstance(self.ent_time_ramp_steps, int), "ent_time_ramp_steps must be int")
+        _assert(self.ent_time_ramp_steps >= 1, "ent_time_ramp_steps must be >= 1")
+        _assert(self.ent_singlet_same_weight >= 0.0, "ent_singlet_same_weight must be >= 0")
+        _assert(self.ent_singlet_opposite_weight >= 0.0, "ent_singlet_opposite_weight must be >= 0")
+
+        # --------------------------------------------------------
+        # Stern-Gerlach validation
+        # --------------------------------------------------------
+
+        self.ent_sg_mode = str(self.ent_sg_mode).strip().lower()
+
+        valid_sg_modes = {"off", "a", "b", "sum", "difference"}
         _assert(
-            isinstance(self.ent_peak_radius_px, int),
-            "ent_peak_radius_px must be int",
-        )
-        _assert(
-            self.ent_peak_radius_px >= 1,
-            "ent_peak_radius_px must be >= 1",
-        )
-        _assert(
-            self.ent_peak_rel_threshold >= 0.0,
-            "ent_peak_rel_threshold must be >= 0",
-        )
-        _assert(
-            self.ent_tube_sigma_px > 0.0,
-            "ent_tube_sigma_px must be > 0",
-        )
-        _assert(
-            self.ent_gate_blur_sigma >= 0.0,
-            "ent_gate_blur_sigma must be >= 0",
-        )
-        _assert(
-            self.ent_gate_density_power >= 0.0,
-            "ent_gate_density_power must be >= 0",
-        )
-        _assert(
-            self.ent_gate_gamma_power >= 0.0,
-            "ent_gate_gamma_power must be >= 0",
-        )
-        _assert(
-            self.ent_selected_gain_strength >= 0.0,
-            "ent_selected_gain_strength must be >= 0",
-        )
-        _assert(
-            self.ent_other_damp_strength >= 0.0,
-            "ent_other_damp_strength must be >= 0",
-        )
-        _assert(
-            isinstance(self.ent_time_ramp_steps, int),
-            "ent_time_ramp_steps must be int",
-        )
-        _assert(
-            self.ent_time_ramp_steps >= 1,
-            "ent_time_ramp_steps must be >= 1",
+            self.ent_sg_mode in valid_sg_modes,
+            f"ent_sg_mode must be one of {sorted(valid_sg_modes)}, got {self.ent_sg_mode}",
         )
 
-        _assert(
-            self.ent_singlet_same_weight >= 0.0,
-            "ent_singlet_same_weight must be >= 0",
-        )
-        _assert(
-            self.ent_singlet_opposite_weight >= 0.0,
-            "ent_singlet_opposite_weight must be >= 0",
-        )
+        _assert(self.ent_sg_strength >= 0.0, "ent_sg_strength must be >= 0")
+        _assert(self.ent_sg_width_x > 0.0, "ent_sg_width_x must be > 0")
+        _assert(self.ent_sg_clip_abs >= 0.0, "ent_sg_clip_abs must be >= 0")
+
+        _assert_finite_scalar(self.ent_sg_center_x, "ent_sg_center_x")
+        _assert_finite_scalar(self.ent_sg_y_center, "ent_sg_y_center")
 
         # --------------------------------------------------------
         # Measurement basis setup
@@ -544,11 +500,32 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         # --------------------------------------------------------
 
         self._detector_gate_cache = None
+        self._ent_sg_profile_cache = None
 
         self._ent_selected_channel = None
         self._ent_selected_peak = None
         self._ent_initialized = False
         self._ent_step_counter = 0
+
+    # --------------------------------------------------------
+    # Runtime reset
+    # --------------------------------------------------------
+
+    def reset_runtime_state(self):
+        """
+        Call before a fresh run if the same theory instance is reused.
+        """
+        self._detector_gate_cache = None
+        self._ent_sg_profile_cache = None
+
+        self._ent_selected_channel = None
+        self._ent_selected_peak = None
+        self._ent_initialized = False
+        self._ent_step_counter = 0
+
+    # --------------------------------------------------------
+    # Initial state construction
+    # --------------------------------------------------------
 
     def initialize_click_state(
         self,
@@ -558,13 +535,6 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
     ) -> np.ndarray:
         """
         Build a 4D entangled/spin-channel click state for backward propagation.
-
-        The spatial part is a scalar Gaussian click packet centered at
-        (x_click, y_click). Then it is lifted into the same spin structure
-        as initialize_state().
-
-        Returns:
-            phi.shape == (Ny, Nx, 2, 2)
         """
         x = self.grid.X
         y = self.grid.Y
@@ -578,46 +548,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
             )
         ).astype(np.complex128)
 
-        mode = str(self.ent_initial_spin_state)
-
-        if mode == "singlet":
-            phi = self.make_singlet_spinor_state(spatial)
-
-        elif mode == "plus_plus":
-            phi = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
-            phi[:, :, 0, 0] = spatial
-
-        elif mode == "plus_minus":
-            phi = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
-            phi[:, :, 0, 1] = spatial
-
-        elif mode == "minus_plus":
-            phi = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
-            phi[:, :, 1, 0] = spatial
-
-        elif mode == "minus_minus":
-            phi = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
-            phi[:, :, 1, 1] = spatial
-
-        elif mode == "product":
-            if self.ent_initial_spin_a is None:
-                spin_a = np.asarray([1.0, 0.0], dtype=np.complex128)
-            else:
-                spin_a = np.asarray(self.ent_initial_spin_a, dtype=np.complex128)
-
-            if self.ent_initial_spin_b is None:
-                spin_b = np.asarray([1.0, 0.0], dtype=np.complex128)
-            else:
-                spin_b = np.asarray(self.ent_initial_spin_b, dtype=np.complex128)
-
-            phi = self.make_product_spinor_state(
-                spatial=spatial,
-                spin_a=spin_a,
-                spin_b=spin_b,
-            )
-
-        else:
-            raise ValueError(f"Unknown ent_initial_spin_state={mode!r}")
+        phi = self._lift_scalar_to_initial_spinor(spatial)
 
         phi, norm_factor = _normalize_unit_spinor_4d(phi, self.grid.dx, self.grid.dy)
         phi = phi.astype(np.complex128)
@@ -634,34 +565,12 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
             )
 
         return phi
-        
-    # --------------------------------------------------------
-    # Runtime reset
-    # --------------------------------------------------------
-
-    def reset_runtime_state(self):
-        """
-        Call before a fresh run if the same theory instance is reused.
-        """
-        self._detector_gate_cache = None
-        self._ent_selected_channel = None
-        self._ent_selected_peak = None
-        self._ent_initialized = False
-        self._ent_step_counter = 0
-
-    # --------------------------------------------------------
-    # Basic spinor utilities
-    # --------------------------------------------------------
 
     def initialize_state(self, psi0: np.ndarray) -> np.ndarray:
         """
         Accept either:
-
             psi0.shape == (Ny, Nx)
-                ordinary scalar packet from the existing runner
-
             psi0.shape == (Ny, Nx, 2, 2)
-                already-built entangled spinor state
 
         Returns normalized 4D spinor state.
         """
@@ -675,47 +584,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         elif psi0.ndim == 2:
             _assert_complex_array_2d(psi0, "psi0(initialize_state scalar)")
             spatial = psi0.astype(np.complex128)
-
-            mode = str(self.ent_initial_spin_state)
-
-            if mode == "singlet":
-                out = self.make_singlet_spinor_state(spatial)
-
-            elif mode == "plus_plus":
-                out = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
-                out[:, :, 0, 0] = spatial
-
-            elif mode == "plus_minus":
-                out = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
-                out[:, :, 0, 1] = spatial
-
-            elif mode == "minus_plus":
-                out = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
-                out[:, :, 1, 0] = spatial
-
-            elif mode == "minus_minus":
-                out = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
-                out[:, :, 1, 1] = spatial
-
-            elif mode == "product":
-                if self.ent_initial_spin_a is None:
-                    spin_a = np.asarray([1.0, 0.0], dtype=np.complex128)
-                else:
-                    spin_a = np.asarray(self.ent_initial_spin_a, dtype=np.complex128)
-
-                if self.ent_initial_spin_b is None:
-                    spin_b = np.asarray([1.0, 0.0], dtype=np.complex128)
-                else:
-                    spin_b = np.asarray(self.ent_initial_spin_b, dtype=np.complex128)
-
-                out = self.make_product_spinor_state(
-                    spatial=spatial,
-                    spin_a=spin_a,
-                    spin_b=spin_b,
-                )
-
-            else:
-                raise ValueError(f"Unknown ent_initial_spin_state={mode!r}")
+            out = self._lift_scalar_to_initial_spinor(spatial)
 
         else:
             raise AssertionError(
@@ -726,6 +595,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         out = out.astype(np.complex128)
 
         prob = self._state_probability(out)
+
         if self.front_debug_checks:
             _assert(
                 np.isclose(prob, 1.0, atol=self.front_norm_tol),
@@ -740,23 +610,77 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         return out
 
+    def _lift_scalar_to_initial_spinor(self, spatial: np.ndarray) -> np.ndarray:
+        _assert_complex_array_2d(spatial, "spatial(lift_initial)")
+
+        mode = str(self.ent_initial_spin_state)
+
+        if mode == "singlet":
+            out = self.make_singlet_spinor_state(spatial)
+
+        elif mode == "plus_plus":
+            out = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
+            out[:, :, 0, 0] = spatial
+
+        elif mode == "plus_minus":
+            out = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
+            out[:, :, 0, 1] = spatial
+
+        elif mode == "minus_plus":
+            out = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
+            out[:, :, 1, 0] = spatial
+
+        elif mode == "minus_minus":
+            out = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
+            out[:, :, 1, 1] = spatial
+
+        elif mode == "product":
+            if self.ent_initial_spin_a is None:
+                spin_a = np.asarray([1.0, 0.0], dtype=np.complex128)
+            else:
+                spin_a = np.asarray(self.ent_initial_spin_a, dtype=np.complex128)
+
+            if self.ent_initial_spin_b is None:
+                spin_b = np.asarray([1.0, 0.0], dtype=np.complex128)
+            else:
+                spin_b = np.asarray(self.ent_initial_spin_b, dtype=np.complex128)
+
+            out = self.make_product_spinor_state(
+                spatial=spatial,
+                spin_a=spin_a,
+                spin_b=spin_b,
+            )
+
+        else:
+            raise ValueError(f"Unknown ent_initial_spin_state={mode!r}")
+
+        return out.astype(np.complex128)
+
+    # --------------------------------------------------------
+    # Basic spinor utilities
+    # --------------------------------------------------------
+
     def _state_probability(self, psi: np.ndarray) -> float:
         _assert_complex_spinor_4d(psi, "psi(prob)")
+
         prob = float(np.sum(np.abs(psi) ** 2) * self.grid.dx * self.grid.dy)
+
         _assert(np.isfinite(prob), "state probability is non-finite")
         _assert(prob >= 0.0, f"state probability must be >= 0, got {prob}")
+
         return prob
 
     def _total_density(self, psi: np.ndarray) -> np.ndarray:
         _assert_complex_spinor_4d(psi, "psi(total_density)")
+
         rho = np.sum(np.abs(psi) ** 2, axis=(-2, -1)).astype(float)
         _assert_real_array_2d(rho, "rho(total_density)")
+
         return rho
 
     def _neighbor_average_complex_spinor(self, z: np.ndarray) -> np.ndarray:
         """
         Neighborhood average for spinor-valued unit field.
-        z shape: (Ny,Nx,2,2)
         """
         _assert_complex_spinor_4d(z, "z(neighbor_spinor)")
 
@@ -779,12 +703,14 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         out = (w_axis * axis_sum + w_diag * diag_sum) / max(denom, self.front_eps)
         _assert_complex_spinor_4d(out, "neighbor_average_spinor(out)")
+
         return out.astype(np.complex128)
 
     def _neighbor_average_real_2d(self, arr: np.ndarray) -> np.ndarray:
         _assert_real_array_2d(arr, "arr(neighbor_real)")
 
         z = arr.astype(np.complex128)
+
         z_xp = np.roll(z, -1, axis=1)
         z_xm = np.roll(z, 1, axis=1)
         z_yp = np.roll(z, -1, axis=0)
@@ -804,7 +730,175 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         out = ((w_axis * axis_sum + w_diag * diag_sum) / max(denom, self.front_eps)).real
         _assert_real_array_2d(out, "neighbor_average_real(out)")
+
         return out.astype(float)
+
+    # --------------------------------------------------------
+    # Stern-Gerlach effective analyzer
+    # --------------------------------------------------------
+
+    def _sg_is_active(self) -> bool:
+        return (
+            bool(self.ent_sg_enabled)
+            and str(self.ent_sg_mode).lower() != "off"
+            and float(self.ent_sg_strength) > 0.0
+        )
+
+    def _sg_sign_matrix(self) -> np.ndarray:
+        """
+        Return signs in measurement-basis channel order:
+            [[++, +-],
+             [-+, --]]
+        """
+        mode = str(self.ent_sg_mode).lower()
+
+        sA = np.asarray(
+            [
+                [1.0, 1.0],
+                [-1.0, -1.0],
+            ],
+            dtype=float,
+        )
+
+        sB = np.asarray(
+            [
+                [1.0, -1.0],
+                [1.0, -1.0],
+            ],
+            dtype=float,
+        )
+
+        if mode == "a":
+            signs = sA
+        elif mode == "b":
+            signs = sB
+        elif mode == "sum":
+            signs = sA + sB
+        elif mode == "difference":
+            signs = sA - sB
+        elif mode == "off":
+            signs = np.zeros((2, 2), dtype=float)
+        else:
+            raise ValueError(f"Unknown ent_sg_mode={self.ent_sg_mode!r}")
+
+        return signs.astype(float)
+
+    def _sg_spatial_profile(self) -> np.ndarray:
+        """
+        Spatial part of SG potential.
+
+            V_ab(x,y) = sign_ab * profile(x,y)
+
+        profile:
+            -strength * (Y - y0) * exp(-(X-xc)^2/(2 width^2))
+
+        Positive sign receives positive-y force:
+            F_y = -dV/dy = strength * sign
+        """
+        if self._ent_sg_profile_cache is not None:
+            return self._ent_sg_profile_cache
+
+        X = self.grid.X
+        Y = self.grid.Y
+
+        xc = float(self.ent_sg_center_x)
+        wx = float(self.ent_sg_width_x)
+        y0 = float(self.ent_sg_y_center)
+        strength = float(self.ent_sg_strength)
+
+        window_x = np.exp(-0.5 * ((X - xc) / wx) ** 2).astype(float)
+
+        profile = (-strength * (Y - y0) * window_x).astype(float)
+
+        clip_abs = float(self.ent_sg_clip_abs)
+        if clip_abs > 0.0:
+            profile = np.clip(profile, -clip_abs, clip_abs).astype(float)
+
+        _assert_real_array_2d(profile, "sg_spatial_profile")
+
+        self._ent_sg_profile_cache = profile
+        return profile
+
+    def _apply_sg_phase(
+        self,
+        psi: np.ndarray,
+        dt: float,
+        adjoint: bool,
+    ) -> tuple[np.ndarray, dict]:
+        """
+        Apply diagonal SG phase in either measurement or computational basis.
+
+        Forward:
+            exp(-i V dt / hbar)
+
+        Adjoint/backward:
+            exp(+i V dt / hbar)
+        """
+        _assert_complex_spinor_4d(psi, "psi(sg)")
+        _assert_finite_scalar(dt, "dt(sg)")
+
+        if not self._sg_is_active():
+            return psi, {
+                "enabled": False,
+                "mode": str(self.ent_sg_mode),
+            }
+
+        signs = self._sg_sign_matrix()
+        profile = self._sg_spatial_profile()
+
+        if self.ent_sg_use_measurement_basis:
+            work = rotate_state_to_measurement_basis(psi, self._ent_Ua, self._ent_Ub)
+        else:
+            work = psi.copy()
+
+        phase_sign = 1.0 if adjoint else -1.0
+
+        hbar = max(float(self.hbar), self.front_eps)
+
+        for a in range(2):
+            for b in range(2):
+                s = float(signs[a, b])
+                if abs(s) <= 0.0:
+                    continue
+
+                V = s * profile
+                phase = np.exp(1j * phase_sign * V * float(dt) / hbar)
+                work[:, :, a, b] *= phase
+
+        if self.ent_sg_use_measurement_basis:
+            out = rotate_state_from_measurement_basis(work, self._ent_Ua, self._ent_Ub)
+        else:
+            out = work
+
+        _assert_complex_spinor_4d(out, "psi_out(sg)")
+
+        aux = {
+            "enabled": True,
+            "mode": str(self.ent_sg_mode),
+            "adjoint": bool(adjoint),
+            "strength": float(self.ent_sg_strength),
+            "center_x": float(self.ent_sg_center_x),
+            "width_x": float(self.ent_sg_width_x),
+            "y_center": float(self.ent_sg_y_center),
+            "use_measurement_basis": bool(self.ent_sg_use_measurement_basis),
+            "signs": {
+                "++": float(signs[0, 0]),
+                "+-": float(signs[0, 1]),
+                "-+": float(signs[1, 0]),
+                "--": float(signs[1, 1]),
+            },
+            "profile_min": float(np.min(profile)),
+            "profile_max": float(np.max(profile)),
+            "profile_absmax": float(np.max(np.abs(profile))),
+        }
+
+        return out.astype(np.complex128), aux
+
+    def _apply_sg_phase_forward(self, psi: np.ndarray, dt: float) -> tuple[np.ndarray, dict]:
+        return self._apply_sg_phase(psi=psi, dt=dt, adjoint=False)
+
+    def _apply_sg_phase_adjoint(self, psi: np.ndarray, dt: float) -> tuple[np.ndarray, dict]:
+        return self._apply_sg_phase(psi=psi, dt=dt, adjoint=True)
 
     # --------------------------------------------------------
     # Coherence / current
@@ -812,20 +906,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
     def _coherence_alignment_score(self, psi: np.ndarray):
         """
-        Spinor generalization of the scalar phase-alignment score.
-
-        rho:
-            total spinor density
-
-        u:
-            normalized local spinor direction:
-                psi / sqrt(total_density)
-
-        u_local:
-            normalized neighboring spinor suggestion
-
-        align_real:
-            Re <u | u_local>, roughly [-1, 1]
+        Spinor generalization of scalar phase-alignment score.
         """
         _assert_complex_spinor_4d(psi, "psi(coherence)")
 
@@ -930,10 +1011,6 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
     ):
         """
         Simple maximum-filter branch competition.
-
-        This is intentionally the robust scalar version first. The flow-aware
-        version can be ported later, but this keeps entanglement integration
-        easier to validate.
         """
         _assert_real_array_2d(rho, "rho(branch_comp)")
         _assert_real_array_2d(align_real, "align_real(branch_comp)")
@@ -941,6 +1018,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         gamma_like = self._make_gamma_like(rho, align_real)
 
         filt_size = 2 * int(self.front_branch_competition_radius) + 1
+
         neighbor_max = maximum_filter(
             gamma_like,
             size=(filt_size, filt_size),
@@ -963,6 +1041,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         align_pos = np.maximum(align_real, 0.0)
         gpow = float(self.front_branch_gate_power)
+
         if gpow > 0.0:
             competition_gate = np.power(align_pos, gpow)
             competition_raw = competition_raw * competition_gate
@@ -1018,8 +1097,10 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
     def _channel_probs(self, ev: dict[str, float]) -> dict[str, float]:
         total = float(sum(ev.values()))
+
         if total <= 0.0:
             return {ch: 0.0 for ch in CHANNELS}
+
         return {ch: float(ev[ch] / total) for ch in CHANNELS}
 
     def _choose_entanglement_channel(
@@ -1032,10 +1113,13 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         if self.ent_channel_mode == "off":
             chosen = None
+
         elif self.ent_channel_mode == "fixed_channel":
             chosen = str(self.ent_fixed_channel)
+
         else:
             ordered = sorted(CHANNELS, key=lambda ch: ev[ch], reverse=True)
+
             if self.ent_channel_mode == "forced_weaker_channel" and len(ordered) >= 2:
                 chosen = ordered[1]
             else:
@@ -1071,8 +1155,10 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         is_peak &= arr >= thr
 
         ys, xs = np.where(is_peak)
+
         if ys.size == 0:
             iy, ix = np.unravel_index(int(np.argmax(arr)), arr.shape)
+
             return {
                 "iy": int(iy),
                 "ix": int(ix),
@@ -1082,14 +1168,17 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         peaks = []
         for iy, ix in zip(ys, xs):
-            peaks.append({
-                "iy": int(iy),
-                "ix": int(ix),
-                "value": float(arr[iy, ix]),
-                "fallback_argmax": False,
-            })
+            peaks.append(
+                {
+                    "iy": int(iy),
+                    "ix": int(ix),
+                    "value": float(arr[iy, ix]),
+                    "fallback_argmax": False,
+                }
+            )
 
         peaks.sort(key=lambda r: r["value"], reverse=True)
+
         return peaks[0]
 
     def _build_gaussian_mask_px(
@@ -1100,15 +1189,18 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         sigma_px: float,
     ) -> np.ndarray:
         ny, nx = shape
+
         yy = np.arange(ny)[:, None]
         xx = np.arange(nx)[None, :]
 
         inv2s2 = 1.0 / max(2.0 * sigma_px * sigma_px, 1e-12)
+
         mask = np.exp(
             -((yy - int(iy_center)) ** 2 + (xx - int(ix_center)) ** 2) * inv2s2
         ).astype(float)
 
         _assert_real_array_2d(mask, "gaussian_mask")
+
         return mask
 
     def _build_entanglement_gate(
@@ -1132,6 +1224,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
                 shape=selected_density.shape,
                 sigma_px=float(self.ent_tube_sigma_px),
             )
+
         else:
             gate = np.maximum(selected_density, 0.0).astype(float)
             gmax = float(np.max(gate))
@@ -1144,8 +1237,10 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         if self.ent_gate_gamma_power > 0.0:
             g = np.maximum(gamma_like, 0.0)
             gmax = float(np.max(g))
+
             if gmax > self.front_eps:
                 g = g / gmax
+
             gate = gate * np.power(g, float(self.ent_gate_gamma_power))
 
         if self.ent_gate_blur_sigma > 0.0:
@@ -1160,11 +1255,13 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
             gate = gate / gmax
 
         _assert_real_array_2d(gate, "entanglement_gate")
+
         return gate.astype(float)
 
     def _entanglement_time_ramp(self) -> float:
         n = max(1, int(self.ent_time_ramp_steps))
         u = min(1.0, float(self._ent_step_counter) / float(n))
+
         return float(0.5 - 0.5 * np.cos(np.pi * u))
 
     def _apply_entanglement_channel_bias(
@@ -1187,6 +1284,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         if (not self._ent_initialized) or (not self.ent_channel_persistent):
             info = self._choose_entanglement_channel(channel_dens, gamma_like)
+
             self._ent_selected_channel = info["chosen_channel"]
             self._ent_initialized = True
 
@@ -1200,11 +1298,13 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
                     f"{info['E']:.4f}",
                     flush=True,
                 )
+
         else:
             info = self._choose_entanglement_channel(channel_dens, gamma_like)
             info["chosen_channel"] = self._ent_selected_channel
 
         ch = self._ent_selected_channel
+
         if ch not in CHANNELS:
             return psi, {
                 "enabled": False,
@@ -1240,6 +1340,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         for ch2 in CHANNELS:
             a, b = idx[ch2]
+
             if ch2 == ch:
                 psi_m[:, :, a, b] *= np.exp(gain_dt)
             else:
@@ -1346,6 +1447,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
             )
 
             psi_new = psi_tmp * np.exp(-comp_dt)[:, :, None, None]
+
         else:
             psi_new = psi_tmp
             gamma_like = self._make_gamma_like(rho_tmp, align_real_tmp)
@@ -1403,20 +1505,22 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         }
 
         if competition_raw is not None:
-            aux_front.update({
-                "branch_gamma_like_mean": float(np.mean(gamma_like)),
-                "branch_gamma_like_max": float(np.max(gamma_like)),
-                "branch_neighbor_max_mean": float(np.mean(neighbor_max)),
-                "branch_neighbor_max_max": float(np.max(neighbor_max)),
-                "branch_competition_mean": float(np.mean(competition_raw)),
-                "branch_competition_max": float(np.max(competition_raw)),
-                "branch_gate_mean": float(np.mean(competition_gate)),
-                "branch_gate_max": float(np.max(competition_gate)),
-                "branch_comp_dt_mean": float(np.mean(comp_dt)),
-                "branch_comp_dt_max": float(np.max(comp_dt)),
-                "branch_local_strength_mean": float(np.mean(local_strength)),
-                "branch_local_strength_max": float(np.max(local_strength)),
-            })
+            aux_front.update(
+                {
+                    "branch_gamma_like_mean": float(np.mean(gamma_like)),
+                    "branch_gamma_like_max": float(np.max(gamma_like)),
+                    "branch_neighbor_max_mean": float(np.mean(neighbor_max)),
+                    "branch_neighbor_max_max": float(np.max(neighbor_max)),
+                    "branch_competition_mean": float(np.mean(competition_raw)),
+                    "branch_competition_max": float(np.max(competition_raw)),
+                    "branch_gate_mean": float(np.mean(competition_gate)),
+                    "branch_gate_max": float(np.max(competition_gate)),
+                    "branch_comp_dt_mean": float(np.mean(comp_dt)),
+                    "branch_comp_dt_max": float(np.max(comp_dt)),
+                    "branch_local_strength_mean": float(np.mean(local_strength)),
+                    "branch_local_strength_max": float(np.max(local_strength)),
+                }
+            )
 
             if detector_gate is not None:
                 aux_front["branch_detector_gate_mean"] = float(np.mean(detector_gate))
@@ -1462,7 +1566,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
     def _step_backward_componentwise(self, state: np.ndarray, dt: float):
         _assert_complex_spinor_4d(state, "state(backward_componentwise)")
-        _assert_finite_scalar(dt, "dt(backward_componentwise)")
+        _assert_finite_scalar(dt, "dt(componentwise backward)")
 
         out = np.empty_like(state, dtype=np.complex128)
         aux_components = {}
@@ -1488,6 +1592,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         """
         One forward step:
             componentwise Schrödinger step
+            + optional Stern-Gerlach phase gradient
             + spinor thick-front sharpening
             + scalar branch competition
             + measurement-basis channel selection
@@ -1500,6 +1605,9 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         psi, aux_base_components = self._step_forward_componentwise(state, dt)
         prob_after_base = self._state_probability(psi)
+
+        psi, aux_sg = self._apply_sg_phase_forward(psi, dt)
+        prob_after_sg = self._state_probability(psi)
 
         psi, aux_front = self._front_sharpen_spinor(psi, dt)
         prob_before_norm = self._state_probability(psi)
@@ -1553,7 +1661,10 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
                 "ent_time_ramp_steps": int(self.ent_time_ramp_steps),
                 "ent_singlet_prior_enabled": bool(self.ent_singlet_prior_enabled),
 
+                "stern_gerlach": aux_sg,
+
                 "prob_after_base": float(prob_after_base),
+                "prob_after_sg": float(prob_after_sg),
                 "prob_before_norm": float(prob_before_norm),
                 "prob_after_norm": float(prob_after_norm),
                 "normalize_unit_returned_norm": float(norm_factor),
@@ -1571,19 +1682,22 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         """
         Backward evolution for entangled spinor.
 
-        Kept as plain componentwise adjoint Schrödinger evolution. This matches
-        the safer post-hoc/TRF library style: no nonlinear front backwards.
+        If SG is enabled, apply the adjoint SG phase before componentwise
+        adjoint Schrödinger stepping. This approximates the inverse order of:
+            forward base step -> forward SG phase
         """
         _assert_complex_spinor_4d(state, "state(backward)")
         _assert_finite_scalar(dt, "dt(backward)")
 
-        psi, aux_components = self._step_backward_componentwise(state, dt)
+        psi, aux_sg = self._apply_sg_phase_adjoint(state, dt)
+        psi, aux_components = self._step_backward_componentwise(psi, dt)
 
         return TheoryStepResult(
             state=psi.astype(np.complex128),
             aux={
                 "thick_front_entanglement_backward": {
-                    "mode": "componentwise_plain_schrodinger_adjoint",
+                    "mode": "componentwise_schrodinger_adjoint_with_optional_sg_adjoint",
+                    "stern_gerlach": aux_sg,
                     "base_components": aux_components,
                 }
             },
@@ -1604,7 +1718,6 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
     def channel_densities(self, state: np.ndarray) -> dict[str, np.ndarray]:
         """
         Measurement-basis channel densities.
-        Useful for plotting ++,+-,-+,--.
         """
         _assert_complex_spinor_4d(state, "state(channel_densities)")
         return self._channel_densities(state)
@@ -1615,10 +1728,13 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         """
         dens = self.channel_densities(state)
         dxdy = float(self.grid.dx * self.grid.dy)
+
         ev = {ch: float(np.sum(dens[ch]) * dxdy) for ch in CHANNELS}
         total = float(sum(ev.values()))
+
         if total <= 0.0:
             return {ch: 0.0 for ch in CHANNELS}
+
         return {ch: float(ev[ch] / total) for ch in CHANNELS}
 
     def entanglement_E(self, state: np.ndarray) -> float:
@@ -1653,6 +1769,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
             psi[y,x,a,b] = spatial[y,x] * spin_a[a] * spin_b[b]
         """
         _assert_complex_array_2d(spatial, "spatial")
+
         spin_a = np.asarray(spin_a, dtype=np.complex128)
         spin_b = np.asarray(spin_b, dtype=np.complex128)
 
@@ -1661,13 +1778,19 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         na = float(np.sqrt(np.sum(np.abs(spin_a) ** 2)))
         nb = float(np.sqrt(np.sum(np.abs(spin_b) ** 2)))
+
         _assert(na > 0.0, "spin_a norm must be > 0")
         _assert(nb > 0.0, "spin_b norm must be > 0")
 
         spin_a = spin_a / na
         spin_b = spin_b / nb
 
-        psi = spatial[:, :, None, None] * spin_a[None, None, :, None] * spin_b[None, None, None, :]
+        psi = (
+            spatial[:, :, None, None]
+            * spin_a[None, None, :, None]
+            * spin_b[None, None, None, :]
+        )
+
         return psi.astype(np.complex128)
 
     @staticmethod
@@ -1682,6 +1805,7 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         psi = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
         psi[:, :, 0, 1] = spatial / np.sqrt(2.0)
         psi[:, :, 1, 0] = -spatial / np.sqrt(2.0)
+
         return psi
 
     @staticmethod
