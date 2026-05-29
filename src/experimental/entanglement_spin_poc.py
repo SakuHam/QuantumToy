@@ -51,6 +51,16 @@ def safe_frame_normalize(arr: np.ndarray, eps: float = 1e-30) -> np.ndarray:
     return arr / amax
 
 
+def cyclic_texture_rgba(
+    value: np.ndarray,
+    alpha: np.ndarray,
+    cmap: str = "twilight_shifted",
+) -> np.ndarray:
+    rgba = plt.get_cmap(cmap)(np.mod(value, 1.0))
+    rgba[..., 3] = np.clip(alpha, 0.0, 1.0)
+    return rgba
+
+
 def ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -67,6 +77,10 @@ I2 = np.eye(2, dtype=np.complex128)
 
 def pauli_along_axis(theta: float) -> np.ndarray:
     return np.sin(theta) * sigma_x + np.cos(theta) * sigma_z
+
+
+def analyzer_axis(theta: float) -> tuple[float, float, float]:
+    return float(np.sin(theta)), 0.0, float(np.cos(theta))
 
 
 def spin_rotation_to_axis(theta: float) -> np.ndarray:
@@ -114,6 +128,13 @@ class Config:
 
     theta_a: float = 0.0
     theta_b: float = np.pi / 3.0
+
+    spin_model: str = "spinning_wave"
+    spin_wave_k: float = 0.45
+    spin_wave_omega: float = 1.2
+    spin_wave_tilt: float = np.pi / 3.0
+    spin_wave_phase_a: float = 0.0
+    spin_wave_phase_b: float = np.pi
 
     detector_halfwidth: float = 2.5
     print_every_frames: int = 20
@@ -181,6 +202,13 @@ class TwoParticleSpin1DFastSolver:
         self.Ua_basis = spin_rotation_to_axis(cfg.theta_a)
         self.Ub_basis = spin_rotation_to_axis(cfg.theta_b)
 
+        self._validate_spin_model()
+
+    def _validate_spin_model(self) -> None:
+        valid = {"sg", "spinning_wave"}
+        if self.cfg.spin_model not in valid:
+            raise ValueError(f"spin_model must be one of {sorted(valid)}, got {self.cfg.spin_model!r}")
+
     def _precompute_half_step_spin_propagators(self):
         cfg = self.cfg
         tau = cfg.dt / (2.0 * cfg.hbar)
@@ -194,6 +222,54 @@ class TwoParticleSpin1DFastSolver:
         self.sb = np.sin(theta_b).astype(np.complex128)
 
         self.damp_half = np.exp(-self.W * (cfg.dt / (2.0 * cfg.hbar))).astype(np.complex128)
+
+    def _spinning_wave_axis(
+        self,
+        theta: float,
+        phase: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        cfg = self.cfg
+        ax, ay, az = analyzer_axis(theta)
+        e1x, e1y, e1z = float(np.cos(theta)), 0.0, float(-np.sin(theta))
+        e2x, e2y, e2z = 0.0, 1.0, 0.0
+
+        ctilt = np.cos(cfg.spin_wave_tilt)
+        stilt = np.sin(cfg.spin_wave_tilt)
+        cphase = np.cos(phase)
+        sphase = np.sin(phase)
+
+        nx = ctilt * ax + stilt * (cphase * e1x + sphase * e2x)
+        ny = ctilt * ay + stilt * (cphase * e1y + sphase * e2y)
+        nz = ctilt * az + stilt * (cphase * e1z + sphase * e2z)
+        return nx, ny, nz
+
+    def _apply_axis_to_spin_A(
+        self,
+        psi: np.ndarray,
+        nx: np.ndarray,
+        ny: np.ndarray,
+        nz: np.ndarray,
+    ) -> np.ndarray:
+        out = np.empty_like(psi)
+        off_minus = nx - 1j * ny
+        off_plus = nx + 1j * ny
+        out[:, :, 0, :] = nz[:, :, None] * psi[:, :, 0, :] + off_minus[:, :, None] * psi[:, :, 1, :]
+        out[:, :, 1, :] = off_plus[:, :, None] * psi[:, :, 0, :] - nz[:, :, None] * psi[:, :, 1, :]
+        return out
+
+    def _apply_axis_to_spin_B(
+        self,
+        psi: np.ndarray,
+        nx: np.ndarray,
+        ny: np.ndarray,
+        nz: np.ndarray,
+    ) -> np.ndarray:
+        out = np.empty_like(psi)
+        off_minus = nx - 1j * ny
+        off_plus = nx + 1j * ny
+        out[:, :, :, 0] = nz[:, :, None] * psi[:, :, :, 0] + off_minus[:, :, None] * psi[:, :, :, 1]
+        out[:, :, :, 1] = off_plus[:, :, None] * psi[:, :, :, 0] - nz[:, :, None] * psi[:, :, :, 1]
+        return out
 
     def make_singlet_entangled_state(self) -> np.ndarray:
         cfg = self.cfg
@@ -224,18 +300,38 @@ class TwoParticleSpin1DFastSolver:
         term1 = -1j * self.sb[:, :, None, None] * np.einsum("xyab,bc->xyac", psi, self.sigma_b)
         return term0 + term1
 
-    def _apply_potential_half_step(self, psi: np.ndarray) -> np.ndarray:
-        psi = self._apply_spin_unitary_A(psi)
-        psi = self._apply_spin_unitary_B(psi)
+    def _apply_spinning_wave_unitary_A(self, psi: np.ndarray, t: float) -> np.ndarray:
+        cfg = self.cfg
+        phase = cfg.spin_wave_k * (self.XA - cfg.sg_center_a) - cfg.spin_wave_omega * t + cfg.spin_wave_phase_a
+        nx, ny, nz = self._spinning_wave_axis(cfg.theta_a, phase)
+        term0 = self.ca[:, :, None, None] * psi
+        term1 = -1j * self.sa[:, :, None, None] * self._apply_axis_to_spin_A(psi, nx, ny, nz)
+        return term0 + term1
+
+    def _apply_spinning_wave_unitary_B(self, psi: np.ndarray, t: float) -> np.ndarray:
+        cfg = self.cfg
+        phase = -cfg.spin_wave_k * (self.XB - cfg.sg_center_b) - cfg.spin_wave_omega * t + cfg.spin_wave_phase_b
+        nx, ny, nz = self._spinning_wave_axis(cfg.theta_b, phase)
+        term0 = self.cb[:, :, None, None] * psi
+        term1 = -1j * self.sb[:, :, None, None] * self._apply_axis_to_spin_B(psi, nx, ny, nz)
+        return term0 + term1
+
+    def _apply_potential_half_step(self, psi: np.ndarray, t: float) -> np.ndarray:
+        if self.cfg.spin_model == "spinning_wave":
+            psi = self._apply_spinning_wave_unitary_A(psi, t)
+            psi = self._apply_spinning_wave_unitary_B(psi, t)
+        else:
+            psi = self._apply_spin_unitary_A(psi)
+            psi = self._apply_spin_unitary_B(psi)
         psi = self.damp_half[:, :, None, None] * psi
         return psi
 
-    def step(self, psi: np.ndarray) -> np.ndarray:
-        psi = self._apply_potential_half_step(psi)
+    def step(self, psi: np.ndarray, t: float) -> np.ndarray:
+        psi = self._apply_potential_half_step(psi, t)
         psi_k = np.fft.fft2(psi, axes=(0, 1))
         psi_k *= self.K_phase[:, :, None, None]
         psi = np.fft.ifft2(psi_k, axes=(0, 1))
-        psi = self._apply_potential_half_step(psi)
+        psi = self._apply_potential_half_step(psi, t + self.cfg.dt)
         return psi
 
     def evolve(self, psi0: np.ndarray):
@@ -274,7 +370,7 @@ class TwoParticleSpin1DFastSolver:
                     )
 
             if n < cfg.n_steps:
-                psi = self.step(psi)
+                psi = self.step(psi, n * cfg.dt)
 
         total_elapsed = time.perf_counter() - t_start
         print(f"[DONE/FWD] evolution finished in {total_elapsed:.2f}s")
@@ -608,6 +704,40 @@ def joint_density_with_mask_overlay(
     return overlay
 
 
+def spinning_pocket_texture_overlay(
+    joint_density: np.ndarray,
+    masks: dict[str, np.ndarray],
+    peaks: dict[str, tuple[float, float]],
+    solver: TwoParticleSpin1DFastSolver,
+    t: float,
+    alpha_scale: float = 0.42,
+) -> np.ndarray:
+    cfg = solver.cfg
+    rho_n = safe_frame_normalize(joint_density)
+    phase_value = np.zeros_like(joint_density, dtype=float)
+    alpha = np.zeros_like(joint_density, dtype=float)
+
+    handedness = {
+        "++": 1.0,
+        "+-": -1.0,
+        "-+": -1.0,
+        "--": 1.0,
+    }
+
+    for ch in CHANNELS:
+        xa, xb = peaks[ch]
+        dx = solver.XA - xa
+        dy = solver.XB - xb
+        radius = np.sqrt(dx * dx + dy * dy)
+        angle = np.arctan2(dy, dx)
+        phase = handedness[ch] * angle + cfg.spin_wave_k * radius - cfg.spin_wave_omega * t
+        mask = masks[ch]
+        phase_value[mask] = np.mod(phase[mask] / (2.0 * np.pi), 1.0)
+        alpha[mask] = alpha_scale * np.power(rho_n[mask], 0.55)
+
+    return cyclic_texture_rgba(phase_value, alpha)
+
+
 def add_channel_peak_labels(ax, peaks: dict[str, tuple[float, float]]) -> None:
     label_offsets = {
         "++": (0.6, 0.6),
@@ -751,6 +881,16 @@ def make_click_summary_plot(outdir, solver, run, detector_series, click_event, m
     )
     overlay = joint_density_with_mask_overlay(joint, masks_series[idx], alpha_scale=0.18)
     ax_img.imshow(overlay, origin="lower", extent=extent, aspect="auto")
+    if solver.cfg.spin_model == "spinning_wave":
+        spin_overlay = spinning_pocket_texture_overlay(
+            joint,
+            masks_series[idx],
+            peaks_series[idx],
+            solver,
+            t_click,
+            alpha_scale=0.48,
+        )
+        ax_img.imshow(spin_overlay, origin="lower", extent=extent, aspect="auto")
     add_channel_peak_labels(ax_img, peaks_series[idx])
     cbar = fig.colorbar(im, ax=ax_img, fraction=0.046, pad=0.04)
     cbar.set_label("frame-normalized density")
@@ -772,7 +912,7 @@ def make_click_summary_plot(outdir, solver, run, detector_series, click_event, m
         color="black",
         bbox=dict(facecolor="white", alpha=0.85, edgecolor="0.2"),
     )
-    ax_img.set_title("Joint density")
+    ax_img.set_title("Joint density" + (" + spinning-wave texture" if solver.cfg.spin_model == "spinning_wave" else ""))
     ax_img.set_xlabel("x_A")
     ax_img.set_ylabel("x_B")
 
@@ -910,6 +1050,22 @@ def make_animation(outdir, solver, run, detector_series, click_event, masks_seri
         aspect="auto",
         animated=True,
     )
+    spin_overlay0 = spinning_pocket_texture_overlay(
+        rho0,
+        masks_series[0],
+        peaks_series[0],
+        solver,
+        times[0],
+        alpha_scale=0.48,
+    )
+    im_spin_overlay = ax_img.imshow(
+        spin_overlay0,
+        origin="lower",
+        extent=extent,
+        aspect="auto",
+        animated=True,
+        visible=solver.cfg.spin_model == "spinning_wave",
+    )
 
     peak_scatters = {}
     peak_texts = {}
@@ -920,7 +1076,7 @@ def make_animation(outdir, solver, run, detector_series, click_event, masks_seri
         txt = ax_img.text(xa, xb, ch, color="white", fontsize=10, weight="bold", zorder=5)
         peak_texts[ch] = txt
 
-    ax_img.set_title("Joint density")
+    ax_img.set_title("Joint density" + (" + spinning-wave texture" if solver.cfg.spin_model == "spinning_wave" else ""))
     ax_img.set_xlabel("x_A")
     ax_img.set_ylabel("x_B")
     cbar = fig.colorbar(im, ax=ax_img, fraction=0.046, pad=0.04)
@@ -979,6 +1135,17 @@ def make_animation(outdir, solver, run, detector_series, click_event, masks_seri
         rho = joint_frames[frame_idx]
         im.set_data(safe_frame_normalize(rho))
         im_overlay.set_data(joint_density_with_mask_overlay(rho, masks_series[frame_idx], alpha_scale=0.18))
+        if solver.cfg.spin_model == "spinning_wave":
+            im_spin_overlay.set_data(
+                spinning_pocket_texture_overlay(
+                    rho,
+                    masks_series[frame_idx],
+                    peaks_series[frame_idx],
+                    solver,
+                    times[frame_idx],
+                    alpha_scale=0.48,
+                )
+            )
         update_peak_annotations(peaks_series[frame_idx])
 
         det = detector_series[frame_idx]
@@ -1014,7 +1181,7 @@ def make_animation(outdir, solver, run, detector_series, click_event, masks_seri
         frame_vline.set_xdata([times[frame_idx], times[frame_idx]])
         current_dot.set_data([times[frame_idx]], [weights[frame_idx]])
 
-        artists = [im, im_overlay, info_box, born_scatter, current_dot, frame_vline]
+        artists = [im, im_overlay, im_spin_overlay, info_box, born_scatter, current_dot, frame_vline]
         artists.extend(list(bars))
         artists.extend(peak_scatters.values())
         artists.extend(peak_texts.values())
@@ -1061,6 +1228,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--theta-b", type=float, default=float(np.pi / 3.0))
     p.add_argument("--sg-gradient-a", type=float, default=0.12)
     p.add_argument("--sg-gradient-b", type=float, default=0.12)
+    p.add_argument("--spin-model", choices=["sg", "spinning_wave"], default="spinning_wave")
+    p.add_argument("--spin-wave-k", type=float, default=0.45)
+    p.add_argument("--spin-wave-omega", type=float, default=1.2)
+    p.add_argument("--spin-wave-tilt", type=float, default=float(np.pi / 3.0))
+    p.add_argument("--spin-wave-phase-a", type=float, default=0.0)
+    p.add_argument("--spin-wave-phase-b", type=float, default=float(np.pi))
     p.add_argument("--detector-halfwidth", type=float, default=2.5)
     p.add_argument("--click-weight-threshold", type=float, default=1e-3)
     p.add_argument("--print-every-frames", type=int, default=20)
@@ -1089,6 +1262,12 @@ def main() -> int:
         theta_b=float(args.theta_b),
         sg_gradient_a=float(args.sg_gradient_a),
         sg_gradient_b=float(args.sg_gradient_b),
+        spin_model=str(args.spin_model),
+        spin_wave_k=float(args.spin_wave_k),
+        spin_wave_omega=float(args.spin_wave_omega),
+        spin_wave_tilt=float(args.spin_wave_tilt),
+        spin_wave_phase_a=float(args.spin_wave_phase_a),
+        spin_wave_phase_b=float(args.spin_wave_phase_b),
         detector_halfwidth=float(args.detector_halfwidth),
         click_weight_threshold=float(args.click_weight_threshold),
         print_every_frames=int(args.print_every_frames),
