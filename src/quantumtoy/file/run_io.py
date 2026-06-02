@@ -143,6 +143,7 @@ def save_run_bundle(
     bohm_traj_y,
     bohm_traj_alive,
     bohm_init_points,
+    coincidence_click_info: dict | None = None,
 
     # --------------------------------------------------------
     # Optional posthoc TRF products
@@ -173,6 +174,7 @@ def save_run_bundle(
         t_det=np.array([t_det], dtype=float),
         idx_det=np.array([idx_det], dtype=int),
         detector_clicked=np.array([bool(detector_clicked)], dtype=bool),
+        coincidence_click_info_json=np.array([_pack_optional_json_dict(coincidence_click_info)], dtype=object),
 
         sigma_init=np.array([sigma_init], dtype=float),
 
@@ -233,6 +235,7 @@ def save_run_bundle(
         ),
         "posthoc_trf_info": _jsonable(posthoc_trf_info),
         "posthoc_worldline_info": _jsonable(posthoc_worldline_info),
+        "coincidence_click_info": _jsonable(coincidence_click_info),
 
         "visible_extent": {
             "x_vis_min": float(grid.x_vis_min),
@@ -265,12 +268,16 @@ def load_run_bundle(npz_path: str | Path, meta_path: str | Path | None = None) -
 
     posthoc_trf_info = None
     posthoc_worldline_info = None
+    coincidence_click_info = None
 
     if "posthoc_trf_info_json" in raw.files:
         posthoc_trf_info = _unpack_optional_json_dict(raw["posthoc_trf_info_json"][0])
 
     if "posthoc_worldline_info_json" in raw.files:
         posthoc_worldline_info = _unpack_optional_json_dict(raw["posthoc_worldline_info_json"][0])
+
+    if "coincidence_click_info_json" in raw.files:
+        coincidence_click_info = _unpack_optional_json_dict(raw["coincidence_click_info_json"][0])
 
     out = {
         "meta": meta,
@@ -286,6 +293,7 @@ def load_run_bundle(npz_path: str | Path, meta_path: str | Path | None = None) -
         "t_det": float(raw["t_det"][0]),
         "idx_det": int(raw["idx_det"][0]),
         "detector_clicked": bool(raw["detector_clicked"][0]),
+        "coincidence_click_info": coincidence_click_info,
 
         "sigma_init": float(raw["sigma_init"][0]),
 

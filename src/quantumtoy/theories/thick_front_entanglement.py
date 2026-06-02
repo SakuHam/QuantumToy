@@ -183,12 +183,17 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
     Stern-Gerlach effective analyzer:
         Optional channel-dependent phase gradient:
-            V_ab(x,y) = - ent_sg_strength * sign_ab * (Y - y0) * window_x
+            V_ab(x,y,t) = - ent_sg_strength * sign_ab
+                         * (Y - y0) * window_x * drive(x,t)
 
         Forward phase:
             exp(-i V_ab dt / hbar)
 
         Since F_y = -dV/dy, positive sign_ab receives positive-y force.
+
+        The default drive is the phase-flip wave from
+        experimental/entanglement_phase_flip_poc.py: the analyzer basis stays
+        fixed and only the local SG coupling flips sign/strength as cos(kx-wt).
     """
 
     # --------------------------------------------------------
@@ -277,6 +282,14 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
     # Optional absolute potential clipping. 0 means disabled.
     ent_sg_clip_abs: float = 0.0
+
+    # Coupling drive:
+    #   "static"          -> old fixed SG coupling
+    #   "phase_flip_wave" -> fixed analyzer axis, cosine sign/strength flip
+    ent_sg_drive_mode: str = "phase_flip_wave"
+    ent_sg_wave_k: float = 0.45
+    ent_sg_wave_omega: float = 1.2
+    ent_sg_wave_phase: float = 0.0
 
     # --------------------------------------------------------
     # Entanglement selection parameters
@@ -472,8 +485,19 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         _assert(self.ent_sg_width_x > 0.0, "ent_sg_width_x must be > 0")
         _assert(self.ent_sg_clip_abs >= 0.0, "ent_sg_clip_abs must be >= 0")
 
+        self.ent_sg_drive_mode = str(self.ent_sg_drive_mode).strip().lower()
+        valid_sg_drive_modes = {"static", "phase_flip_wave"}
+        _assert(
+            self.ent_sg_drive_mode in valid_sg_drive_modes,
+            f"ent_sg_drive_mode must be one of {sorted(valid_sg_drive_modes)}, "
+            f"got {self.ent_sg_drive_mode}",
+        )
+
         _assert_finite_scalar(self.ent_sg_center_x, "ent_sg_center_x")
         _assert_finite_scalar(self.ent_sg_y_center, "ent_sg_y_center")
+        _assert_finite_scalar(self.ent_sg_wave_k, "ent_sg_wave_k")
+        _assert_finite_scalar(self.ent_sg_wave_omega, "ent_sg_wave_omega")
+        _assert_finite_scalar(self.ent_sg_wave_phase, "ent_sg_wave_phase")
 
         # --------------------------------------------------------
         # Measurement basis setup
@@ -562,6 +586,128 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
             _assert(
                 np.isfinite(float(norm_factor)) and float(norm_factor) > 0.0,
                 f"initialize_click_state norm_factor invalid: {norm_factor}",
+            )
+
+        return phi
+
+    def initialize_channel_click_state(
+        self,
+        x_click: float,
+        y_click: float,
+        sigma_click: float,
+        channel: str,
+    ) -> np.ndarray:
+        """
+        Build a localized coincidence click in one measurement-basis channel.
+
+        The spatial click remains the usual 2D detector packet, while the spin
+        part is projected into one joint outcome: ++, +-, -+, or --.
+        """
+        _assert(channel in CHANNELS, f"channel must be one of {CHANNELS}, got {channel!r}")
+
+        x = self.grid.X
+        y = self.grid.Y
+
+        sigma_click = _assert_positive_scalar(sigma_click, "sigma_click")
+
+        spatial = np.exp(
+            -0.5 * (
+                ((x - float(x_click)) / sigma_click) ** 2
+                + ((y - float(y_click)) / sigma_click) ** 2
+            )
+        ).astype(np.complex128)
+
+        idx = {
+            "++": (0, 0),
+            "+-": (0, 1),
+            "-+": (1, 0),
+            "--": (1, 1),
+        }
+
+        psi_m = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
+        a, b = idx[channel]
+        psi_m[:, :, a, b] = spatial
+
+        phi = rotate_state_from_measurement_basis(psi_m, self._ent_Ua, self._ent_Ub)
+        phi, norm_factor = _normalize_unit_spinor_4d(phi, self.grid.dx, self.grid.dy)
+        phi = phi.astype(np.complex128)
+
+        if self.front_debug_checks:
+            prob = self._state_probability(phi)
+            _assert(
+                np.isclose(prob, 1.0, atol=self.front_norm_tol),
+                f"initialize_channel_click_state normalized probability should be 1, got {prob}",
+            )
+            _assert(
+                np.isfinite(float(norm_factor)) and float(norm_factor) > 0.0,
+                f"initialize_channel_click_state norm_factor invalid: {norm_factor}",
+            )
+
+        return phi
+
+    def initialize_two_position_channel_click_state(
+        self,
+        x_click_a: float,
+        y_click_a: float,
+        x_click_b: float,
+        y_click_b: float,
+        sigma_click: float,
+        channel: str,
+    ) -> np.ndarray:
+        """
+        Build a minimal two-readout coincidence click in one joint channel.
+
+        This theory still has one 2D spatial coordinate, so the two detector
+        readouts are represented as a coherent two-lobe spatial seed inside the
+        selected measurement-basis channel.
+        """
+        _assert(channel in CHANNELS, f"channel must be one of {CHANNELS}, got {channel!r}")
+
+        x = self.grid.X
+        y = self.grid.Y
+
+        sigma_click = _assert_positive_scalar(sigma_click, "sigma_click")
+
+        spatial_a = np.exp(
+            -0.5 * (
+                ((x - float(x_click_a)) / sigma_click) ** 2
+                + ((y - float(y_click_a)) / sigma_click) ** 2
+            )
+        ).astype(np.complex128)
+
+        spatial_b = np.exp(
+            -0.5 * (
+                ((x - float(x_click_b)) / sigma_click) ** 2
+                + ((y - float(y_click_b)) / sigma_click) ** 2
+            )
+        ).astype(np.complex128)
+
+        spatial = (spatial_a + spatial_b).astype(np.complex128)
+
+        idx = {
+            "++": (0, 0),
+            "+-": (0, 1),
+            "-+": (1, 0),
+            "--": (1, 1),
+        }
+
+        psi_m = np.zeros(spatial.shape + (2, 2), dtype=np.complex128)
+        a, b = idx[channel]
+        psi_m[:, :, a, b] = spatial
+
+        phi = rotate_state_from_measurement_basis(psi_m, self._ent_Ua, self._ent_Ub)
+        phi, norm_factor = _normalize_unit_spinor_4d(phi, self.grid.dx, self.grid.dy)
+        phi = phi.astype(np.complex128)
+
+        if self.front_debug_checks:
+            prob = self._state_probability(phi)
+            _assert(
+                np.isclose(prob, 1.0, atol=self.front_norm_tol),
+                f"initialize_two_position_channel_click_state normalized probability should be 1, got {prob}",
+            )
+            _assert(
+                np.isfinite(float(norm_factor)) and float(norm_factor) > 0.0,
+                f"initialize_two_position_channel_click_state norm_factor invalid: {norm_factor}",
             )
 
         return phi
@@ -783,9 +929,9 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
 
         return signs.astype(float)
 
-    def _sg_spatial_profile(self) -> np.ndarray:
+    def _sg_base_spatial_profile(self) -> np.ndarray:
         """
-        Spatial part of SG potential.
+        Time-independent spatial part of SG potential.
 
             V_ab(x,y) = sign_ab * profile(x,y)
 
@@ -819,10 +965,44 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         self._ent_sg_profile_cache = profile
         return profile
 
+    def _sg_drive_field(self, t: float) -> np.ndarray:
+        """
+        Local coupling drive for the SG analyzer.
+
+        In phase_flip_wave mode this mirrors the PoC's key move: do not rotate
+        the spin/analyzer axis in time, only multiply the diagonal SG coupling
+        by a cosine so the force alternates sign locally.
+        """
+        _assert_finite_scalar(t, "t(sg_drive)")
+
+        if self.ent_sg_drive_mode == "static":
+            drive = np.ones_like(self.grid.X, dtype=float)
+        elif self.ent_sg_drive_mode == "phase_flip_wave":
+            phase = (
+                float(self.ent_sg_wave_k) * (self.grid.X - float(self.ent_sg_center_x))
+                - float(self.ent_sg_wave_omega) * float(t)
+                + float(self.ent_sg_wave_phase)
+            )
+            drive = np.cos(phase).astype(float)
+        else:
+            raise ValueError(f"Unknown ent_sg_drive_mode={self.ent_sg_drive_mode!r}")
+
+        _assert_real_array_2d(drive, "sg_drive")
+        return drive
+
+    def _sg_spatial_profile(self, t: float) -> tuple[np.ndarray, np.ndarray]:
+        base_profile = self._sg_base_spatial_profile()
+        drive = self._sg_drive_field(t)
+        profile = (base_profile * drive).astype(float)
+
+        _assert_real_array_2d(profile, "sg_spatial_profile_driven")
+        return profile, drive
+
     def _apply_sg_phase(
         self,
         psi: np.ndarray,
         dt: float,
+        t: float,
         adjoint: bool,
     ) -> tuple[np.ndarray, dict]:
         """
@@ -836,15 +1016,17 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         """
         _assert_complex_spinor_4d(psi, "psi(sg)")
         _assert_finite_scalar(dt, "dt(sg)")
+        _assert_finite_scalar(t, "t(sg)")
 
         if not self._sg_is_active():
             return psi, {
                 "enabled": False,
                 "mode": str(self.ent_sg_mode),
+                "drive_mode": str(self.ent_sg_drive_mode),
             }
 
         signs = self._sg_sign_matrix()
-        profile = self._sg_spatial_profile()
+        profile, drive = self._sg_spatial_profile(t)
 
         if self.ent_sg_use_measurement_basis:
             work = rotate_state_to_measurement_basis(psi, self._ent_Ua, self._ent_Ub)
@@ -875,11 +1057,16 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         aux = {
             "enabled": True,
             "mode": str(self.ent_sg_mode),
+            "drive_mode": str(self.ent_sg_drive_mode),
             "adjoint": bool(adjoint),
+            "time": float(t),
             "strength": float(self.ent_sg_strength),
             "center_x": float(self.ent_sg_center_x),
             "width_x": float(self.ent_sg_width_x),
             "y_center": float(self.ent_sg_y_center),
+            "wave_k": float(self.ent_sg_wave_k),
+            "wave_omega": float(self.ent_sg_wave_omega),
+            "wave_phase": float(self.ent_sg_wave_phase),
             "use_measurement_basis": bool(self.ent_sg_use_measurement_basis),
             "signs": {
                 "++": float(signs[0, 0]),
@@ -890,15 +1077,18 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
             "profile_min": float(np.min(profile)),
             "profile_max": float(np.max(profile)),
             "profile_absmax": float(np.max(np.abs(profile))),
+            "drive_min": float(np.min(drive)),
+            "drive_max": float(np.max(drive)),
+            "drive_mean": float(np.mean(drive)),
         }
 
         return out.astype(np.complex128), aux
 
-    def _apply_sg_phase_forward(self, psi: np.ndarray, dt: float) -> tuple[np.ndarray, dict]:
-        return self._apply_sg_phase(psi=psi, dt=dt, adjoint=False)
+    def _apply_sg_phase_forward(self, psi: np.ndarray, dt: float, t: float) -> tuple[np.ndarray, dict]:
+        return self._apply_sg_phase(psi=psi, dt=dt, t=t, adjoint=False)
 
-    def _apply_sg_phase_adjoint(self, psi: np.ndarray, dt: float) -> tuple[np.ndarray, dict]:
-        return self._apply_sg_phase(psi=psi, dt=dt, adjoint=True)
+    def _apply_sg_phase_adjoint(self, psi: np.ndarray, dt: float, t: float) -> tuple[np.ndarray, dict]:
+        return self._apply_sg_phase(psi=psi, dt=dt, t=t, adjoint=True)
 
     # --------------------------------------------------------
     # Coherence / current
@@ -1602,11 +1792,12 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         _assert_finite_scalar(dt, "dt")
 
         self._ent_step_counter += 1
+        t_sg = float(self._ent_step_counter - 1) * float(dt)
 
         psi, aux_base_components = self._step_forward_componentwise(state, dt)
         prob_after_base = self._state_probability(psi)
 
-        psi, aux_sg = self._apply_sg_phase_forward(psi, dt)
+        psi, aux_sg = self._apply_sg_phase_forward(psi, dt, t_sg)
         prob_after_sg = self._state_probability(psi)
 
         psi, aux_front = self._front_sharpen_spinor(psi, dt)
@@ -1689,7 +1880,8 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
         _assert_complex_spinor_4d(state, "state(backward)")
         _assert_finite_scalar(dt, "dt(backward)")
 
-        psi, aux_sg = self._apply_sg_phase_adjoint(state, dt)
+        t_sg = max(0.0, float(self._ent_step_counter - 1) * float(dt))
+        psi, aux_sg = self._apply_sg_phase_adjoint(state, dt, t_sg)
         psi, aux_components = self._step_backward_componentwise(psi, dt)
 
         return TheoryStepResult(

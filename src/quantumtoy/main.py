@@ -334,6 +334,11 @@ def run_diagnostics(
     screen_int: np.ndarray,
     phi_tau_frames: np.ndarray,
     sigma_diag: float,
+    click_channel: str | None = None,
+    x_click_a: float | None = None,
+    y_click_a: float | None = None,
+    x_click_b: float | None = None,
+    y_click_b: float | None = None,
 ):
     print("\n================ DIAGNOSTIC BLOCK START ================\n")
 
@@ -375,7 +380,31 @@ def run_diagnostics(
     # freshly initialized complex click state.
     # --------------------------------------------------------
 
-    phi0_full = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
+    if (
+        click_channel is not None
+        and x_click_a is not None
+        and y_click_a is not None
+        and x_click_b is not None
+        and y_click_b is not None
+        and hasattr(theory, "initialize_two_position_channel_click_state")
+    ):
+        phi0_full = theory.initialize_two_position_channel_click_state(
+            x_click_a=float(x_click_a),
+            y_click_a=float(y_click_a),
+            x_click_b=float(x_click_b),
+            y_click_b=float(y_click_b),
+            sigma_click=cfg.sigma_click,
+            channel=str(click_channel),
+        )
+    elif click_channel is not None and hasattr(theory, "initialize_channel_click_state"):
+        phi0_full = theory.initialize_channel_click_state(
+            x_click=x_click,
+            y_click=y_click,
+            sigma_click=cfg.sigma_click,
+            channel=str(click_channel),
+        )
+    else:
+        phi0_full = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
     phi0_vis_ref = crop_state_visible(phi0_full, grid)
 
     if phi_tau_frames[0].shape != phi0_vis_ref.shape:
@@ -401,7 +430,31 @@ def run_diagnostics(
     ncheck = min(5, Nt - 1)
 
     for i in range(ncheck):
-        phi_test = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
+        if (
+            click_channel is not None
+            and x_click_a is not None
+            and y_click_a is not None
+            and x_click_b is not None
+            and y_click_b is not None
+            and hasattr(theory, "initialize_two_position_channel_click_state")
+        ):
+            phi_test = theory.initialize_two_position_channel_click_state(
+                x_click_a=float(x_click_a),
+                y_click_a=float(y_click_a),
+                x_click_b=float(x_click_b),
+                y_click_b=float(y_click_b),
+                sigma_click=cfg.sigma_click,
+                channel=str(click_channel),
+            )
+        elif click_channel is not None and hasattr(theory, "initialize_channel_click_state"):
+            phi_test = theory.initialize_channel_click_state(
+                x_click=x_click,
+                y_click=y_click,
+                sigma_click=cfg.sigma_click,
+                channel=str(click_channel),
+            )
+        else:
+            phi_test = theory.initialize_click_state(x_click, y_click, cfg.sigma_click)
 
         for _ in range((i + 1) * cfg.save_every):
             phi_test = theory.step_backward_adjoint(phi_test, cfg.dt).state
@@ -559,6 +612,12 @@ class ClickResolution:
     y_click: float
     screen_int: np.ndarray
     used_detector_click: bool
+    coincidence_channel: str | None = None
+    coincidence_channel_probs: dict | None = None
+    x_click_a: float | None = None
+    y_click_a: float | None = None
+    x_click_b: float | None = None
+    y_click_b: float | None = None
 
 
 @dataclass
@@ -999,6 +1058,106 @@ class QuantumSimulationApp:
     # Click resolution
     # --------------------------------------------------------
 
+    def resolve_coincidence_channel(
+        self,
+        setup: SimulationSetup,
+        forward: ForwardRunResult,
+        idx_det: int,
+        x_click: float,
+        y_click: float,
+    ) -> tuple[str | None, dict | None, dict | None]:
+        theory = setup.theory
+
+        if not hasattr(theory, "initialize_channel_click_state"):
+            return None, None, None
+
+        if not hasattr(theory, "channel_densities"):
+            return None, None, None
+
+        if forward.state_vis_frames is None:
+            print("[CLICK/ENT] skipped coincidence channel: no saved complex state frames")
+            return None, None, None
+
+        if idx_det < 0 or idx_det >= len(forward.state_vis_frames):
+            print(f"[CLICK/ENT] skipped coincidence channel: idx_det={idx_det} out of range")
+            return None, None, None
+
+        state_click = forward.state_vis_frames[int(idx_det)]
+        if not (
+            isinstance(state_click, np.ndarray)
+            and state_click.ndim == 4
+            and state_click.shape[-2:] == (2, 2)
+        ):
+            return None, None, None
+
+        channels = ["++", "+-", "-+", "--"]
+        dens = theory.channel_densities(state_click)
+
+        if np.any(setup.potential.screen_mask_vis):
+            detector_gate = setup.potential.screen_mask_vis.astype(float)
+        else:
+            sigma = max(float(getattr(setup.cfg, "sigma_click", 0.4)), 1e-12)
+            detector_gate = np.exp(
+                -0.5 * (
+                    ((setup.grid.X_vis - float(x_click)) / sigma) ** 2
+                    + ((setup.grid.Y_vis - float(y_click)) / sigma) ** 2
+                )
+            ).astype(float)
+
+        dxdy = float(setup.grid.dx * setup.grid.dy)
+        weights = np.asarray(
+            [
+                max(float(np.sum(np.asarray(dens[ch], dtype=float) * detector_gate) * dxdy), 0.0)
+                for ch in channels
+            ],
+            dtype=float,
+        )
+        total = float(np.sum(weights))
+
+        if total <= 0.0:
+            print("[CLICK/ENT] skipped coincidence channel: zero channel probability mass")
+            return None, {ch: 0.0 for ch in channels}, None
+
+        weights = weights / total
+        probs = {ch: float(weights[i]) for i, ch in enumerate(channels)}
+
+        rng = np.random.default_rng(int(getattr(setup.cfg, "CLICK_RNG_SEED", 123456)) + 1701)
+        channel = str(rng.choice(np.asarray(channels), p=weights))
+
+        selected_density = np.maximum(np.asarray(dens[channel], dtype=float), 0.0) * detector_gate
+
+        def sample_detector_position(seed_offset: int) -> tuple[float, float]:
+            p = selected_density.ravel().astype(float)
+            s = float(np.sum(p))
+            if s <= 0.0:
+                return float(x_click), float(y_click)
+            local_rng = np.random.default_rng(int(getattr(setup.cfg, "CLICK_RNG_SEED", 123456)) + seed_offset)
+            idx_flat = int(local_rng.choice(p.size, p=p / s))
+            iy, ix = np.unravel_index(idx_flat, selected_density.shape)
+            return float(setup.grid.X_vis[iy, ix]), float(setup.grid.Y_vis[iy, ix])
+
+        x_a, y_a = sample_detector_position(2701)
+        x_b, y_b = sample_detector_position(3701)
+
+        positions = {
+            "a_sign": channel[0],
+            "b_sign": channel[1],
+            "x_click_a": float(x_a),
+            "y_click_a": float(y_a),
+            "x_click_b": float(x_b),
+            "y_click_b": float(y_b),
+        }
+
+        print(
+            "[CLICK/ENT] coincidence channel: "
+            f"{channel} "
+            f"probs={{'++': {probs['++']:.4f}, '+-': {probs['+-']:.4f}, "
+            f"'-+': {probs['-+']:.4f}, '--': {probs['--']:.4f}}} "
+            f"A=({x_a:.3f}, {y_a:.3f}) B=({x_b:.3f}, {y_b:.3f})"
+        )
+
+        return channel, probs, positions
+
     def resolve_click(self, setup: SimulationSetup, forward: ForwardRunResult) -> ClickResolution:
         cfg = setup.cfg
         grid = setup.grid
@@ -1036,6 +1195,14 @@ class QuantumSimulationApp:
                 f"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}"
             )
 
+            coincidence_channel, coincidence_channel_probs, coincidence_positions = self.resolve_coincidence_channel(
+                setup=setup,
+                forward=forward,
+                idx_det=idx_det,
+                x_click=x_click,
+                y_click=y_click,
+            )
+
             return ClickResolution(
                 idx_det=idx_det,
                 t_det=t_det,
@@ -1043,6 +1210,12 @@ class QuantumSimulationApp:
                 y_click=y_click,
                 screen_int=screen_int,
                 used_detector_click=True,
+                coincidence_channel=coincidence_channel,
+                coincidence_channel_probs=coincidence_channel_probs,
+                x_click_a=None if coincidence_positions is None else coincidence_positions["x_click_a"],
+                y_click_a=None if coincidence_positions is None else coincidence_positions["y_click_a"],
+                x_click_b=None if coincidence_positions is None else coincidence_positions["x_click_b"],
+                y_click_b=None if coincidence_positions is None else coincidence_positions["y_click_b"],
             )
 
         idx_det, t_det, x_click, y_click, screen_int = detect_click_from_screen(
@@ -1065,6 +1238,14 @@ class QuantumSimulationApp:
             f"click_mode={cfg.CLICK_MODE}"
         )
 
+        coincidence_channel, coincidence_channel_probs, coincidence_positions = self.resolve_coincidence_channel(
+            setup=setup,
+            forward=forward,
+            idx_det=idx_det,
+            x_click=x_click,
+            y_click=y_click,
+        )
+
         return ClickResolution(
             idx_det=idx_det,
             t_det=t_det,
@@ -1072,6 +1253,12 @@ class QuantumSimulationApp:
             y_click=y_click,
             screen_int=screen_int,
             used_detector_click=False,
+            coincidence_channel=coincidence_channel,
+            coincidence_channel_probs=coincidence_channel_probs,
+            x_click_a=None if coincidence_positions is None else coincidence_positions["x_click_a"],
+            y_click_a=None if coincidence_positions is None else coincidence_positions["y_click_a"],
+            x_click_b=None if coincidence_positions is None else coincidence_positions["x_click_b"],
+            y_click_b=None if coincidence_positions is None else coincidence_positions["y_click_b"],
         )
 
     # --------------------------------------------------------
@@ -1732,6 +1919,14 @@ class QuantumSimulationApp:
             t_det=click.t_det,
             idx_det=click.idx_det,
             detector_clicked=forward.detector_clicked,
+            coincidence_click_info={
+                "channel": click.coincidence_channel,
+                "channel_probs": click.coincidence_channel_probs,
+                "x_click_a": click.x_click_a,
+                "y_click_a": click.y_click_a,
+                "x_click_b": click.x_click_b,
+                "y_click_b": click.y_click_b,
+            } if click.coincidence_channel is not None else None,
             sigma_init=sigma_products.sigma_init,
             ridge_x_init=sigma_products.ridge_x_init,
             ridge_y_init=sigma_products.ridge_y_init,
@@ -1789,6 +1984,11 @@ class QuantumSimulationApp:
             y_click=click.y_click,
             sigma_click=self.cfg.sigma_click,
             save_every=self.cfg.save_every,
+            click_channel=click.coincidence_channel,
+            x_click_a=click.x_click_a,
+            y_click_a=click.y_click_a,
+            x_click_b=click.x_click_b,
+            y_click_b=click.y_click_b,
             print_every_frames=20,
         )
 
@@ -1815,6 +2015,11 @@ class QuantumSimulationApp:
             screen_int=click.screen_int,
             phi_tau_frames=phi_tau_frames,
             sigma_diag=sigma_diag,
+            click_channel=click.coincidence_channel,
+            x_click_a=click.x_click_a,
+            y_click_a=click.y_click_a,
+            x_click_b=click.x_click_b,
+            y_click_b=click.y_click_b,
         )
 
         posthoc = self.build_posthoc_products(

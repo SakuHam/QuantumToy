@@ -529,6 +529,11 @@ def build_backward_library(
     y_click: float,
     sigma_click: float,
     save_every: int,
+    click_channel: str | None = None,
+    x_click_a: float | None = None,
+    y_click_a: float | None = None,
+    x_click_b: float | None = None,
+    y_click_b: float | None = None,
     print_every_frames: int = 20,
 ):
     """
@@ -565,7 +570,31 @@ def build_backward_library(
             f"tau_step={tau_step} must match saved-frame spacing dt_saved={dt_saved}",
         )
 
-    phi_cur = theory.initialize_click_state(x_click, y_click, sigma_click)
+    if (
+        click_channel is not None
+        and x_click_a is not None
+        and y_click_a is not None
+        and x_click_b is not None
+        and y_click_b is not None
+        and hasattr(theory, "initialize_two_position_channel_click_state")
+    ):
+        phi_cur = theory.initialize_two_position_channel_click_state(
+            x_click_a=float(x_click_a),
+            y_click_a=float(y_click_a),
+            x_click_b=float(x_click_b),
+            y_click_b=float(y_click_b),
+            sigma_click=sigma_click,
+            channel=str(click_channel),
+        )
+    elif click_channel is not None and hasattr(theory, "initialize_channel_click_state"):
+        phi_cur = theory.initialize_channel_click_state(
+            x_click=x_click,
+            y_click=y_click,
+            sigma_click=sigma_click,
+            channel=str(click_channel),
+        )
+    else:
+        phi_cur = theory.initialize_click_state(x_click, y_click, sigma_click)
     _assert_state_shape_matches_grid(phi_cur, grid, "phi_cur(initialized click state)")
 
     phi0_vis = _crop_visible_state(phi_cur, grid)
