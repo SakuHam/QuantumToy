@@ -21,7 +21,12 @@ from analysis.emix import (
     make_rho,
 )
 from analysis.ridge import compute_ridge_xy
-from analysis.current import alignment_and_diagnostics_from_state_frames
+from analysis.current import (
+    alignment_and_diagnostics_from_state_frames,
+    _extract_visible_velocity_fields,
+    gaussian_kernel_2d,
+    local_weighted_mean,
+)
 
 from file.run_io import load_run_bundle, apply_cfg_dict
 from viz.visual_debug import (
@@ -924,6 +929,60 @@ def compute_click_frame_idx(times: np.ndarray, t_det) -> int | None:
     return int(np.searchsorted(times, t_det, side="left"))
 
 
+def _coincidence_position(info: dict | None, suffix: str) -> tuple[float, float] | None:
+    if not isinstance(info, dict):
+        return None
+
+    x = info.get(f"x_click_{suffix}", None)
+    y = info.get(f"y_click_{suffix}", None)
+
+    if not (is_finite_scalar(x) and is_finite_scalar(y)):
+        return None
+
+    return float(x), float(y)
+
+
+def local_flow_direction_at_xy(
+    theory,
+    state_vis_frames: np.ndarray | None,
+    grid,
+    cfg,
+    i: int,
+    x: float,
+    y: float,
+):
+    if state_vis_frames is None:
+        return np.nan, np.nan, np.nan
+
+    if i < 0 or i >= len(state_vis_frames):
+        return np.nan, np.nan, np.nan
+
+    ix = int(np.argmin(np.abs(grid.x_vis_1d - float(x))))
+    iy = int(np.argmin(np.abs(grid.y_vis_1d - float(y))))
+
+    try:
+        vx, vy, sp = _extract_visible_velocity_fields(
+            theory=theory,
+            state_frame=state_vis_frames[i],
+            vis_hw=(grid.n_visible_y, grid.n_visible_x),
+            eps_rho=cfg.ALIGN_EPS_RHO,
+            dx=grid.dx,
+            dy=grid.dy,
+        )
+    except Exception:
+        return np.nan, np.nan, np.nan
+
+    if cfg.ARROW_SPATIAL_AVG:
+        kernel = gaussian_kernel_2d(
+            radius=cfg.ARROW_AVG_RADIUS,
+            sigma=cfg.ARROW_AVG_GAUSS_SIGMA,
+        )
+    else:
+        kernel = gaussian_kernel_2d(radius=0, sigma=1.0)
+
+    return local_weighted_mean(vx, vy, sp, ix, iy, kernel)
+
+
 def safe_debug_state_for_phase_tools(state_vis: np.ndarray) -> np.ndarray:
     """
     Existing viz.visual_debug helpers may only understand scalar / simple spinor.
@@ -1097,6 +1156,7 @@ def main():
     x_click = bundle["x_click"]
     y_click = bundle["y_click"]
     t_det = bundle["t_det"]
+    coincidence_click_info = bundle.get("coincidence_click_info", None)
 
     sigma_init = bundle["sigma_init"]
     vref = bundle["vref"]
@@ -1133,6 +1193,9 @@ def main():
     tau_step = cfg.save_every * cfg.dt
 
     click_has_position = is_finite_scalar(x_click) and is_finite_scalar(y_click)
+    click_a_position = _coincidence_position(coincidence_click_info, "a")
+    click_b_position = _coincidence_position(coincidence_click_info, "b")
+    coincidence_has_positions = click_a_position is not None and click_b_position is not None
     click_frame_idx = compute_click_frame_idx(times, t_det)
 
     if state_vis_frames is not None:
@@ -1429,7 +1492,20 @@ def main():
             linestyle="None",
             color="yellow",
             alpha=0.9,
-            label="click",
+            label="click A" if coincidence_has_positions else "click",
+            visible=False,
+            zorder=10,
+        )
+
+        click_marker_b, = ax.plot(
+            [],
+            [],
+            marker="x",
+            markersize=9,
+            linestyle="None",
+            color="orange",
+            alpha=0.9,
+            label="click B" if coincidence_has_positions else "_nolegend_",
             visible=False,
             zorder=10,
         )
@@ -1445,7 +1521,7 @@ def main():
         )
 
         flow_quiver = None
-        if cfg.DRAW_FLOW_ARROW and (ux_init is not None):
+        if cfg.DRAW_FLOW_ARROW and ((ux_init is not None) or coincidence_has_positions):
             flow_quiver = ax.quiver(
                 [ridge_x_init[0]],
                 [ridge_y_init[0]],
@@ -1455,6 +1531,22 @@ def main():
                 scale_units="xy",
                 scale=1.0,
                 color="cyan",
+                alpha=0.9,
+                width=0.006,
+                zorder=11,
+            )
+
+        flow_quiver_b = None
+        if cfg.DRAW_FLOW_ARROW and coincidence_has_positions:
+            flow_quiver_b = ax.quiver(
+                [0.0],
+                [0.0],
+                [0.0],
+                [0.0],
+                angles="xy",
+                scale_units="xy",
+                scale=1.0,
+                color="deepskyblue",
                 alpha=0.9,
                 width=0.006,
                 zorder=11,
@@ -1506,11 +1598,14 @@ def main():
                 "contour_artists": contour_artists,
                 "ridge_marker": ridge_marker,
                 "click_marker": click_marker,
+                "click_marker_b": click_marker_b,
                 "ridge_trail": ridge_trail,
                 "flow_quiver": flow_quiver,
+                "flow_quiver_b": flow_quiver_b,
                 "bohm_lines": bohm_lines,
                 "bohm_heads": bohm_heads,
                 "arrow_state": {"ux": np.nan, "uy": np.nan, "spd": np.nan},
+                "arrow_state_b": {"ux": np.nan, "uy": np.nan, "spd": np.nan},
             }
         )
 
@@ -1593,7 +1688,25 @@ def main():
         flow_quiver = panel["flow_quiver"]
         arrow_state = panel["arrow_state"]
 
-        if flow_quiver is None or ux[0] is None or speed[0] is None:
+        if flow_quiver is None:
+            return
+
+        if coincidence_has_positions:
+            update_coincidence_flow_arrow(
+                flow_quiver,
+                arrow_state,
+                i,
+                click_a_position,
+            )
+            update_coincidence_flow_arrow(
+                panel["flow_quiver_b"],
+                panel["arrow_state_b"],
+                i,
+                click_b_position,
+            )
+            return
+
+        if ux[0] is None or speed[0] is None:
             return
 
         uxi = ux[0][i]
@@ -1635,6 +1748,62 @@ def main():
         L = cfg.ARROW_SCALE * float(np.clip(spd / (speed_ref + 1e-30), 0.0, 2.5))
         flow_quiver.set_UVC([L * uxi], [L * uyi])
 
+    def update_coincidence_flow_arrow(quiver, arrow_state: dict, i: int, pos):
+        if quiver is None or pos is None:
+            return
+
+        x, y = pos
+
+        if click_frame_idx is None or i < click_frame_idx:
+            quiver.set_offsets([[x, y]])
+            quiver.set_UVC([0.0], [0.0])
+            return
+
+        uxi, uyi, spd = local_flow_direction_at_xy(
+            theory=theory,
+            state_vis_frames=state_vis_frames,
+            grid=grid,
+            cfg=cfg,
+            i=i,
+            x=x,
+            y=y,
+        )
+
+        valid = (
+            np.isfinite(uxi)
+            and np.isfinite(uyi)
+            and np.isfinite(spd)
+            and (spd > cfg.ALIGN_EPS_SPEED)
+        )
+
+        if not valid:
+            if cfg.ARROW_HIDE_WHEN_INVALID:
+                quiver.set_offsets([[x, y]])
+                quiver.set_UVC([0.0], [0.0])
+                return
+
+            if (
+                cfg.ARROW_HOLD_LAST_WHEN_INVALID
+                and np.isfinite(arrow_state["ux"])
+                and np.isfinite(arrow_state["uy"])
+            ):
+                uxi = arrow_state["ux"]
+                uyi = arrow_state["uy"]
+                spd = arrow_state["spd"] if np.isfinite(arrow_state["spd"]) else 0.0
+            else:
+                quiver.set_offsets([[x, y]])
+                quiver.set_UVC([0.0], [0.0])
+                return
+
+        arrow_state["ux"] = uxi
+        arrow_state["uy"] = uyi
+        arrow_state["spd"] = spd
+
+        quiver.set_offsets([[x, y]])
+
+        L = cfg.ARROW_SCALE * float(np.clip(spd / (speed_ref + 1e-30), 0.0, 2.5))
+        quiver.set_UVC([L * uxi], [L * uyi])
+
     def update_bohmian_overlay(panel: dict, i: int):
         if not cfg.ENABLE_BOHMIAN_OVERLAY or bohm_traj_x is None:
             return
@@ -1670,15 +1839,35 @@ def main():
                     bohm_heads[k].set_data([], [])
 
     def update_click_marker(panel: dict, i: int):
-        marker = panel["click_marker"]
+        marker_a = panel["click_marker"]
+        marker_b = panel["click_marker_b"]
 
-        if (not click_has_position) or (click_frame_idx is None) or (i < click_frame_idx):
-            marker.set_data([], [])
-            marker.set_visible(False)
+        if click_frame_idx is None or i < click_frame_idx:
+            marker_a.set_data([], [])
+            marker_a.set_visible(False)
+            marker_b.set_data([], [])
+            marker_b.set_visible(False)
             return
 
-        marker.set_data([float(x_click)], [float(y_click)])
-        marker.set_visible(True)
+        if coincidence_has_positions:
+            xa, ya = click_a_position
+            xb, yb = click_b_position
+            marker_a.set_data([xa], [ya])
+            marker_a.set_visible(True)
+            marker_b.set_data([xb], [yb])
+            marker_b.set_visible(True)
+            return
+
+        marker_b.set_data([], [])
+        marker_b.set_visible(False)
+
+        if not click_has_position:
+            marker_a.set_data([], [])
+            marker_a.set_visible(False)
+            return
+
+        marker_a.set_data([float(x_click)], [float(y_click)])
+        marker_a.set_visible(True)
 
     def make_main_title(i: int, mode: str):
         parts = [
@@ -1832,10 +2021,14 @@ def main():
             artists.extend(panel["posthoc_corridor_artists"])
             artists.append(panel["ridge_marker"])
             artists.append(panel["click_marker"])
+            artists.append(panel["click_marker_b"])
             artists.append(panel["ridge_trail"])
 
             if panel["flow_quiver"] is not None:
                 artists.append(panel["flow_quiver"])
+
+            if panel["flow_quiver_b"] is not None:
+                artists.append(panel["flow_quiver_b"])
 
             artists.extend([obj for obj in panel["bohm_lines"] if obj is not None])
             artists.extend([obj for obj in panel["bohm_heads"] if obj is not None])
