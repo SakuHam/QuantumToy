@@ -36,6 +36,8 @@ from viz.visual_debug import (
 RENDER_MODES = (
     "density",
     "forward_density",
+    "visible_intensity",
+    "latent_intensity",
     "backward_density",
     "overlap_density",
     "posthoc_base_rho",
@@ -484,6 +486,37 @@ def density_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported state_vis shape={state_vis.shape}")
 
 
+def resultant_field_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
+    if state_vis.ndim == 2:
+        return state_vis.astype(np.complex128)
+
+    if state_vis.ndim == 3:
+        return np.sum(state_vis, axis=0).astype(np.complex128)
+
+    if state_vis.ndim == 4 and state_vis.shape[-2:] == (2, 2):
+        return np.sum(state_vis, axis=(-2, -1)).astype(np.complex128)
+
+    raise ValueError(f"Unsupported state_vis shape={state_vis.shape}")
+
+
+def visible_intensity_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
+    resultant = resultant_field_from_state_vis(state_vis)
+    return (np.abs(resultant) ** 2).astype(float)
+
+
+def visible_intensity_frames_from_state_vis(state_vis_frames: np.ndarray) -> np.ndarray:
+    if state_vis_frames.ndim == 3:
+        return (np.abs(state_vis_frames) ** 2).astype(float)
+
+    if state_vis_frames.ndim == 4:
+        return (np.abs(np.sum(state_vis_frames, axis=1)) ** 2).astype(float)
+
+    if state_vis_frames.ndim == 5 and state_vis_frames.shape[-2:] == (2, 2):
+        return (np.abs(np.sum(state_vis_frames, axis=(-2, -1))) ** 2).astype(float)
+
+    raise ValueError(f"Unsupported state_vis_frames shape={state_vis_frames.shape}")
+
+
 def effective_scalar_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
     """
     Convert one visible state frame into an effective scalar complex field
@@ -709,6 +742,8 @@ def build_render_image(
     i: int,
     rho_current: np.ndarray,
     forward_density_current: np.ndarray | None,
+    visible_intensity_current: np.ndarray | None,
+    latent_intensity_current: np.ndarray | None,
     backward_density_current: np.ndarray | None,
     overlap_density_current: np.ndarray | None,
     posthoc_base_rho: np.ndarray | None,
@@ -734,6 +769,30 @@ def build_render_image(
         img = gamma_display(
             forward_density_current[i],
             vref=_default_frame_vref(forward_density_current),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode == "visible_intensity":
+        if visible_intensity_current is None:
+            raise RuntimeError("visible_intensity render mode requires visible intensity frames")
+
+        img = gamma_display(
+            visible_intensity_current[i],
+            vref=_default_frame_vref(visible_intensity_current),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode == "latent_intensity":
+        if latent_intensity_current is None:
+            raise RuntimeError("latent_intensity render mode requires latent intensity frames")
+
+        img = gamma_display(
+            latent_intensity_current[i],
+            vref=_default_frame_vref(latent_intensity_current),
             gamma=cfg.GAMMA,
             use_fixed_scale=False,
         )
@@ -1030,6 +1089,8 @@ def main():
 
     times = bundle["times"]
     state_vis_frames = bundle["state_vis_frames"]
+    visible_intensity_saved = bundle.get("visible_intensity_frames", None)
+    latent_intensity_saved = bundle.get("latent_intensity_frames", None)
     norms = bundle["norms"]
     phi_tau_frames = bundle["phi_tau_frames"]
 
@@ -1055,7 +1116,9 @@ def main():
     print(
         "[LOAD SHAPES] "
         f"state_vis_frames={None if state_vis_frames is None else state_vis_frames.shape} "
-        f"phi_tau_frames={None if phi_tau_frames is None else phi_tau_frames.shape}"
+        f"phi_tau_frames={None if phi_tau_frames is None else phi_tau_frames.shape} "
+        f"visible_intensity={None if visible_intensity_saved is None else visible_intensity_saved.shape} "
+        f"latent_intensity={None if latent_intensity_saved is None else latent_intensity_saved.shape}"
     )
 
     print(
@@ -1213,6 +1276,16 @@ def main():
     ridge_complex_init = make_overlap_complex_frames(state_vis_frames, emix_init)
 
     forward_density_init = forward_density_frames_from_state_vis(state_vis_frames)
+    visible_intensity_init = (
+        visible_intensity_saved
+        if visible_intensity_saved is not None
+        else visible_intensity_frames_from_state_vis(state_vis_frames)
+    )
+    latent_intensity_init = (
+        latent_intensity_saved
+        if latent_intensity_saved is not None
+        else forward_density_frames_from_state_vis(state_vis_frames)
+    )
     backward_density_init = backward_density_frames_from_emix(emix_init)
     overlap_density_init = overlap_density_frames(state_vis_frames, emix_init)
 
@@ -1240,6 +1313,8 @@ def main():
             i=0,
             rho_current=rho_init,
             forward_density_current=forward_density_init,
+            visible_intensity_current=visible_intensity_init,
+            latent_intensity_current=latent_intensity_init,
             backward_density_current=backward_density_init,
             overlap_density_current=overlap_density_init,
             posthoc_base_rho=posthoc_base_rho_saved,
@@ -1453,6 +1528,8 @@ def main():
     ridge_complex_current = [ridge_complex_init]
 
     forward_density_current = [forward_density_init]
+    visible_intensity_current = [visible_intensity_init]
+    latent_intensity_current = [latent_intensity_init]
     backward_density_current = [backward_density_init]
     overlap_density_current = [overlap_density_init]
 
@@ -1483,6 +1560,8 @@ def main():
             i=i,
             rho_current=rho_current[0],
             forward_density_current=forward_density_current[0],
+            visible_intensity_current=visible_intensity_current[0],
+            latent_intensity_current=latent_intensity_current[0],
             backward_density_current=backward_density_current[0],
             overlap_density_current=overlap_density_current[0],
             posthoc_base_rho=posthoc_base_rho_saved,
@@ -1703,6 +1782,16 @@ def main():
         ridge_complex_current[0] = make_overlap_complex_frames(state_vis_frames, emix_new)
 
         forward_density_current[0] = forward_density_frames_from_state_vis(state_vis_frames)
+        visible_intensity_current[0] = (
+            visible_intensity_saved
+            if visible_intensity_saved is not None
+            else visible_intensity_frames_from_state_vis(state_vis_frames)
+        )
+        latent_intensity_current[0] = (
+            latent_intensity_saved
+            if latent_intensity_saved is not None
+            else forward_density_frames_from_state_vis(state_vis_frames)
+        )
         backward_density_current[0] = backward_density_frames_from_emix(emix_new)
         overlap_density_current[0] = overlap_density_frames(state_vis_frames, emix_new)
 

@@ -120,6 +120,8 @@ def save_run_bundle(
     times,
     frames_density,
     state_vis_frames,
+    visible_intensity_frames=None,
+    latent_intensity_frames=None,
     norms,
     screen_int,
     phi_tau_frames,
@@ -164,6 +166,8 @@ def save_run_bundle(
         npz_path,
         times=np.asarray(times),
         frames_density=np.asarray(frames_density),
+        visible_intensity_frames=pack_optional_array(visible_intensity_frames, dtype=float),
+        latent_intensity_frames=pack_optional_array(latent_intensity_frames, dtype=float),
         state_vis_frames=pack_optional_array(state_vis_frames),
         norms=np.asarray(norms),
         screen_int=np.asarray(screen_int),
@@ -223,6 +227,8 @@ def save_run_bundle(
         "meta_path": str(meta_path),
         "debug_free_case": bool(debug_free_case),
         "has_state_vis_frames": bool(state_vis_frames is not None),
+        "has_visible_intensity_frames": bool(visible_intensity_frames is not None),
+        "has_latent_intensity_frames": bool(latent_intensity_frames is not None),
         "has_bohmian": bool(bohm_traj_x is not None),
 
         # ----------------------------------------------------
@@ -283,6 +289,10 @@ def load_run_bundle(npz_path: str | Path, meta_path: str | Path | None = None) -
         "meta": meta,
         "times": raw["times"],
         "frames_density": raw["frames_density"],
+        "visible_intensity_frames": unpack_optional_array(raw["visible_intensity_frames"])
+        if "visible_intensity_frames" in raw.files else None,
+        "latent_intensity_frames": unpack_optional_array(raw["latent_intensity_frames"])
+        if "latent_intensity_frames" in raw.files else None,
         "state_vis_frames": unpack_optional_array(raw["state_vis_frames"]),
         "norms": raw["norms"],
         "screen_int": raw["screen_int"],

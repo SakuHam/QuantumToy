@@ -82,6 +82,40 @@ def state_density_for_runner(state, theory=None):
     raise ValueError(f"Unsupported state shape for density: {state.shape}")
 
 
+def resultant_field_for_runner(state: np.ndarray) -> np.ndarray:
+    """
+    Resultant visible complex field after summing stored components.
+    """
+    if not isinstance(state, np.ndarray):
+        raise TypeError(f"state must be np.ndarray, got {type(state)}")
+
+    if state.ndim == 2:
+        return state.astype(np.complex128)
+
+    if state.ndim == 3:
+        return np.sum(state, axis=0).astype(np.complex128)
+
+    if state.ndim == 4 and state.shape[-2:] == (2, 2):
+        return np.sum(state, axis=(-2, -1)).astype(np.complex128)
+
+    raise ValueError(f"Unsupported state shape for resultant field: {state.shape}")
+
+
+def visible_intensity_for_runner(state: np.ndarray) -> np.ndarray:
+    """
+    Visible intensity from the component-summed resultant field.
+    """
+    field = resultant_field_for_runner(state)
+    return (np.abs(field) ** 2).astype(float)
+
+
+def latent_intensity_for_runner(state: np.ndarray, theory=None) -> np.ndarray:
+    """
+    Latent component intensity: sum(|component|^2).
+    """
+    return state_density_for_runner(state, theory=theory)
+
+
 def frames_density_for_runner(frames: np.ndarray) -> np.ndarray:
     """
     Convert complex visible frames to scalar density frames.
@@ -593,6 +627,8 @@ class BatchSamplerRuntime:
 @dataclass
 class ForwardRunResult:
     frames_density: np.ndarray
+    visible_intensity_frames: np.ndarray | None
+    latent_intensity_frames: np.ndarray | None
     state_vis_frames: np.ndarray | None
     posthoc_gamma_like_frames: np.ndarray | None
     times: np.ndarray
@@ -798,6 +834,8 @@ class QuantumSimulationApp:
         can_export_posthoc_fields = hasattr(theory, "compute_posthoc_support_fields")
 
         frames_density = []
+        visible_intensity_frames = []
+        latent_intensity_frames = []
         state_vis_frames = []
         posthoc_gamma_like_frames = []
         times = []
@@ -851,6 +889,12 @@ class QuantumSimulationApp:
 
                 rho_vis = rho[grid.ys, grid.xs].copy()
                 frames_density.append(rho_vis)
+
+                visible_intensity = visible_intensity_for_runner(state)
+                latent_intensity = latent_intensity_for_runner(state, theory=theory)
+                visible_intensity_frames.append(visible_intensity[grid.ys, grid.xs].copy())
+                latent_intensity_frames.append(latent_intensity[grid.ys, grid.xs].copy())
+
                 times.append(t_now)
                 norms.append(norm_now)
 
@@ -921,6 +965,8 @@ class QuantumSimulationApp:
         print("==========================================\n")
 
         frames_density = np.asarray(frames_density, dtype=float)
+        visible_intensity_frames = np.asarray(visible_intensity_frames, dtype=float)
+        latent_intensity_frames = np.asarray(latent_intensity_frames, dtype=float)
         times = np.asarray(times, dtype=float)
         norms = np.asarray(norms, dtype=float)
 
@@ -951,6 +997,8 @@ class QuantumSimulationApp:
 
         return ForwardRunResult(
             frames_density=frames_density,
+            visible_intensity_frames=visible_intensity_frames,
+            latent_intensity_frames=latent_intensity_frames,
             state_vis_frames=state_vis_frames,
             posthoc_gamma_like_frames=posthoc_gamma_like_frames,
             times=times,
@@ -998,6 +1046,13 @@ class QuantumSimulationApp:
             x_peak = grid.X_vis[iy, ix]
             y_peak = grid.Y_vis[iy, ix]
             mass_vis = np.sum(fi) * grid.dx * grid.dy
+            visible_mass = None
+            latent_mass = None
+            hidden_mass = None
+            if forward.visible_intensity_frames is not None and forward.latent_intensity_frames is not None:
+                visible_mass = float(np.sum(forward.visible_intensity_frames[i]) * grid.dx * grid.dy)
+                latent_mass = float(np.sum(forward.latent_intensity_frames[i]) * grid.dx * grid.dy)
+                hidden_mass = float(max(latent_mass - visible_mass, 0.0))
 
             print(
                 f"[FWDCHK] i={i:4d} t={times[i]:8.4f} "
@@ -1005,6 +1060,14 @@ class QuantumSimulationApp:
                 f"max={np.max(fi):.6e} "
                 f"peak=({x_peak:.4f},{y_peak:.4f})"
             )
+
+            if visible_mass is not None and latent_mass is not None and hidden_mass is not None:
+                print(
+                    f"[LATENTCHK] i={i:4d} "
+                    f"visible_mass={visible_mass:.6e} "
+                    f"latent_mass={latent_mass:.6e} "
+                    f"hidden_minus_visible={hidden_mass:.6e}"
+                )
 
         if cfg.THEORY_NAME == "dirac" and forward.state_vis_frames is not None:
             theory.debug_packet_summary(
@@ -1911,6 +1974,8 @@ class QuantumSimulationApp:
             times=forward.times,
             frames_density=forward.frames_density,
             state_vis_frames=forward.state_vis_frames,
+            visible_intensity_frames=forward.visible_intensity_frames,
+            latent_intensity_frames=forward.latent_intensity_frames,
             norms=forward.norms,
             screen_int=click.screen_int,
             phi_tau_frames=phi_tau_frames,
