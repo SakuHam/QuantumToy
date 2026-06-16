@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.ndimage import label
 
 
 def _assert(cond: bool, msg: str):
@@ -227,6 +228,99 @@ def ridge_centroid_top(Gamma, x_vis_1d, y_vis_1d, top_q=0.02, eps=1e-30):
     score = float(g[iyn, ixn])
 
     return xc, yc, score
+
+
+def ridge_top_components(Gamma, x_vis_1d, y_vis_1d, n_tops=2, top_q=0.02, eps=1e-30):
+    """
+    Return weighted centroids for distinct high-Gamma ridge components.
+
+    Components are extracted from the top-q mask and sorted from upper to lower
+    y, which keeps split-slit ridge indicators visually stable across frames.
+    """
+    _assert_vis_axes(x_vis_1d, y_vis_1d, Gamma.shape)
+    _assert(isinstance(n_tops, int) and n_tops >= 1, f"n_tops must be int >= 1, got {n_tops}")
+    _assert(0.0 < top_q < 1.0, f"top_q must be in (0,1), got {top_q}")
+
+    g = Gamma.astype(float)
+    gmax = float(np.max(g))
+
+    out = []
+    if gmax <= 0:
+        xg, yg, sg = ridge_argmax(g, x_vis_1d, y_vis_1d)
+        return [(xg, yg, sg)]
+
+    thr = np.quantile(g.ravel(), 1.0 - top_q)
+    mask = (g >= thr) & (g > 0.0)
+    labels, n_labels = label(mask)
+
+    for lab in range(1, n_labels + 1):
+        comp = labels == lab
+        w = g[comp] + eps
+        if w.size == 0 or float(np.sum(w)) <= 0:
+            continue
+
+        iy_idx, ix_idx = np.where(comp)
+        xs_ = x_vis_1d[ix_idx]
+        ys_ = y_vis_1d[iy_idx]
+
+        wsum = float(np.sum(w))
+        xc = float(np.sum(xs_ * w) / wsum)
+        yc = float(np.sum(ys_ * w) / wsum)
+        score = float(np.max(g[comp]))
+        mass = float(np.sum(g[comp]))
+
+        out.append((xc, yc, score, mass))
+
+    if not out:
+        xg, yg, sg = ridge_argmax(g, x_vis_1d, y_vis_1d)
+        return [(xg, yg, sg)]
+
+    out.sort(key=lambda item: item[3], reverse=True)
+    selected = out[:n_tops]
+    selected.sort(key=lambda item: item[1], reverse=True)
+    return [(xc, yc, score) for xc, yc, score, _ in selected]
+
+
+def compute_ridge_top_xy(
+    frames_psi,
+    Emix,
+    x_vis_1d,
+    y_vis_1d,
+    n_tops=2,
+    top_q=0.02,
+):
+    """
+    Compute up to n_tops distinct high-Gamma ridge indicator trajectories.
+
+    Missing indicators are filled with NaN, so callers can hide unavailable
+    markers without special casing frame counts.
+    """
+    _assert_frames_pair_compatible(frames_psi, Emix)
+    _assert(isinstance(n_tops, int) and n_tops >= 1, f"n_tops must be int >= 1, got {n_tops}")
+
+    Nt_ = frames_psi.shape[0]
+    ridge_x = np.full((n_tops, Nt_), np.nan, dtype=float)
+    ridge_y = np.full((n_tops, Nt_), np.nan, dtype=float)
+    ridge_s = np.full((n_tops, Nt_), np.nan, dtype=float)
+
+    for i in range(Nt_):
+        Gamma = local_gamma_field(frames_psi[i], Emix[i])
+        _assert_vis_axes(x_vis_1d, y_vis_1d, Gamma.shape)
+
+        tops = ridge_top_components(
+            Gamma,
+            x_vis_1d,
+            y_vis_1d,
+            n_tops=n_tops,
+            top_q=top_q,
+        )
+
+        for k, (xi, yi, si) in enumerate(tops):
+            ridge_x[k, i] = xi
+            ridge_y[k, i] = yi
+            ridge_s[k, i] = si
+
+    return ridge_x, ridge_y, ridge_s
 
 
 def snap_to_localmax_near_point(Gamma, x_vis_1d, y_vis_1d, xc, yc, radius=12):

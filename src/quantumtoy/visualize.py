@@ -20,7 +20,7 @@ from analysis.emix import (
     build_Emix_density_from_phi_tau,
     make_rho,
 )
-from analysis.ridge import compute_ridge_xy
+from analysis.ridge import compute_ridge_top_xy, compute_ridge_xy
 from analysis.current import (
     alignment_and_diagnostics_from_state_frames,
     _extract_visible_velocity_fields,
@@ -1263,9 +1263,11 @@ def main():
         ridge_source = args.ridge_source
 
         if ridge_source == "overlap":
+            ridge_frames_psi = state_vis_frames
+            ridge_frames_emix = Emix
             rx, ry, rs = compute_ridge_xy(
-                frames_psi=state_vis_frames,
-                Emix=Emix,
+                frames_psi=ridge_frames_psi,
+                Emix=ridge_frames_emix,
                 x_vis_1d=grid.x_vis_1d,
                 y_vis_1d=grid.y_vis_1d,
                 mode=cfg.RIDGE_MODE,
@@ -1275,10 +1277,10 @@ def main():
             )
 
         elif ridge_source == "forward":
-            fwd_amp, fwd_ones = make_forward_ridge_surrogate_frames(state_vis_frames)
+            ridge_frames_psi, ridge_frames_emix = make_forward_ridge_surrogate_frames(state_vis_frames)
             rx, ry, rs = compute_ridge_xy(
-                frames_psi=fwd_amp,
-                Emix=fwd_ones,
+                frames_psi=ridge_frames_psi,
+                Emix=ridge_frames_emix,
                 x_vis_1d=grid.x_vis_1d,
                 y_vis_1d=grid.y_vis_1d,
                 mode=cfg.RIDGE_MODE,
@@ -1289,6 +1291,15 @@ def main():
 
         else:
             raise ValueError(f"Unsupported ridge_source={ridge_source!r}")
+
+        ridge_top_x, ridge_top_y, ridge_top_s = compute_ridge_top_xy(
+            frames_psi=ridge_frames_psi,
+            Emix=ridge_frames_emix,
+            x_vis_1d=grid.x_vis_1d,
+            y_vis_1d=grid.y_vis_1d,
+            n_tops=2,
+            top_q=cfg.CENTROID_TOP_Q,
+        )
 
         cos_th = speed = ux = uy = div_v = None
 
@@ -1314,7 +1325,7 @@ def main():
         except Exception as e:
             print(f"[ALIGN] skipped in visualize: {e}")
 
-        return rho, Emix, rx, ry, rs, cos_th, speed, ux, uy, div_v
+        return rho, Emix, rx, ry, rs, ridge_top_x, ridge_top_y, ridge_top_s, cos_th, speed, ux, uy, div_v
 
     v_est = estimate_group_velocity(cfg, theory)
     L_gap = cfg.screen_center_x - cfg.barrier_center_x
@@ -1329,6 +1340,9 @@ def main():
         ridge_x_init,
         ridge_y_init,
         ridge_s_init,
+        ridge_top_x_init,
+        ridge_top_y_init,
+        ridge_top_s_init,
         cos_th_init,
         speed_init,
         ux_init,
@@ -1472,17 +1486,24 @@ def main():
                 rf"render={mode}"
             )
 
-        ridge_marker, = ax.plot(
-            [ridge_x_init[0]],
-            [ridge_y_init[0]],
-            marker="o",
-            markersize=7,
-            linestyle="None",
-            color="lime",
-            alpha=0.9,
-            label=f"ridge ({cfg.RIDGE_MODE})",
-            zorder=10,
-        )
+        ridge_markers = []
+        for k in range(ridge_top_x_init.shape[0]):
+            x0 = ridge_top_x_init[k, 0]
+            y0 = ridge_top_y_init[k, 0]
+            marker_x = [x0] if np.isfinite(x0) and np.isfinite(y0) else []
+            marker_y = [y0] if np.isfinite(x0) and np.isfinite(y0) else []
+            ridge_marker, = ax.plot(
+                marker_x,
+                marker_y,
+                marker="o",
+                markersize=7,
+                linestyle="None",
+                color="lime",
+                alpha=0.9,
+                label=f"ridge ({cfg.RIDGE_MODE})" if k == 0 else "_nolegend_",
+                zorder=10,
+            )
+            ridge_markers.append(ridge_marker)
 
         click_marker, = ax.plot(
             [],
@@ -1510,15 +1531,18 @@ def main():
             zorder=10,
         )
 
-        ridge_trail, = ax.plot(
-            [],
-            [],
-            linestyle="-",
-            linewidth=1.5,
-            color="lime",
-            alpha=0.5,
-            zorder=9,
-        )
+        ridge_trails = []
+        for _ in range(ridge_top_x_init.shape[0]):
+            ridge_trail, = ax.plot(
+                [],
+                [],
+                linestyle="-",
+                linewidth=1.5,
+                color="lime",
+                alpha=0.5,
+                zorder=9,
+            )
+            ridge_trails.append(ridge_trail)
 
         flow_quiver = None
         if cfg.DRAW_FLOW_ARROW and ((ux_init is not None) or coincidence_has_positions):
@@ -1596,10 +1620,10 @@ def main():
                 "static_geometry_artists": static_geometry_artists,
                 "posthoc_corridor_artists": posthoc_corridor_artists,
                 "contour_artists": contour_artists,
-                "ridge_marker": ridge_marker,
+                "ridge_markers": ridge_markers,
                 "click_marker": click_marker,
                 "click_marker_b": click_marker_b,
-                "ridge_trail": ridge_trail,
+                "ridge_trails": ridge_trails,
                 "flow_quiver": flow_quiver,
                 "flow_quiver_b": flow_quiver_b,
                 "bohm_lines": bohm_lines,
@@ -1632,6 +1656,9 @@ def main():
     ridge_x = [ridge_x_init]
     ridge_y = [ridge_y_init]
     ridge_s = [ridge_s_init]
+    ridge_top_x = [ridge_top_x_init]
+    ridge_top_y = [ridge_top_y_init]
+    ridge_top_s = [ridge_top_s_init]
     cos_th = [cos_th_init]
     speed = [speed_init]
     ux = [ux_init]
@@ -1934,16 +1961,22 @@ def main():
 
     def refresh_overlays(i: int):
         for panel in panel_states:
-            panel["ridge_marker"].set_data([ridge_x[0][i]], [ridge_y[0][i]])
+            for k, (marker, trail) in enumerate(zip(panel["ridge_markers"], panel["ridge_trails"])):
+                x_now = ridge_top_x[0][k, i]
+                y_now = ridge_top_y[0][k, i]
 
-            if cfg.SHOW_TRAIL:
-                j0 = max(0, i - cfg.TRAIL_LEN + 1)
-                panel["ridge_trail"].set_data(
-                    ridge_x[0][j0: i + 1],
-                    ridge_y[0][j0: i + 1],
-                )
-            else:
-                panel["ridge_trail"].set_data([], [])
+                if np.isfinite(x_now) and np.isfinite(y_now):
+                    marker.set_data([x_now], [y_now])
+                else:
+                    marker.set_data([], [])
+
+                if cfg.SHOW_TRAIL:
+                    xs = ridge_top_x[0][k, : i + 1]
+                    ys = ridge_top_y[0][k, : i + 1]
+                    finite = np.isfinite(xs) & np.isfinite(ys)
+                    trail.set_data(xs[finite], ys[finite])
+                else:
+                    trail.set_data([], [])
 
             update_click_marker(panel, i)
             update_flow_arrow(panel, i)
@@ -1959,6 +1992,9 @@ def main():
             rx,
             ry,
             rs,
+            rtx,
+            rty,
+            rts,
             cth,
             spd,
             uxx,
@@ -1987,6 +2023,9 @@ def main():
         ridge_x[0] = rx
         ridge_y[0] = ry
         ridge_s[0] = rs
+        ridge_top_x[0] = rtx
+        ridge_top_y[0] = rty
+        ridge_top_s[0] = rts
         cos_th[0] = cth
         speed[0] = spd
         ux[0] = uxx
@@ -2019,10 +2058,10 @@ def main():
         for panel in panel_states:
             artists.extend(panel["static_geometry_artists"])
             artists.extend(panel["posthoc_corridor_artists"])
-            artists.append(panel["ridge_marker"])
+            artists.extend(panel["ridge_markers"])
             artists.append(panel["click_marker"])
             artists.append(panel["click_marker_b"])
-            artists.append(panel["ridge_trail"])
+            artists.extend(panel["ridge_trails"])
 
             if panel["flow_quiver"] is not None:
                 artists.append(panel["flow_quiver"])
