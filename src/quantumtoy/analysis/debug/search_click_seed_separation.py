@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 import traceback
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -65,6 +65,24 @@ class JsonSeedStore:
         self.start_seed = int(start_seed)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
+    def prepare_for_restart(self):
+        """
+        Normalize an existing results file before starting workers.
+
+        Completed seeds are kept and therefore skipped by future reservations.
+        In-progress reservations are process-local, so after a restart they are
+        stale and should be released for recomputation.
+        """
+        with self.locked_data() as data:
+            if data.get("running"):
+                data["running"] = {}
+            data["max"] = self._max_result_from_computed(data)
+            data["next_seed"] = self._first_uncomputed_seed(
+                data,
+                start=int(data.get("next_seed", self.start_seed)),
+            )
+            data["updated_at"] = time.time()
+
     @contextlib.contextmanager
     def locked_data(self):
         with self.thread_lock:
@@ -86,7 +104,10 @@ class JsonSeedStore:
                         data["next_seed"] = self._infer_next_seed(data)
                         changed = True
                     if "max" not in data:
-                        data["max"] = None
+                        data["max"] = self._max_result_from_computed(data)
+                        changed = True
+                    if data.get("max") is None and data.get("computed"):
+                        data["max"] = self._max_result_from_computed(data)
                         changed = True
                     if changed:
                         self._write_unlocked(data)
@@ -186,6 +207,26 @@ class JsonSeedStore:
                 except Exception:
                     pass
         return max(seeds) + 1
+
+    def _first_uncomputed_seed(self, data: dict, start: int) -> int:
+        seed = max(int(start), self.start_seed)
+        computed = data.get("computed", {})
+        running = data.get("running", {})
+        while str(seed) in computed or str(seed) in running:
+            seed += 1
+        return seed
+
+    def _max_result_from_computed(self, data: dict) -> dict | None:
+        best = None
+        for result in data.get("computed", {}).values():
+            if not isinstance(result, dict):
+                continue
+            if best is None:
+                best = result
+                continue
+            if float(result.get("separation", -math.inf)) > float(best.get("separation", -math.inf)):
+                best = result
+        return best
 
 
 def apply_search_config(cfg: AppConfig, seed: int, args: argparse.Namespace):
@@ -320,7 +361,7 @@ def draw_dashboard(stdscr, store: JsonSeedStore, statuses: list[WorkerStatus], s
         max_result = snapshot.get("max")
 
         stdscr.erase()
-        stdscr.addstr(0, 0, "CLICK_RNG_SEED separation search  |  press q/e/Esc to end computation")
+        stdscr.addstr(0, 0, "CLICK_RNG_SEED separation search  |  press q/e/Esc to stop now")
         stdscr.addstr(1, 0, f"json: {store.path}")
         stdscr.addstr(
             2,
@@ -386,7 +427,7 @@ def print_dashboard(store: JsonSeedStore, statuses: list[WorkerStatus], stop_eve
             f"running={len(snapshot.get('running', {}))} {max_text} | {worker_bits}",
             flush=True,
         )
-        time.sleep(5.0)
+        stop_event.wait(5.0)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -398,6 +439,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--start-seed", type=int, default=0, help="first seed to reserve for a fresh JSON file")
     parser.add_argument("--stagger-seconds", type=float, default=60.0, help="delay between worker starts")
     parser.add_argument("--no-curses", action="store_true", help="use line logging instead of curses UI")
+    parser.add_argument(
+        "--graceful-stop",
+        action="store_true",
+        help="wait for active seed computations to finish before exiting",
+    )
     parser.add_argument("--break-on-detector-click", action="store_true", help="stop forward run once detector clicks")
     parser.add_argument("--n-steps", type=int, default=None, help="override cfg.n_steps")
     parser.add_argument("--dt", type=float, default=None, help="override cfg.dt")
@@ -413,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
 
     workers = max(1, int(args.workers))
     store = JsonSeedStore(Path(args.json).resolve(), start_seed=int(args.start_seed))
+    store.prepare_for_restart()
     stop_event = threading.Event()
     statuses = [WorkerStatus(worker_id=i) for i in range(workers)]
 
@@ -426,7 +473,7 @@ def main(argv: list[str] | None = None) -> int:
         threading.Thread(
             target=worker_loop,
             args=(i, store, args, stop_event, statuses),
-            daemon=False,
+            daemon=not bool(args.graceful_stop),
             name=f"click-seed-worker-{i}",
         )
         for i in range(workers)
@@ -442,8 +489,9 @@ def main(argv: list[str] | None = None) -> int:
             curses.wrapper(draw_dashboard, store, statuses, stop_event)
     finally:
         stop_event.set()
-        for t in threads:
-            t.join()
+        if args.graceful_stop:
+            for t in threads:
+                t.join()
 
     snapshot = store.snapshot()
     max_result = snapshot.get("max")
@@ -461,6 +509,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         print("Current maximum: none")
+
+    if not args.graceful_stop:
+        print(
+            "Forced stop: active seed computations were abandoned. "
+            "Any stale running entries will be cleared on restart."
+        )
 
     return 0
 
