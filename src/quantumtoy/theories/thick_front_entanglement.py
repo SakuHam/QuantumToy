@@ -218,6 +218,117 @@ def bob_plus_probability(probs: dict[str, float]) -> float:
     return float(probs["++"] + probs["-+"])
 
 
+def history_velocity_profile(
+    history_velocity_mode: str = "constant",
+    history_v_future_factor: float = 0.5,
+    history_v_present_factor: float = 1.0,
+    history_v_past_factor: float = 2.0,
+    n_frames: int = 101,
+    front_fraction: float = 0.5,
+    present_width_fraction: float = 0.12,
+) -> dict[str, object]:
+    """
+    Minimal variable history-locking velocity profile.
+
+    This is not physical FTL signalling.  It is a simulator-side distinction
+    between observable signal velocity and effective history-consistency
+    spread after a history has been selected.
+
+    Normalized time convention for this diagnostic:
+      - u < front: future / under-constrained side, weaker consistency spread
+      - near front: present / reality-front side, approximately normal spread
+      - u > front: locked-past side, optionally wider consistency spread
+    """
+    mode = str(history_velocity_mode).strip().lower()
+    valid_modes = {"constant", "past_superluminal", "symmetric"}
+    _assert(mode in valid_modes, f"history_velocity_mode must be one of {sorted(valid_modes)}, got {mode!r}")
+
+    _assert(isinstance(n_frames, int), f"n_frames must be int, got {type(n_frames)}")
+    _assert(n_frames >= 3, f"n_frames must be >= 3, got {n_frames}")
+
+    future = _assert_finite_scalar(history_v_future_factor, "history_v_future_factor")
+    present = _assert_finite_scalar(history_v_present_factor, "history_v_present_factor")
+    past = _assert_finite_scalar(history_v_past_factor, "history_v_past_factor")
+    front = _assert_finite_scalar(front_fraction, "front_fraction")
+    width = _assert_finite_scalar(present_width_fraction, "present_width_fraction")
+
+    _assert(future >= 0.0, f"history_v_future_factor must be >= 0, got {future}")
+    _assert(present >= 0.0, f"history_v_present_factor must be >= 0, got {present}")
+    _assert(past >= 0.0, f"history_v_past_factor must be >= 0, got {past}")
+    _assert(0.0 <= front <= 1.0, f"front_fraction must be in [0,1], got {front}")
+    _assert(width >= 0.0, f"present_width_fraction must be >= 0, got {width}")
+
+    u = np.linspace(0.0, 1.0, int(n_frames), dtype=float)
+    half_width = 0.5 * float(width)
+    present_mask = np.abs(u - front) <= half_width
+    future_mask = u < (front - half_width)
+    past_mask = u > (front + half_width)
+
+    if mode == "constant":
+        profile = np.full_like(u, present, dtype=float)
+        effective_future = present
+        effective_present = present
+        effective_past = present
+    elif mode == "symmetric":
+        side = 0.5 * (future + past)
+        profile = np.full_like(u, side, dtype=float)
+        profile[present_mask] = present
+        effective_future = side
+        effective_present = present
+        effective_past = side
+    else:
+        profile = np.full_like(u, present, dtype=float)
+        profile[future_mask] = future
+        profile[present_mask] = present
+        profile[past_mask] = past
+        effective_future = future
+        effective_present = present
+        effective_past = past
+
+    def masked_mean(mask: np.ndarray, fallback: float) -> float:
+        if np.any(mask):
+            return float(np.mean(profile[mask]))
+        return float(fallback)
+
+    future_mean = masked_mean(future_mask, effective_future)
+    present_mean = masked_mean(present_mask, effective_present)
+    past_mean = masked_mean(past_mask, effective_past)
+    average = float(np.mean(profile))
+
+    return {
+        "history_velocity_mode": mode,
+        "history_v_future_factor": float(future),
+        "history_v_present_factor": float(present),
+        "history_v_past_factor": float(past),
+        "n_frames": int(n_frames),
+        "front_fraction": float(front),
+        "present_width_fraction": float(width),
+        "average_trf_spread_radius": average,
+        "future_spread_mean": future_mean,
+        "present_spread_mean": present_mean,
+        "past_spread_mean": past_mean,
+        "past_future_bias_ratio": float(past_mean / max(future_mean, 1e-12)),
+        "past_present_bias_ratio": float(past_mean / max(present_mean, 1e-12)),
+        "future_present_bias_ratio": float(future_mean / max(present_mean, 1e-12)),
+        "profile": profile,
+    }
+
+
+def history_locking_amplification(history_diag: dict[str, object]) -> float:
+    """
+    Convert a history-velocity profile into a small scalar stress factor.
+
+    Safe modes still leave lambda_signal=0 untouched.  For lambda_signal>0,
+    this factor amplifies only the deliberately forbidden bias so the
+    diagnostic can test whether stronger locked-past consistency would make
+    Bob marginal drift easier to catch.
+    """
+    mode = str(history_diag.get("history_velocity_mode", "constant"))
+    if mode == "constant":
+        return 1.0
+    return float(history_diag.get("past_present_bias_ratio", 1.0))
+
+
 def apply_forbidden_signal_bias(
     probs: dict[str, float],
     alice_setting: float,
@@ -255,16 +366,31 @@ def trf_joint_probabilities(
     alice_setting: float,
     bob_setting: float,
     lambda_signal: float = 0.0,
+    history_velocity_mode: str = "constant",
+    history_v_future_factor: float = 0.5,
+    history_v_present_factor: float = 1.0,
+    history_v_past_factor: float = 2.0,
 ) -> dict[str, float]:
     """
     Joint probabilities for the minimal TRF no-signalling diagnostic.
     """
+    history_diag = history_velocity_profile(
+        history_velocity_mode=history_velocity_mode,
+        history_v_future_factor=history_v_future_factor,
+        history_v_present_factor=history_v_present_factor,
+        history_v_past_factor=history_v_past_factor,
+    )
+    effective_lambda = float(lambda_signal) * history_locking_amplification(history_diag)
     born = joint_spin_probabilities(spin_state, alice_setting, bob_setting)
-    return apply_forbidden_signal_bias(born, alice_setting, lambda_signal)
+    return apply_forbidden_signal_bias(born, alice_setting, effective_lambda)
 
 
 def run_trf_no_signalling_diagnostic(
     lambda_signal: float = 0.0,
+    history_velocity_mode: str = "constant",
+    history_v_future_factor: float = 0.5,
+    history_v_present_factor: float = 1.0,
+    history_v_past_factor: float = 2.0,
     alice_setting_a0: float = 0.0,
     alice_setting_a1: float = float(np.pi / 3.0),
     bob_setting: float = float(np.pi / 5.0),
@@ -275,15 +401,24 @@ def run_trf_no_signalling_diagnostic(
     Run two ensembles with Bob's setting fixed and Alice's setting changed.
 
     Returns sampled ensemble estimates plus exact probabilities.  The
-    lambda_signal=0 baseline should have only sampling-scale marginal drift;
-    lambda_signal>0 intentionally injects a forbidden Alice-setting-dependent
-    bias into Bob's local marginal.
+    history_velocity_mode changes only the simulator's effective history
+    consistency spread.  lambda_signal=0 stays no-signalling; lambda_signal>0
+    intentionally injects forbidden Alice-setting-dependent bias, optionally
+    amplified by stronger locked-past consistency spread.
     """
     _assert(isinstance(n_trials, int), f"n_trials must be int, got {type(n_trials)}")
     _assert(n_trials > 0, f"n_trials must be > 0, got {n_trials}")
 
     rng = np.random.default_rng(int(rng_seed))
     spin = singlet_spin_state()
+    history_diag = history_velocity_profile(
+        history_velocity_mode=history_velocity_mode,
+        history_v_future_factor=history_v_future_factor,
+        history_v_present_factor=history_v_present_factor,
+        history_v_past_factor=history_v_past_factor,
+    )
+    amplification = history_locking_amplification(history_diag)
+    effective_lambda = float(lambda_signal) * amplification
 
     def ensemble(theta_a: float) -> dict[str, object]:
         probs = trf_joint_probabilities(
@@ -291,6 +426,10 @@ def run_trf_no_signalling_diagnostic(
             alice_setting=float(theta_a),
             bob_setting=float(bob_setting),
             lambda_signal=float(lambda_signal),
+            history_velocity_mode=str(history_velocity_mode),
+            history_v_future_factor=float(history_v_future_factor),
+            history_v_present_factor=float(history_v_present_factor),
+            history_v_past_factor=float(history_v_past_factor),
         )
         pvec = np.asarray([probs[ch] for ch in CHANNELS], dtype=float)
         counts = rng.multinomial(int(n_trials), pvec)
@@ -300,6 +439,8 @@ def run_trf_no_signalling_diagnostic(
             "sampled_joint_probabilities": sampled,
             "P_B_plus_exact": bob_plus_probability(probs),
             "P_B_plus_sampled": bob_plus_probability(sampled),
+            "E_exact": channel_E_from_probs(probs),
+            "E_sampled": channel_E_from_probs(sampled),
             "counts": {ch: int(counts[i]) for i, ch in enumerate(CHANNELS)},
         }
 
@@ -313,6 +454,12 @@ def run_trf_no_signalling_diagnostic(
 
     return {
         "lambda_signal": float(lambda_signal),
+        "effective_lambda_signal": float(effective_lambda),
+        "history_locking_amplification": float(amplification),
+        "apparent_nonlocal_consistency_gain": float(amplification),
+        "history_locking": {
+            k: v for k, v in history_diag.items() if k != "profile"
+        },
         "alice_setting_a0": float(alice_setting_a0),
         "alice_setting_a1": float(alice_setting_a1),
         "bob_setting": float(bob_setting),
@@ -326,7 +473,51 @@ def run_trf_no_signalling_diagnostic(
         "P_B_plus_given_a0_exact": p0_exact,
         "P_B_plus_given_a1_exact": p1_exact,
         "Delta_signal_exact": float(abs(p0_exact - p1_exact)),
+        "E_a0_exact": float(e0["E_exact"]),
+        "E_a1_exact": float(e1["E_exact"]),
+        "Delta_correlation_exact": float(abs(float(e0["E_exact"]) - float(e1["E_exact"]))),
     }
+
+
+def run_trf_history_velocity_matrix(
+    lambda_signal_safe: float = 0.0,
+    lambda_signal_forbidden: float = 0.4,
+    history_v_future_factor: float = 0.5,
+    history_v_present_factor: float = 1.0,
+    history_v_past_factor: float = 2.0,
+    alice_setting_a0: float = 0.0,
+    alice_setting_a1: float = float(np.pi / 3.0),
+    bob_setting: float = float(np.pi / 5.0),
+    n_trials: int = 20000,
+    rng_seed: int = 12345,
+) -> dict[str, object]:
+    """
+    Compare constant and past-superluminal history-locking in safe and
+    deliberately forbidden signalling modes.
+    """
+    cases = [
+        ("A_constant_safe", "constant", float(lambda_signal_safe)),
+        ("B_past_superluminal_safe", "past_superluminal", float(lambda_signal_safe)),
+        ("C_constant_forbidden", "constant", float(lambda_signal_forbidden)),
+        ("D_past_superluminal_forbidden", "past_superluminal", float(lambda_signal_forbidden)),
+    ]
+
+    results = {}
+    for offset, (name, mode, lam) in enumerate(cases):
+        results[name] = run_trf_no_signalling_diagnostic(
+            lambda_signal=lam,
+            history_velocity_mode=mode,
+            history_v_future_factor=float(history_v_future_factor),
+            history_v_present_factor=float(history_v_present_factor),
+            history_v_past_factor=float(history_v_past_factor),
+            alice_setting_a0=float(alice_setting_a0),
+            alice_setting_a1=float(alice_setting_a1),
+            bob_setting=float(bob_setting),
+            n_trials=int(n_trials),
+            rng_seed=int(rng_seed) + offset,
+        )
+
+    return {"cases": results}
 
 
 # ============================================================
@@ -2184,11 +2375,22 @@ class SignallingTRFEntanglementTheory(ThickFrontEntanglementTheory):
     """
 
     lambda_signal: float = 0.0
+    history_velocity_mode: str = "constant"
+    history_v_future_factor: float = 0.5
+    history_v_present_factor: float = 1.0
+    history_v_past_factor: float = 2.0
 
     def __post_init__(self):
         super().__post_init__()
         self.lambda_signal = _assert_finite_scalar(self.lambda_signal, "lambda_signal")
         _assert(self.lambda_signal >= 0.0, f"lambda_signal must be >= 0, got {self.lambda_signal}")
+        self.history_velocity_mode = str(self.history_velocity_mode).strip().lower()
+        history_velocity_profile(
+            history_velocity_mode=self.history_velocity_mode,
+            history_v_future_factor=float(self.history_v_future_factor),
+            history_v_present_factor=float(self.history_v_present_factor),
+            history_v_past_factor=float(self.history_v_past_factor),
+        )
 
     def joint_probabilities_for_settings(
         self,
@@ -2218,10 +2420,18 @@ class SignallingTRFEntanglementTheory(ThickFrontEntanglementTheory):
             _assert(total > 0.0, "joint probability total must be > 0")
             probs = {ch: float(probs[ch] / total) for ch in CHANNELS}
 
+        history_diag = history_velocity_profile(
+            history_velocity_mode=self.history_velocity_mode,
+            history_v_future_factor=float(self.history_v_future_factor),
+            history_v_present_factor=float(self.history_v_present_factor),
+            history_v_past_factor=float(self.history_v_past_factor),
+        )
+        effective_lambda = float(self.lambda_signal) * history_locking_amplification(history_diag)
+
         return apply_forbidden_signal_bias(
             probs=probs,
             alice_setting=float(alice_setting),
-            lambda_signal=float(self.lambda_signal),
+            lambda_signal=effective_lambda,
         )
 
     def bob_plus_probability_for_settings(
@@ -2254,6 +2464,18 @@ class SignallingTRFEntanglementTheory(ThickFrontEntanglementTheory):
 
         return {
             "lambda_signal": float(self.lambda_signal),
+            "effective_lambda_signal": float(
+                self.lambda_signal
+                * history_locking_amplification(
+                    history_velocity_profile(
+                        history_velocity_mode=self.history_velocity_mode,
+                        history_v_future_factor=float(self.history_v_future_factor),
+                        history_v_present_factor=float(self.history_v_present_factor),
+                        history_v_past_factor=float(self.history_v_past_factor),
+                    )
+                )
+            ),
+            "history_velocity_mode": str(self.history_velocity_mode),
             "alice_setting_a0": float(alice_setting_a0),
             "alice_setting_a1": float(alice_setting_a1),
             "bob_setting": float(bob_setting),
@@ -2266,3 +2488,6 @@ class SignallingTRFEntanglementTheory(ThickFrontEntanglementTheory):
 
 
 ForbiddenSignalTRFTheory = SignallingTRFEntanglementTheory
+VariableHistoryVelocityTRFTheory = SignallingTRFEntanglementTheory
+CausalLockingTRFTheory = SignallingTRFEntanglementTheory
+HistoryConsistencyVelocityTRF = SignallingTRFEntanglementTheory

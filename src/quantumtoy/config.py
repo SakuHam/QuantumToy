@@ -66,6 +66,15 @@ class AppConfig:
     # forbidden Alice-setting-dependent TRF bias.
     LAMBDA_SIGNAL: float = 0.0
 
+    # Experimental history-consistency velocity profile for forbidden_signal_trf.
+    # This is not physical FTL signalling.  It changes only the simulator's
+    # effective history-locking spread: future under-constrained, present/front
+    # normal, locked past optionally wider/global.
+    HISTORY_VELOCITY_MODE: str = "constant"
+    HISTORY_V_FUTURE_FACTOR: float = 0.5
+    HISTORY_V_PRESENT_FACTOR: float = 1.0
+    HISTORY_V_PAST_FACTOR: float = 2.0
+
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
 

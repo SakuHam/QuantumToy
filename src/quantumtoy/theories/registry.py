@@ -225,7 +225,13 @@ def build_theory(cfg, grid, potential):
             hbar=hbar,
         )
 
-    elif theory_name in {"signalling_trf_entanglement", "forbidden_signal_trf"}:
+    elif theory_name in {
+        "signalling_trf_entanglement",
+        "forbidden_signal_trf",
+        "variable_history_velocity_trf",
+        "causal_locking_trf",
+        "history_consistency_velocity_trf",
+    }:
         lambda_signal = _assert_finite_scalar(
             getattr(cfg, "LAMBDA_SIGNAL", 0.0),
             "cfg.LAMBDA_SIGNAL",
@@ -238,6 +244,10 @@ def build_theory(cfg, grid, potential):
             m_mass=m_mass,
             hbar=hbar,
             lambda_signal=lambda_signal,
+            history_velocity_mode=getattr(cfg, "HISTORY_VELOCITY_MODE", "constant"),
+            history_v_future_factor=getattr(cfg, "HISTORY_V_FUTURE_FACTOR", 0.5),
+            history_v_present_factor=getattr(cfg, "HISTORY_V_PRESENT_FACTOR", 1.0),
+            history_v_past_factor=getattr(cfg, "HISTORY_V_PAST_FACTOR", 2.0),
         )
 
     elif theory_name == "thick_front_optimized":
