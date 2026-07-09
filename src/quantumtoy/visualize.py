@@ -43,6 +43,14 @@ RENDER_MODES = (
     "forward_density",
     "visible_intensity",
     "latent_intensity",
+    "channel_pp",
+    "channel_pm",
+    "channel_mp",
+    "channel_mm",
+    "channel_rgb",
+    "mode_a_rgb",
+    "mode_b_rgb",
+    "entanglement_det",
     "backward_density",
     "overlap_density",
     "posthoc_base_rho",
@@ -522,6 +530,102 @@ def visible_intensity_frames_from_state_vis(state_vis_frames: np.ndarray) -> np.
     raise ValueError(f"Unsupported state_vis_frames shape={state_vis_frames.shape}")
 
 
+def entangled_channel_density_frame(state_vis: np.ndarray, channel: str) -> np.ndarray:
+    if state_vis.ndim != 4 or state_vis.shape[-2:] != (2, 2):
+        raise RuntimeError(
+            f"channel render modes require entangled state frame with shape (Ny, Nx, 2, 2), "
+            f"got {state_vis.shape}"
+        )
+
+    channel_map = {
+        "pp": (0, 0),
+        "pm": (0, 1),
+        "mp": (1, 0),
+        "mm": (1, 1),
+    }
+    if channel not in channel_map:
+        raise ValueError(f"Unsupported channel={channel!r}")
+
+    a, b = channel_map[channel]
+    return (np.abs(state_vis[:, :, a, b]) ** 2).astype(float)
+
+
+def make_entangled_channel_rgb(state_vis: np.ndarray, gamma: float = 0.45) -> tuple[np.ndarray, np.ndarray]:
+    if state_vis.ndim != 4 or state_vis.shape[-2:] != (2, 2):
+        raise RuntimeError(
+            f"channel_rgb requires entangled state frame with shape (Ny, Nx, 2, 2), got {state_vis.shape}"
+        )
+
+    pp = np.abs(state_vis[:, :, 0, 0]) ** 2
+    pm = np.abs(state_vis[:, :, 0, 1]) ** 2
+    mp = np.abs(state_vis[:, :, 1, 0]) ** 2
+    mm = np.abs(state_vis[:, :, 1, 1]) ** 2
+    total = pp + pm + mp + mm
+
+    scale = np.max(total) + 1e-30
+    value = np.clip(total / scale, 0.0, 1.0) ** float(gamma)
+
+    r = pp + 0.55 * mm
+    g = pm + 0.55 * mm
+    b = mp
+    color_sum = r + g + b + 1e-30
+
+    rgb = np.stack([r / color_sum, g / color_sum, b / color_sum], axis=-1)
+    rgb *= value[:, :, None]
+
+    return np.clip(rgb, 0.0, 1.0), total / scale
+
+
+def make_entangled_marginal_rgb(
+    state_vis: np.ndarray,
+    side: str,
+    gamma: float = 0.45,
+) -> tuple[np.ndarray, np.ndarray]:
+    if state_vis.ndim != 4 or state_vis.shape[-2:] != (2, 2):
+        raise RuntimeError(
+            f"mode_{side}_rgb requires entangled state frame with shape (Ny, Nx, 2, 2), got {state_vis.shape}"
+        )
+
+    dens = np.abs(state_vis) ** 2
+
+    if side == "a":
+        plus = dens[:, :, 0, 0] + dens[:, :, 0, 1]
+        minus = dens[:, :, 1, 0] + dens[:, :, 1, 1]
+    elif side == "b":
+        plus = dens[:, :, 0, 0] + dens[:, :, 1, 0]
+        minus = dens[:, :, 0, 1] + dens[:, :, 1, 1]
+    else:
+        raise ValueError(f"Unsupported marginal side={side!r}")
+
+    total = plus + minus
+    scale = np.max(total) + 1e-30
+    value = np.clip(total / scale, 0.0, 1.0) ** float(gamma)
+    color_sum = plus + minus + 1e-30
+
+    # plus -> cyan/green, minus -> magenta/orange, overlap -> pale/white.
+    r = minus
+    g = plus + 0.35 * minus
+    b = plus
+    rgb = np.stack([r / color_sum, g / color_sum, b / color_sum], axis=-1)
+    rgb *= value[:, :, None]
+
+    return np.clip(rgb, 0.0, 1.0), total / scale
+
+
+def entanglement_det_frame_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
+    if state_vis.ndim != 4 or state_vis.shape[-2:] != (2, 2):
+        raise RuntimeError(
+            f"entanglement_det requires entangled state frame with shape (Ny, Nx, 2, 2), "
+            f"got {state_vis.shape}"
+        )
+
+    det = (
+        state_vis[:, :, 0, 0] * state_vis[:, :, 1, 1]
+        - state_vis[:, :, 0, 1] * state_vis[:, :, 1, 0]
+    )
+    return np.abs(det).astype(float)
+
+
 def effective_scalar_from_state_vis(state_vis: np.ndarray) -> np.ndarray:
     """
     Convert one visible state frame into an effective scalar complex field
@@ -798,6 +902,56 @@ def build_render_image(
         img = gamma_display(
             latent_intensity_current[i],
             vref=_default_frame_vref(latent_intensity_current),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode in ("channel_pp", "channel_pm", "channel_mp", "channel_mm"):
+        if state_vis_frames is None:
+            raise RuntimeError(f"{mode} render mode requires state_vis_frames")
+
+        channel = mode.removeprefix("channel_")
+        channel_frame = entangled_channel_density_frame(state_vis_frames[i], channel)
+        channel_vref = float(np.max(entangled_channel_density_frame(state_vis_frames[0], channel)))
+        img = gamma_display(
+            channel_frame,
+            vref=max(channel_vref, 1e-30),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode == "channel_rgb":
+        if state_vis_frames is None:
+            raise RuntimeError("channel_rgb render mode requires state_vis_frames")
+
+        rgb, rho_norm = make_entangled_channel_rgb(state_vis_frames[i])
+        return rgb, rho_norm, "rgb"
+
+    if mode == "mode_a_rgb":
+        if state_vis_frames is None:
+            raise RuntimeError("mode_a_rgb render mode requires state_vis_frames")
+
+        rgb, rho_norm = make_entangled_marginal_rgb(state_vis_frames[i], side="a")
+        return rgb, rho_norm, "rgb"
+
+    if mode == "mode_b_rgb":
+        if state_vis_frames is None:
+            raise RuntimeError("mode_b_rgb render mode requires state_vis_frames")
+
+        rgb, rho_norm = make_entangled_marginal_rgb(state_vis_frames[i], side="b")
+        return rgb, rho_norm, "rgb"
+
+    if mode == "entanglement_det":
+        if state_vis_frames is None:
+            raise RuntimeError("entanglement_det render mode requires state_vis_frames")
+
+        ent_frame = entanglement_det_frame_from_state_vis(state_vis_frames[i])
+        ent_vref = float(np.max(entanglement_det_frame_from_state_vis(state_vis_frames[0])))
+        img = gamma_display(
+            ent_frame,
+            vref=max(ent_vref, 1e-30),
             gamma=cfg.GAMMA,
             use_fixed_scale=False,
         )

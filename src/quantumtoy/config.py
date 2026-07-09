@@ -60,6 +60,12 @@ class AppConfig:
     # ============================================================
     THEORY_NAME: str = "thick_front_entanglement"
 
+    # Experimental no-signalling stress-test knob for
+    # THEORY_NAME="signalling_trf_entanglement" or "forbidden_signal_trf".
+    # 0.0 keeps Bob's marginal no-signalling-safe; >0.0 deliberately injects
+    # forbidden Alice-setting-dependent TRF bias.
+    LAMBDA_SIGNAL: float = 0.0
+
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
 

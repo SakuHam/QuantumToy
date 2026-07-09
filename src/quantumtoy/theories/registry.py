@@ -13,7 +13,7 @@ from theories.thick_front_measurement_guided import ThickFrontMeasurementGuidedT
 from theories.metric_aware_schrodinger import MetricAwareSchrodingerTheory
 from theories.tensor_metric_aware_schrodinger import TensorMetricAwareSchrodingerTheory
 from theories.rotating_tensor_metric_aware_schrodinger import RotatingTensorMetricAwareSchrodingerTheory
-from theories.thick_front_entanglement import ThickFrontEntanglementTheory
+from theories.thick_front_entanglement import SignallingTRFEntanglementTheory, ThickFrontEntanglementTheory
 
 # ============================================================
 # Validation helpers
@@ -223,6 +223,21 @@ def build_theory(cfg, grid, potential):
             potential=potential,
             m_mass=m_mass,
             hbar=hbar,
+        )
+
+    elif theory_name in {"signalling_trf_entanglement", "forbidden_signal_trf"}:
+        lambda_signal = _assert_finite_scalar(
+            getattr(cfg, "LAMBDA_SIGNAL", 0.0),
+            "cfg.LAMBDA_SIGNAL",
+        )
+        _assert(lambda_signal >= 0.0, f"cfg.LAMBDA_SIGNAL must be >= 0, got {lambda_signal}")
+
+        theory = SignallingTRFEntanglementTheory(
+            grid=grid,
+            potential=potential,
+            m_mass=m_mass,
+            hbar=hbar,
+            lambda_signal=lambda_signal,
         )
 
     elif theory_name == "thick_front_optimized":

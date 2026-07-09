@@ -165,6 +165,170 @@ def channel_E_from_probs(probs: dict[str, float]) -> float:
     return float(probs["++"] + probs["--"] - probs["+-"] - probs["-+"])
 
 
+def singlet_spin_state() -> np.ndarray:
+    """
+    Return the spin-only singlet amplitudes in channel order [Alice, Bob].
+    """
+    spin = np.zeros((2, 2), dtype=np.complex128)
+    inv_sqrt2 = 1.0 / np.sqrt(2.0)
+    spin[0, 1] = inv_sqrt2
+    spin[1, 0] = -inv_sqrt2
+    return spin
+
+
+def joint_spin_probabilities(
+    spin_state: np.ndarray,
+    theta_a: float,
+    theta_b: float,
+) -> dict[str, float]:
+    """
+    Born joint spin probabilities for a spin-only two-qubit state.
+
+    For a normalized singlet, Bob's local marginal is independent of
+    theta_a even though the joint Alice-Bob correlations change.
+    """
+    spin_state = np.asarray(spin_state, dtype=np.complex128)
+    _assert(spin_state.shape == (2, 2), f"spin_state must have shape (2,2), got {spin_state.shape}")
+    _assert(np.all(np.isfinite(spin_state.real)), "spin_state.real contains non-finite values")
+    _assert(np.all(np.isfinite(spin_state.imag)), "spin_state.imag contains non-finite values")
+
+    norm = float(np.sum(np.abs(spin_state) ** 2))
+    _assert(norm > 0.0, "spin_state norm must be > 0")
+    spin_state = spin_state / np.sqrt(norm)
+
+    Ua = _spin_basis_from_angle(theta_a)
+    Ub = _spin_basis_from_angle(theta_b)
+    spin_m = np.einsum("ia,ab,jb->ij", Ua.conj().T, spin_state, Ub.conj().T)
+
+    probs = {
+        "++": float(np.abs(spin_m[0, 0]) ** 2),
+        "+-": float(np.abs(spin_m[0, 1]) ** 2),
+        "-+": float(np.abs(spin_m[1, 0]) ** 2),
+        "--": float(np.abs(spin_m[1, 1]) ** 2),
+    }
+    total = float(sum(probs.values()))
+    _assert(total > 0.0, "joint probability total must be > 0")
+    return {ch: float(probs[ch] / total) for ch in CHANNELS}
+
+
+def bob_plus_probability(probs: dict[str, float]) -> float:
+    """
+    P(B=+) from joint probabilities in channel order ++,+-,-+,--.
+    """
+    return float(probs["++"] + probs["-+"])
+
+
+def apply_forbidden_signal_bias(
+    probs: dict[str, float],
+    alice_setting: float,
+    lambda_signal: float,
+) -> dict[str, float]:
+    """
+    Deliberately unphysical TRF stress-test weighting.
+
+    lambda_signal=0 preserves the Born probabilities.  lambda_signal>0 applies
+    an Alice-setting-dependent non-unitary weight to Bob's local outcomes, so
+    Bob's marginal can drift.  This is intentionally forbidden physics for
+    diagnostics, not a physical model.
+    """
+    lam = _assert_finite_scalar(lambda_signal, "lambda_signal")
+    _assert(lam >= 0.0, f"lambda_signal must be >= 0, got {lambda_signal}")
+
+    if lam == 0.0:
+        return {ch: float(probs[ch]) for ch in CHANNELS}
+
+    setting_bias = float(lam * np.sin(float(alice_setting)))
+    weights = {
+        "++": np.exp(setting_bias),
+        "-+": np.exp(setting_bias),
+        "+-": np.exp(-setting_bias),
+        "--": np.exp(-setting_bias),
+    }
+    biased = {ch: float(probs[ch] * weights[ch]) for ch in CHANNELS}
+    total = float(sum(biased.values()))
+    _assert(total > 0.0, "biased probability total must be > 0")
+    return {ch: float(biased[ch] / total) for ch in CHANNELS}
+
+
+def trf_joint_probabilities(
+    spin_state: np.ndarray,
+    alice_setting: float,
+    bob_setting: float,
+    lambda_signal: float = 0.0,
+) -> dict[str, float]:
+    """
+    Joint probabilities for the minimal TRF no-signalling diagnostic.
+    """
+    born = joint_spin_probabilities(spin_state, alice_setting, bob_setting)
+    return apply_forbidden_signal_bias(born, alice_setting, lambda_signal)
+
+
+def run_trf_no_signalling_diagnostic(
+    lambda_signal: float = 0.0,
+    alice_setting_a0: float = 0.0,
+    alice_setting_a1: float = float(np.pi / 3.0),
+    bob_setting: float = float(np.pi / 5.0),
+    n_trials: int = 20000,
+    rng_seed: int = 12345,
+) -> dict[str, object]:
+    """
+    Run two ensembles with Bob's setting fixed and Alice's setting changed.
+
+    Returns sampled ensemble estimates plus exact probabilities.  The
+    lambda_signal=0 baseline should have only sampling-scale marginal drift;
+    lambda_signal>0 intentionally injects a forbidden Alice-setting-dependent
+    bias into Bob's local marginal.
+    """
+    _assert(isinstance(n_trials, int), f"n_trials must be int, got {type(n_trials)}")
+    _assert(n_trials > 0, f"n_trials must be > 0, got {n_trials}")
+
+    rng = np.random.default_rng(int(rng_seed))
+    spin = singlet_spin_state()
+
+    def ensemble(theta_a: float) -> dict[str, object]:
+        probs = trf_joint_probabilities(
+            spin_state=spin,
+            alice_setting=float(theta_a),
+            bob_setting=float(bob_setting),
+            lambda_signal=float(lambda_signal),
+        )
+        pvec = np.asarray([probs[ch] for ch in CHANNELS], dtype=float)
+        counts = rng.multinomial(int(n_trials), pvec)
+        sampled = {ch: float(counts[i] / n_trials) for i, ch in enumerate(CHANNELS)}
+        return {
+            "joint_probabilities": probs,
+            "sampled_joint_probabilities": sampled,
+            "P_B_plus_exact": bob_plus_probability(probs),
+            "P_B_plus_sampled": bob_plus_probability(sampled),
+            "counts": {ch: int(counts[i]) for i, ch in enumerate(CHANNELS)},
+        }
+
+    e0 = ensemble(float(alice_setting_a0))
+    e1 = ensemble(float(alice_setting_a1))
+
+    p0 = float(e0["P_B_plus_sampled"])
+    p1 = float(e1["P_B_plus_sampled"])
+    p0_exact = float(e0["P_B_plus_exact"])
+    p1_exact = float(e1["P_B_plus_exact"])
+
+    return {
+        "lambda_signal": float(lambda_signal),
+        "alice_setting_a0": float(alice_setting_a0),
+        "alice_setting_a1": float(alice_setting_a1),
+        "bob_setting": float(bob_setting),
+        "n_trials": int(n_trials),
+        "rng_seed": int(rng_seed),
+        "a0_ensemble": e0,
+        "a1_ensemble": e1,
+        "P_B_plus_given_a0": p0,
+        "P_B_plus_given_a1": p1,
+        "Delta_signal": float(abs(p0 - p1)),
+        "P_B_plus_given_a0_exact": p0_exact,
+        "P_B_plus_given_a1_exact": p1_exact,
+        "Delta_signal_exact": float(abs(p0_exact - p1_exact)),
+    }
+
+
 # ============================================================
 # Main theory
 # ============================================================
@@ -2003,3 +2167,102 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
     @staticmethod
     def spin_basis_from_angle(theta: float) -> np.ndarray:
         return _spin_basis_from_angle(theta)
+
+
+@dataclass
+class SignallingTRFEntanglementTheory(ThickFrontEntanglementTheory):
+    """
+    Minimal experimental TRF entanglement stress-test theory.
+
+    lambda_signal=0.0 is the no-signalling-safe baseline: joint correlations
+    depend on Alice's setting, but Bob's local Born marginal does not.
+
+    lambda_signal>0.0 deliberately applies an Alice-setting-dependent
+    non-unitary TRF weight to Bob's outcome channels.  This is intentional
+    forbidden physics for diagnostics only, useful for checking that a
+    no-signalling test can catch local marginal drift.
+    """
+
+    lambda_signal: float = 0.0
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.lambda_signal = _assert_finite_scalar(self.lambda_signal, "lambda_signal")
+        _assert(self.lambda_signal >= 0.0, f"lambda_signal must be >= 0, got {self.lambda_signal}")
+
+    def joint_probabilities_for_settings(
+        self,
+        state: np.ndarray,
+        alice_setting: float,
+        bob_setting: float,
+    ) -> dict[str, float]:
+        """
+        Measurement-basis joint probabilities with optional forbidden TRF bias.
+        """
+        Ua = _spin_basis_from_angle(float(alice_setting))
+        Ub = _spin_basis_from_angle(float(bob_setting))
+
+        if state.shape == (2, 2):
+            probs = joint_spin_probabilities(state, alice_setting, bob_setting)
+        else:
+            _assert_complex_spinor_4d(state, "state(joint_probabilities_for_settings)")
+            psi_m = rotate_state_to_measurement_basis(state, Ua, Ub)
+            dxdy = float(self.grid.dx * self.grid.dy)
+            probs = {
+                "++": float(np.sum(np.abs(psi_m[:, :, 0, 0]) ** 2) * dxdy),
+                "+-": float(np.sum(np.abs(psi_m[:, :, 0, 1]) ** 2) * dxdy),
+                "-+": float(np.sum(np.abs(psi_m[:, :, 1, 0]) ** 2) * dxdy),
+                "--": float(np.sum(np.abs(psi_m[:, :, 1, 1]) ** 2) * dxdy),
+            }
+            total = float(sum(probs.values()))
+            _assert(total > 0.0, "joint probability total must be > 0")
+            probs = {ch: float(probs[ch] / total) for ch in CHANNELS}
+
+        return apply_forbidden_signal_bias(
+            probs=probs,
+            alice_setting=float(alice_setting),
+            lambda_signal=float(self.lambda_signal),
+        )
+
+    def bob_plus_probability_for_settings(
+        self,
+        state: np.ndarray,
+        alice_setting: float,
+        bob_setting: float,
+    ) -> float:
+        probs = self.joint_probabilities_for_settings(
+            state=state,
+            alice_setting=alice_setting,
+            bob_setting=bob_setting,
+        )
+        return bob_plus_probability(probs)
+
+    def no_signalling_diagnostic(
+        self,
+        state: np.ndarray,
+        alice_setting_a0: float = 0.0,
+        alice_setting_a1: float = float(np.pi / 3.0),
+        bob_setting: float = float(np.pi / 5.0),
+    ) -> dict[str, object]:
+        """
+        Compare P(B=+ | Alice setting a0) and P(B=+ | Alice setting a1).
+        """
+        probs_a0 = self.joint_probabilities_for_settings(state, alice_setting_a0, bob_setting)
+        probs_a1 = self.joint_probabilities_for_settings(state, alice_setting_a1, bob_setting)
+        p0 = bob_plus_probability(probs_a0)
+        p1 = bob_plus_probability(probs_a1)
+
+        return {
+            "lambda_signal": float(self.lambda_signal),
+            "alice_setting_a0": float(alice_setting_a0),
+            "alice_setting_a1": float(alice_setting_a1),
+            "bob_setting": float(bob_setting),
+            "joint_probabilities_a0": probs_a0,
+            "joint_probabilities_a1": probs_a1,
+            "P_B_plus_given_a0": float(p0),
+            "P_B_plus_given_a1": float(p1),
+            "Delta_signal": float(abs(p0 - p1)),
+        }
+
+
+ForbiddenSignalTRFTheory = SignallingTRFEntanglementTheory
