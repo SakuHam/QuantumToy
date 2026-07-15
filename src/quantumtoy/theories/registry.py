@@ -248,6 +248,15 @@ def build_theory(cfg, grid, potential):
             history_v_future_factor=getattr(cfg, "HISTORY_V_FUTURE_FACTOR", 0.5),
             history_v_present_factor=getattr(cfg, "HISTORY_V_PRESENT_FACTOR", 1.0),
             history_v_past_factor=getattr(cfg, "HISTORY_V_PAST_FACTOR", 2.0),
+            distance_m=getattr(cfg, "ENTANGLEMENT_DISTANCE_M", 0.0),
+            history_lock_length_m=getattr(cfg, "HISTORY_LOCK_LENGTH_M", np.inf),
+            history_lock_tau_s=getattr(cfg, "HISTORY_LOCK_TAU_S", None),
+            history_lock_decay_mode=getattr(cfg, "HISTORY_LOCK_DECAY_MODE", "none"),
+            history_lock_decay_power=getattr(cfg, "HISTORY_LOCK_DECAY_POWER", 2.0),
+            lock_length_mode=getattr(cfg, "LOCK_LENGTH_MODE", "constant"),
+            relative_velocity_fraction_c=getattr(cfg, "RELATIVE_VELOCITY_FRACTION_C", 0.0),
+            lock_anisotropy_eta=getattr(cfg, "LOCK_ANISOTROPY_ETA", 1.0),
+            lock_direction_cos_theta=getattr(cfg, "LOCK_DIRECTION_COS_THETA", 1.0),
         )
 
     elif theory_name == "thick_front_optimized":

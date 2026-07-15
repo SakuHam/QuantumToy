@@ -75,6 +75,20 @@ class AppConfig:
     HISTORY_V_PRESENT_FACTOR: float = 1.0
     HISTORY_V_PAST_FACTOR: float = 2.0
 
+    # Finite joint-history coherence range for TRF entanglement diagnostics.
+    # SI units.  HISTORY_LOCK_TAU_S, when set, overrides length via L=c*tau.
+    HISTORY_LOCK_LENGTH_M: float = float("inf")
+    HISTORY_LOCK_TAU_S: float | None = None
+    HISTORY_LOCK_DECAY_MODE: str = "none"  # "none", "exp", "soft_power"
+    HISTORY_LOCK_DECAY_POWER: float = 2.0
+    ENTANGLEMENT_DISTANCE_M: float = 0.0
+
+    # Optional speculative relative-motion dependence for effective L_lock.
+    LOCK_LENGTH_MODE: str = "constant"
+    RELATIVE_VELOCITY_FRACTION_C: float = 0.0
+    LOCK_ANISOTROPY_ETA: float = 1.0
+    LOCK_DIRECTION_COS_THETA: float = 1.0
+
     RHO_MODE: str = "amplitude_overlap"
     RHO_BLEND_ALPHA: float = 0.5
 

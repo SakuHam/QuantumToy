@@ -11,6 +11,8 @@ from theories.schrodinger import SchrodingerTheory
 
 
 CHANNELS = ["++", "+-", "-+", "--"]
+C_M_PER_S = 299_792_458.0
+MM_TO_M = 1_000_000.0
 
 
 # ============================================================
@@ -329,6 +331,188 @@ def history_locking_amplification(history_diag: dict[str, object]) -> float:
     return float(history_diag.get("past_present_bias_ratio", 1.0))
 
 
+def compute_history_lock_length(
+    history_lock_length_m: float = np.inf,
+    history_lock_tau_s: float | None = None,
+) -> float:
+    """
+    Base joint-history coherence length in SI units.
+
+    If history_lock_tau_s is provided, L_lock = c * tau_lock.  Otherwise the
+    explicit length is used.  Infinite length is the backward-compatible
+    default and means no range attenuation.
+    """
+    if history_lock_tau_s is not None:
+        tau = _assert_finite_scalar(history_lock_tau_s, "history_lock_tau_s")
+        _assert(tau >= 0.0, f"history_lock_tau_s must be >= 0, got {tau}")
+        return float(C_M_PER_S * tau)
+
+    length = float(history_lock_length_m)
+    _assert(length >= 0.0, f"history_lock_length_m must be >= 0, got {length}")
+    return length
+
+
+def compute_relativistic_lock_length(
+    base_lock_length_m: float,
+    lock_length_mode: str = "constant",
+    relative_velocity_fraction_c: float = 0.0,
+    lock_anisotropy_eta: float = 1.0,
+    lock_direction_cos_theta: float = 1.0,
+) -> dict[str, float | str]:
+    """
+    Optional speculative effective L_lock model under relative motion.
+
+    L_lock is treated here as an effective joint-history coherence length, not
+    as an observable signal speed.  The modes are diagnostic hypotheses only.
+    """
+    L0 = float(base_lock_length_m)
+    _assert(L0 >= 0.0, f"base_lock_length_m must be >= 0, got {L0}")
+
+    mode = str(lock_length_mode).strip().lower()
+    valid_modes = {"constant", "proper_time_dilated", "lorentz_contracted", "anisotropic"}
+    _assert(mode in valid_modes, f"lock_length_mode must be one of {sorted(valid_modes)}, got {mode!r}")
+
+    beta_raw = _assert_finite_scalar(relative_velocity_fraction_c, "relative_velocity_fraction_c")
+    beta = float(np.clip(abs(beta_raw), 0.0, 1.0 - 1e-12))
+    gamma = float(1.0 / np.sqrt(max(1.0 - beta * beta, 1e-12)))
+
+    eta = _assert_finite_scalar(lock_anisotropy_eta, "lock_anisotropy_eta")
+    cos_theta = _assert_finite_scalar(lock_direction_cos_theta, "lock_direction_cos_theta")
+    cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
+
+    if np.isinf(L0) or mode == "constant":
+        L_eff = L0
+    elif mode == "proper_time_dilated":
+        L_eff = gamma * L0
+    elif mode == "lorentz_contracted":
+        L_eff = L0 / max(gamma, 1e-12)
+    else:
+        denom = 1.0 + float(eta) * (gamma - 1.0) * cos_theta * cos_theta
+        L_eff = L0 / max(denom, 1e-12)
+
+    return {
+        "lock_length_mode": mode,
+        "base_lock_length_m": float(L0),
+        "effective_lock_length_m": float(L_eff),
+        "relative_velocity_fraction_c": float(beta_raw),
+        "clamped_beta": float(beta),
+        "gamma": float(gamma),
+        "lock_anisotropy_eta": float(eta),
+        "lock_direction_cos_theta": float(cos_theta),
+    }
+
+
+def compute_lock_attenuation(
+    distance_m: float,
+    effective_lock_length_m: float,
+    history_lock_decay_mode: str = "none",
+    history_lock_decay_power: float = 2.0,
+) -> float:
+    """
+    Distance attenuation for joint-history correlation visibility.
+
+    This attenuation never creates signalling by itself.  In the diagnostic it
+    reduces Alice-Bob correlation visibility by mixing toward uncorrelated
+    local marginals, and it attenuates the deliberately forbidden
+    lambda_signal path when that path is explicitly enabled.
+    """
+    distance = _assert_finite_scalar(distance_m, "distance_m")
+    _assert(distance >= 0.0, f"distance_m must be >= 0, got {distance}")
+
+    mode = str(history_lock_decay_mode).strip().lower()
+    valid_modes = {"none", "exp", "soft_power"}
+    _assert(mode in valid_modes, f"history_lock_decay_mode must be one of {sorted(valid_modes)}, got {mode!r}")
+
+    if mode == "none":
+        return 1.0
+
+    L = float(effective_lock_length_m)
+    if np.isinf(L):
+        return 1.0
+    _assert(L >= 0.0, f"effective_lock_length_m must be >= 0, got {L}")
+    if L <= 0.0:
+        return 1.0 if distance <= 0.0 else 0.0
+
+    x = distance / L
+    if mode == "exp":
+        return float(np.exp(-x))
+
+    p = _assert_finite_scalar(history_lock_decay_power, "history_lock_decay_power")
+    _assert(p > 0.0, f"history_lock_decay_power must be > 0, got {p}")
+    return float(1.0 / (1.0 + np.power(x, p)))
+
+
+def lock_attenuation_diagnostic(
+    distance_m: float = 0.0,
+    history_lock_length_m: float = np.inf,
+    history_lock_tau_s: float | None = None,
+    history_lock_decay_mode: str = "none",
+    history_lock_decay_power: float = 2.0,
+    lock_length_mode: str = "constant",
+    relative_velocity_fraction_c: float = 0.0,
+    lock_anisotropy_eta: float = 1.0,
+    lock_direction_cos_theta: float = 1.0,
+) -> dict[str, float | str | None]:
+    base_L = compute_history_lock_length(
+        history_lock_length_m=history_lock_length_m,
+        history_lock_tau_s=history_lock_tau_s,
+    )
+    rel = compute_relativistic_lock_length(
+        base_lock_length_m=base_L,
+        lock_length_mode=lock_length_mode,
+        relative_velocity_fraction_c=relative_velocity_fraction_c,
+        lock_anisotropy_eta=lock_anisotropy_eta,
+        lock_direction_cos_theta=lock_direction_cos_theta,
+    )
+    L_eff = float(rel["effective_lock_length_m"])
+    attenuation = compute_lock_attenuation(
+        distance_m=distance_m,
+        effective_lock_length_m=L_eff,
+        history_lock_decay_mode=history_lock_decay_mode,
+        history_lock_decay_power=history_lock_decay_power,
+    )
+
+    return {
+        **rel,
+        "history_lock_tau_s": None if history_lock_tau_s is None else float(history_lock_tau_s),
+        "history_lock_decay_mode": str(history_lock_decay_mode).strip().lower(),
+        "history_lock_decay_power": float(history_lock_decay_power),
+        "distance_m": float(distance_m),
+        "distance_Mm": float(distance_m / MM_TO_M),
+        "lock_attenuation": float(attenuation),
+    }
+
+
+def attenuate_joint_correlation_visibility(
+    probs: dict[str, float],
+    attenuation: float,
+) -> dict[str, float]:
+    """
+    Reduce joint correlation visibility without changing local marginals.
+
+    This mixes the joint distribution with the product of its Alice and Bob
+    marginals.  It therefore can weaken correlations over distance while
+    preserving no-signalling local marginals.
+    """
+    A = float(np.clip(_assert_finite_scalar(attenuation, "attenuation"), 0.0, 1.0))
+
+    p_a_plus = float(probs["++"] + probs["+-"])
+    p_a_minus = float(probs["-+"] + probs["--"])
+    p_b_plus = float(probs["++"] + probs["-+"])
+    p_b_minus = float(probs["+-"] + probs["--"])
+
+    product = {
+        "++": p_a_plus * p_b_plus,
+        "+-": p_a_plus * p_b_minus,
+        "-+": p_a_minus * p_b_plus,
+        "--": p_a_minus * p_b_minus,
+    }
+    mixed = {ch: float(A * probs[ch] + (1.0 - A) * product[ch]) for ch in CHANNELS}
+    total = float(sum(mixed.values()))
+    _assert(total > 0.0, "attenuated joint probability total must be > 0")
+    return {ch: float(mixed[ch] / total) for ch in CHANNELS}
+
+
 def apply_forbidden_signal_bias(
     probs: dict[str, float],
     alice_setting: float,
@@ -370,6 +554,15 @@ def trf_joint_probabilities(
     history_v_future_factor: float = 0.5,
     history_v_present_factor: float = 1.0,
     history_v_past_factor: float = 2.0,
+    distance_m: float = 0.0,
+    history_lock_length_m: float = np.inf,
+    history_lock_tau_s: float | None = None,
+    history_lock_decay_mode: str = "none",
+    history_lock_decay_power: float = 2.0,
+    lock_length_mode: str = "constant",
+    relative_velocity_fraction_c: float = 0.0,
+    lock_anisotropy_eta: float = 1.0,
+    lock_direction_cos_theta: float = 1.0,
 ) -> dict[str, float]:
     """
     Joint probabilities for the minimal TRF no-signalling diagnostic.
@@ -380,9 +573,22 @@ def trf_joint_probabilities(
         history_v_present_factor=history_v_present_factor,
         history_v_past_factor=history_v_past_factor,
     )
-    effective_lambda = float(lambda_signal) * history_locking_amplification(history_diag)
+    lock_diag = lock_attenuation_diagnostic(
+        distance_m=distance_m,
+        history_lock_length_m=history_lock_length_m,
+        history_lock_tau_s=history_lock_tau_s,
+        history_lock_decay_mode=history_lock_decay_mode,
+        history_lock_decay_power=history_lock_decay_power,
+        lock_length_mode=lock_length_mode,
+        relative_velocity_fraction_c=relative_velocity_fraction_c,
+        lock_anisotropy_eta=lock_anisotropy_eta,
+        lock_direction_cos_theta=lock_direction_cos_theta,
+    )
+    attenuation = float(lock_diag["lock_attenuation"])
+    effective_lambda = float(lambda_signal) * history_locking_amplification(history_diag) * attenuation
     born = joint_spin_probabilities(spin_state, alice_setting, bob_setting)
-    return apply_forbidden_signal_bias(born, alice_setting, effective_lambda)
+    attenuated = attenuate_joint_correlation_visibility(born, attenuation)
+    return apply_forbidden_signal_bias(attenuated, alice_setting, effective_lambda)
 
 
 def run_trf_no_signalling_diagnostic(
@@ -391,6 +597,15 @@ def run_trf_no_signalling_diagnostic(
     history_v_future_factor: float = 0.5,
     history_v_present_factor: float = 1.0,
     history_v_past_factor: float = 2.0,
+    distance_m: float = 0.0,
+    history_lock_length_m: float = np.inf,
+    history_lock_tau_s: float | None = None,
+    history_lock_decay_mode: str = "none",
+    history_lock_decay_power: float = 2.0,
+    lock_length_mode: str = "constant",
+    relative_velocity_fraction_c: float = 0.0,
+    lock_anisotropy_eta: float = 1.0,
+    lock_direction_cos_theta: float = 1.0,
     alice_setting_a0: float = 0.0,
     alice_setting_a1: float = float(np.pi / 3.0),
     bob_setting: float = float(np.pi / 5.0),
@@ -418,7 +633,19 @@ def run_trf_no_signalling_diagnostic(
         history_v_past_factor=history_v_past_factor,
     )
     amplification = history_locking_amplification(history_diag)
-    effective_lambda = float(lambda_signal) * amplification
+    lock_diag = lock_attenuation_diagnostic(
+        distance_m=distance_m,
+        history_lock_length_m=history_lock_length_m,
+        history_lock_tau_s=history_lock_tau_s,
+        history_lock_decay_mode=history_lock_decay_mode,
+        history_lock_decay_power=history_lock_decay_power,
+        lock_length_mode=lock_length_mode,
+        relative_velocity_fraction_c=relative_velocity_fraction_c,
+        lock_anisotropy_eta=lock_anisotropy_eta,
+        lock_direction_cos_theta=lock_direction_cos_theta,
+    )
+    attenuation = float(lock_diag["lock_attenuation"])
+    effective_lambda = float(lambda_signal) * amplification * attenuation
 
     def ensemble(theta_a: float) -> dict[str, object]:
         probs = trf_joint_probabilities(
@@ -430,6 +657,15 @@ def run_trf_no_signalling_diagnostic(
             history_v_future_factor=float(history_v_future_factor),
             history_v_present_factor=float(history_v_present_factor),
             history_v_past_factor=float(history_v_past_factor),
+            distance_m=float(distance_m),
+            history_lock_length_m=float(history_lock_length_m),
+            history_lock_tau_s=history_lock_tau_s,
+            history_lock_decay_mode=str(history_lock_decay_mode),
+            history_lock_decay_power=float(history_lock_decay_power),
+            lock_length_mode=str(lock_length_mode),
+            relative_velocity_fraction_c=float(relative_velocity_fraction_c),
+            lock_anisotropy_eta=float(lock_anisotropy_eta),
+            lock_direction_cos_theta=float(lock_direction_cos_theta),
         )
         pvec = np.asarray([probs[ch] for ch in CHANNELS], dtype=float)
         counts = rng.multinomial(int(n_trials), pvec)
@@ -460,6 +696,7 @@ def run_trf_no_signalling_diagnostic(
         "history_locking": {
             k: v for k, v in history_diag.items() if k != "profile"
         },
+        "finite_history_lock": lock_diag,
         "alice_setting_a0": float(alice_setting_a0),
         "alice_setting_a1": float(alice_setting_a1),
         "bob_setting": float(bob_setting),
@@ -485,6 +722,15 @@ def run_trf_history_velocity_matrix(
     history_v_future_factor: float = 0.5,
     history_v_present_factor: float = 1.0,
     history_v_past_factor: float = 2.0,
+    distance_m: float = 0.0,
+    history_lock_length_m: float = np.inf,
+    history_lock_tau_s: float | None = None,
+    history_lock_decay_mode: str = "none",
+    history_lock_decay_power: float = 2.0,
+    lock_length_mode: str = "constant",
+    relative_velocity_fraction_c: float = 0.0,
+    lock_anisotropy_eta: float = 1.0,
+    lock_direction_cos_theta: float = 1.0,
     alice_setting_a0: float = 0.0,
     alice_setting_a1: float = float(np.pi / 3.0),
     bob_setting: float = float(np.pi / 5.0),
@@ -510,6 +756,15 @@ def run_trf_history_velocity_matrix(
             history_v_future_factor=float(history_v_future_factor),
             history_v_present_factor=float(history_v_present_factor),
             history_v_past_factor=float(history_v_past_factor),
+            distance_m=float(distance_m),
+            history_lock_length_m=float(history_lock_length_m),
+            history_lock_tau_s=history_lock_tau_s,
+            history_lock_decay_mode=str(history_lock_decay_mode),
+            history_lock_decay_power=float(history_lock_decay_power),
+            lock_length_mode=str(lock_length_mode),
+            relative_velocity_fraction_c=float(relative_velocity_fraction_c),
+            lock_anisotropy_eta=float(lock_anisotropy_eta),
+            lock_direction_cos_theta=float(lock_direction_cos_theta),
             alice_setting_a0=float(alice_setting_a0),
             alice_setting_a1=float(alice_setting_a1),
             bob_setting=float(bob_setting),
@@ -518,6 +773,119 @@ def run_trf_history_velocity_matrix(
         )
 
     return {"cases": results}
+
+
+def run_trf_lock_distance_sweep(
+    distances_m: list[float] | tuple[float, ...] | None = None,
+    lambda_signal_safe: float = 0.0,
+    lambda_signal_forbidden: float = 0.4,
+    history_velocity_mode: str = "constant",
+    history_lock_tau_s: float | None = 1.0,
+    history_lock_length_m: float = np.inf,
+    history_lock_decay_power: float = 2.0,
+    n_trials: int = 20000,
+    rng_seed: int = 12345,
+) -> dict[str, object]:
+    """
+    Distance sweep for finite joint-history lock range.
+
+    Cases:
+      1) safe + no decay
+      2) safe + soft_power lock attenuation
+      3) forbidden + no decay
+      4) forbidden + soft_power lock attenuation
+    """
+    if distances_m is None:
+        distances_m = [0.0, 40.0 * MM_TO_M, 300.0 * MM_TO_M, 384.0 * MM_TO_M, 1000.0 * MM_TO_M]
+
+    cases = [
+        ("safe_none", float(lambda_signal_safe), "none"),
+        ("safe_soft_power", float(lambda_signal_safe), "soft_power"),
+        ("forbidden_none", float(lambda_signal_forbidden), "none"),
+        ("forbidden_soft_power", float(lambda_signal_forbidden), "soft_power"),
+    ]
+
+    rows = []
+    for i, distance in enumerate(distances_m):
+        for j, (case_name, lam, decay_mode) in enumerate(cases):
+            res = run_trf_no_signalling_diagnostic(
+                lambda_signal=lam,
+                history_velocity_mode=history_velocity_mode,
+                distance_m=float(distance),
+                history_lock_length_m=float(history_lock_length_m),
+                history_lock_tau_s=history_lock_tau_s,
+                history_lock_decay_mode=decay_mode,
+                history_lock_decay_power=float(history_lock_decay_power),
+                n_trials=int(n_trials),
+                rng_seed=int(rng_seed) + 100 * i + j,
+            )
+            lock = res["finite_history_lock"]
+            rows.append(
+                {
+                    "case": case_name,
+                    "distance_m": float(distance),
+                    "distance_Mm": float(distance / MM_TO_M),
+                    "lock_attenuation": float(lock["lock_attenuation"]),
+                    "correlation_visibility": float(lock["lock_attenuation"]),
+                    "effective_lock_length_m": float(lock["effective_lock_length_m"]),
+                    "effective_lock_length_Mm": float(lock["effective_lock_length_m"] / MM_TO_M),
+                    "history_lock_decay_mode": str(decay_mode),
+                    "lambda_signal": float(lam),
+                    "effective_lambda_signal": float(res["effective_lambda_signal"]),
+                    "P_B_plus_given_a0": float(res["P_B_plus_given_a0"]),
+                    "P_B_plus_given_a1": float(res["P_B_plus_given_a1"]),
+                    "Delta_signal": float(res["Delta_signal"]),
+                    "P_B_plus_given_a0_exact": float(res["P_B_plus_given_a0_exact"]),
+                    "P_B_plus_given_a1_exact": float(res["P_B_plus_given_a1_exact"]),
+                    "Delta_signal_exact": float(res["Delta_signal_exact"]),
+                    "E_a0_exact": float(res["E_a0_exact"]),
+                    "E_a1_exact": float(res["E_a1_exact"]),
+                    "Delta_correlation_exact": float(res["Delta_correlation_exact"]),
+                }
+            )
+
+    return {
+        "distance_sweep": rows,
+        "history_lock_tau_s": None if history_lock_tau_s is None else float(history_lock_tau_s),
+        "history_lock_length_m": float(history_lock_length_m),
+        "history_lock_decay_power": float(history_lock_decay_power),
+    }
+
+
+def run_trf_lock_velocity_sweep(
+    base_lock_length_m: float = 300.0 * MM_TO_M,
+    betas: list[float] | tuple[float, ...] | None = None,
+    lock_anisotropy_eta: float = 1.0,
+) -> dict[str, object]:
+    """
+    Compare effective L_lock under simple relative-motion hypotheses.
+    """
+    if betas is None:
+        betas = [0.0, 0.5, 0.8]
+
+    rows = []
+    for beta in betas:
+        for mode in ("constant", "proper_time_dilated", "lorentz_contracted", "anisotropic"):
+            cos_values = [1.0]
+            if mode == "anisotropic":
+                cos_values = [1.0, 0.0]
+            for cos_theta in cos_values:
+                diag = compute_relativistic_lock_length(
+                    base_lock_length_m=float(base_lock_length_m),
+                    lock_length_mode=mode,
+                    relative_velocity_fraction_c=float(beta),
+                    lock_anisotropy_eta=float(lock_anisotropy_eta),
+                    lock_direction_cos_theta=float(cos_theta),
+                )
+                rows.append(
+                    {
+                        **diag,
+                        "base_lock_length_Mm": float(base_lock_length_m / MM_TO_M),
+                        "effective_lock_length_Mm": float(diag["effective_lock_length_m"] / MM_TO_M),
+                    }
+                )
+
+    return {"velocity_sweep": rows}
 
 
 # ============================================================
@@ -2379,6 +2747,15 @@ class SignallingTRFEntanglementTheory(ThickFrontEntanglementTheory):
     history_v_future_factor: float = 0.5
     history_v_present_factor: float = 1.0
     history_v_past_factor: float = 2.0
+    distance_m: float = 0.0
+    history_lock_length_m: float = np.inf
+    history_lock_tau_s: float | None = None
+    history_lock_decay_mode: str = "none"
+    history_lock_decay_power: float = 2.0
+    lock_length_mode: str = "constant"
+    relative_velocity_fraction_c: float = 0.0
+    lock_anisotropy_eta: float = 1.0
+    lock_direction_cos_theta: float = 1.0
 
     def __post_init__(self):
         super().__post_init__()
@@ -2390,6 +2767,17 @@ class SignallingTRFEntanglementTheory(ThickFrontEntanglementTheory):
             history_v_future_factor=float(self.history_v_future_factor),
             history_v_present_factor=float(self.history_v_present_factor),
             history_v_past_factor=float(self.history_v_past_factor),
+        )
+        lock_attenuation_diagnostic(
+            distance_m=float(self.distance_m),
+            history_lock_length_m=float(self.history_lock_length_m),
+            history_lock_tau_s=self.history_lock_tau_s,
+            history_lock_decay_mode=str(self.history_lock_decay_mode),
+            history_lock_decay_power=float(self.history_lock_decay_power),
+            lock_length_mode=str(self.lock_length_mode),
+            relative_velocity_fraction_c=float(self.relative_velocity_fraction_c),
+            lock_anisotropy_eta=float(self.lock_anisotropy_eta),
+            lock_direction_cos_theta=float(self.lock_direction_cos_theta),
         )
 
     def joint_probabilities_for_settings(
@@ -2426,7 +2814,20 @@ class SignallingTRFEntanglementTheory(ThickFrontEntanglementTheory):
             history_v_present_factor=float(self.history_v_present_factor),
             history_v_past_factor=float(self.history_v_past_factor),
         )
-        effective_lambda = float(self.lambda_signal) * history_locking_amplification(history_diag)
+        lock_diag = lock_attenuation_diagnostic(
+            distance_m=float(self.distance_m),
+            history_lock_length_m=float(self.history_lock_length_m),
+            history_lock_tau_s=self.history_lock_tau_s,
+            history_lock_decay_mode=str(self.history_lock_decay_mode),
+            history_lock_decay_power=float(self.history_lock_decay_power),
+            lock_length_mode=str(self.lock_length_mode),
+            relative_velocity_fraction_c=float(self.relative_velocity_fraction_c),
+            lock_anisotropy_eta=float(self.lock_anisotropy_eta),
+            lock_direction_cos_theta=float(self.lock_direction_cos_theta),
+        )
+        attenuation = float(lock_diag["lock_attenuation"])
+        effective_lambda = float(self.lambda_signal) * history_locking_amplification(history_diag) * attenuation
+        probs = attenuate_joint_correlation_visibility(probs, attenuation)
 
         return apply_forbidden_signal_bias(
             probs=probs,
@@ -2461,21 +2862,33 @@ class SignallingTRFEntanglementTheory(ThickFrontEntanglementTheory):
         probs_a1 = self.joint_probabilities_for_settings(state, alice_setting_a1, bob_setting)
         p0 = bob_plus_probability(probs_a0)
         p1 = bob_plus_probability(probs_a1)
+        history_diag = history_velocity_profile(
+            history_velocity_mode=self.history_velocity_mode,
+            history_v_future_factor=float(self.history_v_future_factor),
+            history_v_present_factor=float(self.history_v_present_factor),
+            history_v_past_factor=float(self.history_v_past_factor),
+        )
+        lock_diag = lock_attenuation_diagnostic(
+            distance_m=float(self.distance_m),
+            history_lock_length_m=float(self.history_lock_length_m),
+            history_lock_tau_s=self.history_lock_tau_s,
+            history_lock_decay_mode=str(self.history_lock_decay_mode),
+            history_lock_decay_power=float(self.history_lock_decay_power),
+            lock_length_mode=str(self.lock_length_mode),
+            relative_velocity_fraction_c=float(self.relative_velocity_fraction_c),
+            lock_anisotropy_eta=float(self.lock_anisotropy_eta),
+            lock_direction_cos_theta=float(self.lock_direction_cos_theta),
+        )
 
         return {
             "lambda_signal": float(self.lambda_signal),
             "effective_lambda_signal": float(
                 self.lambda_signal
-                * history_locking_amplification(
-                    history_velocity_profile(
-                        history_velocity_mode=self.history_velocity_mode,
-                        history_v_future_factor=float(self.history_v_future_factor),
-                        history_v_present_factor=float(self.history_v_present_factor),
-                        history_v_past_factor=float(self.history_v_past_factor),
-                    )
-                )
+                * history_locking_amplification(history_diag)
+                * float(lock_diag["lock_attenuation"])
             ),
             "history_velocity_mode": str(self.history_velocity_mode),
+            "finite_history_lock": lock_diag,
             "alice_setting_a0": float(alice_setting_a0),
             "alice_setting_a1": float(alice_setting_a1),
             "bob_setting": float(bob_setting),
