@@ -157,6 +157,15 @@ Set `SIMPLE_BARRIER_ABSORPTION` above zero for an absorbing obstacle. TRF runs
 save the full forward density separately from `rho_realized`; visualize the
 latter with `visualize.py output.npz --render-mode realized_trf`.
 
+For a direct comparison with detector-anchored ridge tracking:
+
+```bash
+python3 visualize.py output.npz --split-view --left-mode density --right-mode realized_trf
+```
+
+Use `--snapshot-frames 0 180 260 333 --snapshot-dir trf_snapshots` to save
+reproducible frame comparisons without joining unrelated ridge segments.
+
 ---
 
 | Theory                 | Equation                 | State       | Collapse   | Relativistic |

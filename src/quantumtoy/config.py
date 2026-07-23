@@ -164,6 +164,11 @@ class AppConfig:
     CENTROID_TOP_Q: float = 0.02
     LOCALMAX_RADIUS: int = 20
     LOCALMAX_SMOOTH_ALPHA: float = 0.0
+    DETECTOR_RIDGE_RADIUS_PX: int = 5
+    DETECTOR_RIDGE_DISTANCE_WEIGHT: float = 0.35
+    DETECTOR_RIDGE_CURRENT_WEIGHT: float = 0.25
+    DETECTOR_RIDGE_HYSTERESIS_WEIGHT: float = 0.20
+    DETECTOR_RIDGE_MIN_GLOBAL_REL: float = 1e-8
 
     # ============================================================
     # Flow / alignment

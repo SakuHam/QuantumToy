@@ -7,6 +7,7 @@ from config import AppConfig
 from core.grid import build_grid
 from core.potentials import build_potential
 from main import ClickResolution, ForwardRunResult, QuantumSimulationApp, SimulationSetup
+from analysis.ridge import compute_detector_anchored_ridge, contiguous_finite_track_slice
 from theories.schrodinger import SchrodingerTheory
 
 
@@ -20,11 +21,50 @@ class _Theory:
 
 
 class ConditionalClickTests(unittest.TestCase):
+    def test_detector_anchored_track_is_local_ordered_and_obstacle_safe(self):
+        nt, ny, nx = 6, 9, 9
+        density = np.zeros((nt, ny, nx), dtype=float)
+        # Chronological path bends around, rather than through, the obstacle.
+        path = [(4, 1), (4, 2), (3, 3), (2, 4), (2, 5), (2, 6)]
+        for i, (iy, ix) in enumerate(path):
+            density[i, iy, ix] = 1.0
+        blocked = np.zeros((ny, nx), dtype=bool)
+        blocked[4, 3:6] = True
+        current_x = np.ones_like(density)
+        current_y = np.zeros_like(density)
+        axis = np.arange(nx, dtype=float)
+
+        rx, ry, _, diag = compute_detector_anchored_ridge(
+            density,
+            axis,
+            axis,
+            click_frame_idx=nt - 1,
+            click_x=6.0,
+            click_y=2.0,
+            forbidden_mask=blocked,
+            current_x_frames=current_x,
+            current_y_frames=current_y,
+            radius_px=2,
+        )
+        self.assertEqual(diag["endpoint_distance_px"], 0.0)
+        self.assertLessEqual(diag["max_jump_px"], 2.0)
+        self.assertEqual(diag["obstacle_intersections"], 0)
+        self.assertTrue(diag["times_monotonic"])
+        finite = np.isfinite(rx) & np.isfinite(ry)
+        self.assertFalse(np.any(blocked[ry[finite].astype(int), rx[finite].astype(int)]))
+
+    def test_terminated_tracks_are_not_concatenated(self):
+        xs = np.array([0.0, 1.0, np.nan, 7.0, 8.0])
+        ys = np.array([0.0, 0.0, np.nan, 1.0, 1.0])
+        segment = contiguous_finite_track_slice(xs, ys, 4)
+        self.assertEqual((segment.start, segment.stop), (3, 5))
+
     def _potential(self, *, obstacle=False, absorption=0.0):
         cfg = AppConfig(
             N_VISIBLE_X=16,
             N_VISIBLE_Y=8,
             PAD_FACTOR=1,
+            barrier_thickness=3.0,
             USE_SIMPLE_BARRIER=obstacle,
             simple_barrier_center_x=2.0,
             simple_barrier_center_y=2.0,
@@ -48,11 +88,13 @@ class ConditionalClickTests(unittest.TestCase):
         # B: finite obstacle permits diffraction and has no absorbing part.
         cfg_b, grid_b, finite = self._potential(obstacle=True, absorption=0.0)
         self.assertIn("simple_barrier", [c.name for c in finite.components])
-        self.assertAlmostEqual(float(np.max(finite.W)), 0.0)
+        finite_simple = next(c for c in finite.components if c.name == "simple_barrier")
+        self.assertAlmostEqual(float(np.max(finite_simple.W)), 0.0)
 
         # C: the same full-channel geometry can be made absorbing.
         _, _, absorbing = self._potential(obstacle=True, absorption=40.0)
-        self.assertGreater(float(np.max(absorbing.W)), 0.0)
+        absorbing_simple = next(c for c in absorbing.components if c.name == "simple_barrier")
+        self.assertGreater(float(np.max(absorbing_simple.W)), 0.0)
 
         # The actual forward potential and its adjoint share every component.
         theory = SchrodingerTheory(grid_b, finite, cfg_b.m_mass, cfg_b.hbar)

@@ -19,8 +19,13 @@ from analysis.emix import (
     build_Emix_from_phi_tau,
     build_Emix_density_from_phi_tau,
     make_rho,
+    make_emix_density,
 )
-from analysis.ridge import compute_ridge_top_xy, compute_ridge_xy
+from analysis.ridge import (
+    compute_detector_anchored_ridge,
+    compute_ridge_xy,
+    contiguous_finite_track_slice,
+)
 from analysis.current import (
     alignment_and_diagnostics_from_state_frames,
     _extract_visible_velocity_fields,
@@ -416,6 +421,19 @@ def draw_static_geometry(ax, grid, potential, cfg, extent):
                 artists.extend(_draw_component_potential_mode(ax, grid, comp, extent, cfg))
 
     return artists
+
+
+def build_impermeable_mask_vis(grid, potential) -> np.ndarray:
+    """Visible cells that a displayed realized track may not enter or cross."""
+    blocked = np.zeros((grid.n_visible_y, grid.n_visible_x), dtype=bool)
+    for comp in _iter_barrier_components(potential):
+        wall = getattr(comp, "wall_mask", None)
+        if wall is None:
+            continue
+        wall_vis = np.asarray(_get_visible_field(grid, wall), dtype=bool)
+        # Apertures have already been carved out of wall_mask.
+        blocked |= wall_vis
+    return blocked
 
 
 # ============================================================
@@ -1187,13 +1205,13 @@ def main():
     parser.add_argument(
         "--left-mode",
         choices=RENDER_MODES,
-        default="phase_contours",
+        default="density",
         help="Left panel mode in split view",
     )
     parser.add_argument(
         "--right-mode",
         choices=RENDER_MODES,
-        default="ridge_phase_contours",
+        default="realized_trf",
         help="Right panel mode in split view",
     )
     parser.add_argument(
@@ -1221,6 +1239,18 @@ def main():
     parser.add_argument("--debug-metric-alpha", action="store_true")
     parser.add_argument("--debug-metric-a", action="store_true")
     parser.add_argument("--debug-metric-v", action="store_true")
+    parser.add_argument(
+        "--snapshot-frames",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Save PNG snapshots for these frame indices after constructing all overlays",
+    )
+    parser.add_argument(
+        "--snapshot-dir",
+        default="trf_snapshots",
+        help="Directory used by --snapshot-frames",
+    )
 
     args = parser.parse_args()
 
@@ -1365,6 +1395,26 @@ def main():
     click_b_position = _coincidence_position(coincidence_click_info, "b")
     coincidence_has_positions = click_a_position is not None and click_b_position is not None
     click_frame_idx = compute_click_frame_idx(times, t_det)
+    impermeable_mask_vis = build_impermeable_mask_vis(grid, potential)
+
+    def current_velocity_frames():
+        if state_vis_frames is None or not hasattr(theory, "current"):
+            return None, None
+        vx = np.zeros((Nt, grid.n_visible_y, grid.n_visible_x), dtype=float)
+        vy = np.zeros_like(vx)
+        try:
+            for fi in range(Nt):
+                jx, jy, rho_flow = theory.current(state_vis_frames[fi])
+                rho_flow = np.asarray(rho_flow, dtype=float)
+                valid = rho_flow > float(getattr(cfg, "ALIGN_EPS_RHO", 1e-10))
+                vx[fi, valid] = np.asarray(jx, dtype=float)[valid] / rho_flow[valid]
+                vy[fi, valid] = np.asarray(jy, dtype=float)[valid] / rho_flow[valid]
+            return vx, vy
+        except Exception as exc:
+            print(f"[RIDGE TRACK] current-direction scoring unavailable: {exc}")
+            return None, None
+
+    tracker_vx, tracker_vy = current_velocity_frames()
 
     if state_vis_frames is not None:
         dbg_i = args.debug_frame if args.debug_frame >= 0 else (len(state_vis_frames) - 1)
@@ -1460,14 +1510,73 @@ def main():
         else:
             raise ValueError(f"Unsupported ridge_source={ridge_source!r}")
 
-        ridge_top_x, ridge_top_y, ridge_top_s = compute_ridge_top_xy(
-            frames_psi=ridge_frames_psi,
-            Emix=ridge_frames_emix,
-            x_vis_1d=grid.x_vis_1d,
-            y_vis_1d=grid.y_vis_1d,
-            n_tops=2,
-            top_q=cfg.CENTROID_TOP_Q,
-        )
+        forward_density = forward_density_frames_from_state_vis(state_vis_frames)
+        emix_density = make_emix_density(Emix)
+        realized_gamma = float(getattr(cfg, "TRF_REALIZED_EMIX_GAMMA", 2.0))
+        realized = forward_density * np.power(np.maximum(emix_density, 0.0), realized_gamma)
+        realized_mass = np.sum(realized, axis=(1, 2)) * grid.dx * grid.dy
+        valid_mass = realized_mass > 0.0
+        realized[valid_mass] /= realized_mass[valid_mass, None, None]
+
+        endpoints = []
+        labels = []
+        if coincidence_has_positions:
+            endpoints = [click_a_position, click_b_position]
+            labels = ["A", "B"]
+            if (
+                abs(click_a_position[0] - click_b_position[0]) <= grid.dx
+                and abs(click_a_position[1] - click_b_position[1]) <= grid.dy
+            ):
+                # The present entanglement model has one shared spatial
+                # coordinate. Do not draw two coincident curves and imply two
+                # independently reconstructed worldlines.
+                endpoints = [click_a_position]
+                labels = ["joint event"]
+        elif click_has_position:
+            endpoints = [(float(x_click), float(y_click))]
+            labels = ["event"]
+
+        tracks_x, tracks_y, tracks_s, track_diags = [], [], [], []
+        if click_frame_idx is not None:
+            for label_name, endpoint in zip(labels, endpoints):
+                tx, ty, ts, diag = compute_detector_anchored_ridge(
+                    density_frames=realized,
+                    x_vis_1d=grid.x_vis_1d,
+                    y_vis_1d=grid.y_vis_1d,
+                    click_frame_idx=click_frame_idx,
+                    click_x=endpoint[0],
+                    click_y=endpoint[1],
+                    forbidden_mask=impermeable_mask_vis,
+                    current_x_frames=tracker_vx,
+                    current_y_frames=tracker_vy,
+                    radius_px=int(getattr(cfg, "DETECTOR_RIDGE_RADIUS_PX", 5)),
+                    distance_weight=float(getattr(cfg, "DETECTOR_RIDGE_DISTANCE_WEIGHT", 0.35)),
+                    current_weight=float(getattr(cfg, "DETECTOR_RIDGE_CURRENT_WEIGHT", 0.25)),
+                    hysteresis_weight=float(getattr(cfg, "DETECTOR_RIDGE_HYSTERESIS_WEIGHT", 0.20)),
+                    min_global_rel=float(getattr(cfg, "DETECTOR_RIDGE_MIN_GLOBAL_REL", 1e-8)),
+                )
+                diag["label"] = label_name
+                tracks_x.append(tx)
+                tracks_y.append(ty)
+                tracks_s.append(ts)
+                track_diags.append(diag)
+                print(
+                    f"[RIDGE {label_name}] click_cell={diag['click_cell']} "
+                    f"endpoint={diag['ridge_endpoint_cell']} "
+                    f"endpoint_distance_px={diag['endpoint_distance_px']:.3f} "
+                    f"max_jump_px={diag['max_jump_px']:.3f} "
+                    f"branch_switches={diag['branch_switches']} "
+                    f"obstacle_intersections={diag['obstacle_intersections']} "
+                    f"times_monotonic={diag['times_monotonic']}"
+                )
+
+        ridge_top_x = np.asarray(tracks_x, dtype=float)
+        ridge_top_y = np.asarray(tracks_y, dtype=float)
+        ridge_top_s = np.asarray(tracks_s, dtype=float)
+        if not tracks_x:
+            ridge_top_x = np.empty((0, Nt), dtype=float)
+            ridge_top_y = np.empty((0, Nt), dtype=float)
+            ridge_top_s = np.empty((0, Nt), dtype=float)
 
         cos_th = speed = ux = uy = div_v = None
 
@@ -1493,7 +1602,11 @@ def main():
         except Exception as e:
             print(f"[ALIGN] skipped in visualize: {e}")
 
-        return rho, Emix, rx, ry, rs, ridge_top_x, ridge_top_y, ridge_top_s, cos_th, speed, ux, uy, div_v
+        return (
+            rho, realized, Emix, rx, ry, rs,
+            ridge_top_x, ridge_top_y, ridge_top_s, track_diags,
+            cos_th, speed, ux, uy, div_v,
+        )
 
     v_est = estimate_group_velocity(cfg, theory)
     L_gap = cfg.screen_center_x - cfg.barrier_center_x
@@ -1504,6 +1617,7 @@ def main():
 
     (
         rho_init,
+        realized_init,
         emix_init,
         ridge_x_init,
         ridge_y_init,
@@ -1511,6 +1625,7 @@ def main():
         ridge_top_x_init,
         ridge_top_y_init,
         ridge_top_s_init,
+        ridge_track_diags_init,
         cos_th_init,
         speed_init,
         ux_init,
@@ -1562,7 +1677,7 @@ def main():
             latent_intensity_current=latent_intensity_init,
             backward_density_current=backward_density_init,
             overlap_density_current=overlap_density_init,
-            realized_trf=realized_trf_saved,
+            realized_trf=realized_init,
             posthoc_base_rho=posthoc_base_rho_saved,
             posthoc_selected_rho=posthoc_selected_rho_saved,
             state_vis_frames=state_vis_frames,
@@ -1650,11 +1765,16 @@ def main():
         else:
             title = ax.set_title(
                 rf"ρ(t): σT={sigma_init:.3f}, t={times[0]:.3f}, "
-                rf"ridge={cfg.RIDGE_MODE}, theory={cfg.THEORY_NAME}, "
+                rf"ridge=detector_anchored_local, theory={cfg.THEORY_NAME}, "
                 rf"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}, "
                 rf"render={mode}"
             )
 
+        ridge_colors = ("lime", "deepskyblue")
+        ridge_labels = tuple(
+            f"ridge {diag.get('label', k + 1)}"
+            for k, diag in enumerate(ridge_track_diags_init)
+        )
         ridge_markers = []
         for k in range(ridge_top_x_init.shape[0]):
             x0 = ridge_top_x_init[k, 0]
@@ -1667,9 +1787,9 @@ def main():
                 marker="o",
                 markersize=7,
                 linestyle="None",
-                color="lime",
+                color=ridge_colors[k % len(ridge_colors)],
                 alpha=0.9,
-                label=f"ridge ({cfg.RIDGE_MODE})" if k == 0 else "_nolegend_",
+                label=ridge_labels[k] if k < len(ridge_labels) else f"ridge {k + 1}",
                 zorder=10,
             )
             ridge_markers.append(ridge_marker)
@@ -1701,14 +1821,15 @@ def main():
         )
 
         ridge_trails = []
-        for _ in range(ridge_top_x_init.shape[0]):
+        for k in range(ridge_top_x_init.shape[0]):
             ridge_trail, = ax.plot(
                 [],
                 [],
                 linestyle="-",
                 linewidth=1.5,
-                color="lime",
+                color=ridge_colors[k % len(ridge_colors)],
                 alpha=0.5,
+                label="_nolegend_",
                 zorder=9,
             )
             ridge_trails.append(ridge_trail)
@@ -1812,6 +1933,7 @@ def main():
     )
 
     rho_current = [rho_init]
+    realized_trf_current = [realized_init]
     emix_current = [emix_init]
     ridge_complex_current = [ridge_complex_init]
 
@@ -1828,6 +1950,7 @@ def main():
     ridge_top_x = [ridge_top_x_init]
     ridge_top_y = [ridge_top_y_init]
     ridge_top_s = [ridge_top_s_init]
+    ridge_track_diags = [ridge_track_diags_init]
     cos_th = [cos_th_init]
     speed = [speed_init]
     ux = [ux_init]
@@ -1855,7 +1978,7 @@ def main():
             latent_intensity_current=latent_intensity_current[0],
             backward_density_current=backward_density_current[0],
             overlap_density_current=overlap_density_current[0],
-            realized_trf=realized_trf_saved,
+            realized_trf=realized_trf_current[0],
             posthoc_base_rho=posthoc_base_rho_saved,
             posthoc_selected_rho=posthoc_selected_rho_saved,
             state_vis_frames=state_vis_frames,
@@ -2070,7 +2193,7 @@ def main():
         parts = [
             rf"ρ(t): σT={sigma_current[0]:.3f}",
             rf"t={times[i]:.3f}",
-            rf"ridge={cfg.RIDGE_MODE}",
+            "ridge=detector_anchored_local",
             rf"theory={cfg.THEORY_NAME}",
             rf"detector={getattr(cfg, 'DETECTOR_NAME', 'unknown')}",
             rf"render={mode}",
@@ -2131,7 +2254,16 @@ def main():
 
     def refresh_overlays(i: int):
         for panel in panel_states:
+            # Clear first so a recomputed sigma/event track cannot leave an old
+            # polyline visible when its replacement terminates earlier.
+            for marker in panel["ridge_markers"]:
+                marker.set_data([], [])
+            for trail in panel["ridge_trails"]:
+                trail.set_data([], [])
+
             for k, (marker, trail) in enumerate(zip(panel["ridge_markers"], panel["ridge_trails"])):
+                if k >= ridge_top_x[0].shape[0]:
+                    continue
                 x_now = ridge_top_x[0][k, i]
                 y_now = ridge_top_y[0][k, i]
 
@@ -2143,8 +2275,11 @@ def main():
                 if cfg.SHOW_TRAIL:
                     xs = ridge_top_x[0][k, : i + 1]
                     ys = ridge_top_y[0][k, : i + 1]
-                    finite = np.isfinite(xs) & np.isfinite(ys)
-                    trail.set_data(xs[finite], ys[finite])
+                    segment = contiguous_finite_track_slice(xs, ys, i)
+                    if segment is not None:
+                        # A single contiguous, time-ordered track only. Never
+                        # bridge terminated gaps or concatenate A/B histories.
+                        trail.set_data(xs[segment], ys[segment])
                 else:
                     trail.set_data([], [])
 
@@ -2158,6 +2293,7 @@ def main():
 
         (
             rho_new,
+            realized_new,
             emix_new,
             rx,
             ry,
@@ -2165,6 +2301,7 @@ def main():
             rtx,
             rty,
             rts,
+            track_diags,
             cth,
             spd,
             uxx,
@@ -2173,6 +2310,7 @@ def main():
         ) = build_all_for_sigma(new_sigma)
 
         rho_current[0] = rho_new
+        realized_trf_current[0] = realized_new
         emix_current[0] = emix_new
         ridge_complex_current[0] = make_overlap_complex_frames(state_vis_frames, emix_new)
 
@@ -2196,6 +2334,7 @@ def main():
         ridge_top_x[0] = rtx
         ridge_top_y[0] = rty
         ridge_top_s[0] = rts
+        ridge_track_diags[0] = track_diags
         cos_th[0] = cth
         speed[0] = spd
         ux[0] = uxx
@@ -2244,6 +2383,17 @@ def main():
             artists.extend(panel["contour_artists"])
 
         return tuple(artists)
+
+    if args.snapshot_frames:
+        snapshot_dir = Path(args.snapshot_dir)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        for requested in args.snapshot_frames:
+            frame_i = int(np.clip(requested, 0, Nt - 1))
+            update(frame_i)
+            fig.canvas.draw()
+            out_png = snapshot_dir / f"frame_{frame_i:04d}.png"
+            fig.savefig(out_png, dpi=160, bbox_inches="tight")
+            print(f"[SAVE] snapshot -> {out_png}")
 
     ani = FuncAnimation(fig, update, frames=Nt, interval=40, blit=False)
 

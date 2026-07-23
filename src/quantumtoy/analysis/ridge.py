@@ -323,6 +323,178 @@ def compute_ridge_top_xy(
     return ridge_x, ridge_y, ridge_s
 
 
+def _segment_cells(iy0: int, ix0: int, iy1: int, ix1: int) -> list[tuple[int, int]]:
+    """Integer cells crossed by a line segment, including both endpoints."""
+    n = max(abs(int(iy1) - int(iy0)), abs(int(ix1) - int(ix0)), 1)
+    ys = np.rint(np.linspace(iy0, iy1, n + 1)).astype(int)
+    xs = np.rint(np.linspace(ix0, ix1, n + 1)).astype(int)
+    return list(dict.fromkeys(zip(ys.tolist(), xs.tolist())))
+
+
+def contiguous_finite_track_slice(xs: np.ndarray, ys: np.ndarray, end_index: int) -> slice | None:
+    """Latest contiguous finite segment at or before ``end_index``."""
+    end_index = min(int(end_index), len(xs) - 1)
+    finite = np.isfinite(xs[: end_index + 1]) & np.isfinite(ys[: end_index + 1])
+    indices = np.flatnonzero(finite)
+    if not indices.size:
+        return None
+    end = int(indices[-1])
+    start = end
+    while start > 0 and finite[start - 1]:
+        start -= 1
+    return slice(start, end + 1)
+
+
+def compute_detector_anchored_ridge(
+    density_frames: np.ndarray,
+    x_vis_1d: np.ndarray,
+    y_vis_1d: np.ndarray,
+    *,
+    click_frame_idx: int,
+    click_x: float,
+    click_y: float,
+    forbidden_mask: np.ndarray | None = None,
+    current_x_frames: np.ndarray | None = None,
+    current_y_frames: np.ndarray | None = None,
+    radius_px: int = 8,
+    distance_weight: float = 0.35,
+    current_weight: float = 0.25,
+    hysteresis_weight: float = 0.20,
+    min_global_rel: float = 1e-8,
+    branch_switch_cos: float = -0.25,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Track one conditional ridge backward from its selected detector cell.
+
+    Unlike ``compute_ridge_top_xy``, identities are never assigned by peak
+    rank. A track has one anchor and one temporally adjacent continuation.
+    When no valid continuation exists, earlier samples remain NaN.
+    """
+    _assert(isinstance(density_frames, np.ndarray) and density_frames.ndim == 3,
+            "density_frames must have shape (Nt, Ny, Nx)")
+    _assert(np.all(np.isfinite(density_frames)), "density_frames contains non-finite values")
+    _assert(np.all(density_frames >= -1e-14), "density_frames contains negative values")
+    nt, ny, nx = density_frames.shape
+    _assert(0 <= int(click_frame_idx) < nt, "click_frame_idx out of range")
+    _assert(isinstance(radius_px, int) and radius_px >= 1, "radius_px must be >= 1")
+    _assert_vis_axes(x_vis_1d, y_vis_1d, (ny, nx))
+
+    blocked = np.zeros((ny, nx), dtype=bool) if forbidden_mask is None else np.asarray(forbidden_mask, dtype=bool)
+    _assert(blocked.shape == (ny, nx), "forbidden_mask shape mismatch")
+    if current_x_frames is not None or current_y_frames is not None:
+        _assert(current_x_frames is not None and current_y_frames is not None,
+                "both current component arrays are required")
+        _assert(current_x_frames.shape == density_frames.shape, "current_x_frames shape mismatch")
+        _assert(current_y_frames.shape == density_frames.shape, "current_y_frames shape mismatch")
+
+    xs = np.full(nt, np.nan, dtype=float)
+    ys = np.full(nt, np.nan, dtype=float)
+    scores = np.full(nt, np.nan, dtype=float)
+    ix_next = int(np.argmin(np.abs(x_vis_1d - float(click_x))))
+    iy_next = int(np.argmin(np.abs(y_vis_1d - float(click_y))))
+    _assert(not blocked[iy_next, ix_next], "selected detector anchor lies inside an obstacle")
+    xs[click_frame_idx] = float(x_vis_1d[ix_next])
+    ys[click_frame_idx] = float(y_vis_1d[iy_next])
+    scores[click_frame_idx] = float(density_frames[click_frame_idx, iy_next, ix_next])
+
+    max_jump = 0.0
+    branch_switches = 0
+    obstacle_intersections = 0
+    previous_forward_step = None
+    terminated_at = None
+
+    for i in range(int(click_frame_idx) - 1, -1, -1):
+        frame = np.maximum(density_frames[i], 0.0)
+        global_max = float(np.max(frame))
+        if global_max <= 0.0:
+            terminated_at = i
+            break
+
+        y0, y1 = max(0, iy_next - radius_px), min(ny, iy_next + radius_px + 1)
+        x0, x1 = max(0, ix_next - radius_px), min(nx, ix_next + radius_px + 1)
+        candidates = []
+        local_max = 0.0
+        for iy in range(y0, y1):
+            for ix in range(x0, x1):
+                dpx = float(np.hypot(ix - ix_next, iy - iy_next))
+                if dpx > radius_px or blocked[iy, ix]:
+                    continue
+                cells = _segment_cells(iy, ix, iy_next, ix_next)
+                if any(blocked[cy, cx] for cy, cx in cells):
+                    continue
+                local_max = max(local_max, float(frame[iy, ix]))
+                candidates.append((iy, ix, dpx))
+
+        if not candidates or local_max < min_global_rel * global_max:
+            terminated_at = i
+            break
+
+        best = None
+        best_score = -np.inf
+        for iy, ix, dpx in candidates:
+            dens_score = float(frame[iy, ix]) / max(local_max, 1e-300)
+            forward_step = np.asarray([ix_next - ix, iy_next - iy], dtype=float)
+            step_norm = float(np.linalg.norm(forward_step))
+            flow_score = 0.0
+            if current_x_frames is not None and step_norm > 0.0:
+                flow = np.asarray([current_x_frames[i, iy, ix], current_y_frames[i, iy, ix]], dtype=float)
+                flow_norm = float(np.linalg.norm(flow))
+                if np.isfinite(flow_norm) and flow_norm > 1e-14:
+                    flow_score = float(np.dot(forward_step, flow) / (step_norm * flow_norm))
+            hysteresis_score = 0.0
+            if previous_forward_step is not None and step_norm > 0.0:
+                prev_norm = float(np.linalg.norm(previous_forward_step))
+                if prev_norm > 0.0:
+                    hysteresis_score = float(
+                        np.dot(forward_step, previous_forward_step) / (step_norm * prev_norm)
+                    )
+            total_score = (
+                dens_score
+                - distance_weight * (dpx / radius_px)
+                + current_weight * flow_score
+                + hysteresis_weight * hysteresis_score
+            )
+            if total_score > best_score:
+                best_score = total_score
+                best = (iy, ix, dpx, forward_step, hysteresis_score)
+
+        if best is None:
+            terminated_at = i
+            break
+        iy, ix, dpx, forward_step, direction_cos = best
+        if previous_forward_step is not None and direction_cos < branch_switch_cos:
+            branch_switches += 1
+            terminated_at = i
+            break
+        if any(blocked[cy, cx] for cy, cx in _segment_cells(iy, ix, iy_next, ix_next)):
+            obstacle_intersections += 1
+            terminated_at = i
+            break
+        xs[i], ys[i], scores[i] = x_vis_1d[ix], y_vis_1d[iy], frame[iy, ix]
+        max_jump = max(max_jump, dpx)
+        previous_forward_step = forward_step
+        iy_next, ix_next = iy, ix
+
+    finite_idx = np.flatnonzero(np.isfinite(xs) & np.isfinite(ys))
+    diagnostics = {
+        "click_cell": (int(np.argmin(np.abs(y_vis_1d - click_y))), int(np.argmin(np.abs(x_vis_1d - click_x)))),
+        "ridge_endpoint_cell": (
+            int(np.argmin(np.abs(y_vis_1d - ys[click_frame_idx]))),
+            int(np.argmin(np.abs(x_vis_1d - xs[click_frame_idx]))),
+        ),
+        "endpoint_distance_px": float(np.hypot(
+            (xs[click_frame_idx] - click_x) / max(np.median(np.diff(x_vis_1d)), 1e-300),
+            (ys[click_frame_idx] - click_y) / max(np.median(np.diff(y_vis_1d)), 1e-300),
+        )),
+        "max_jump_px": float(max_jump),
+        "branch_switches": int(branch_switches),
+        "obstacle_intersections": int(obstacle_intersections),
+        "terminated_at_frame": terminated_at,
+        "frame_indices": finite_idx,
+        "times_monotonic": bool(np.all(np.diff(finite_idx) > 0)),
+    }
+    return xs, ys, scores, diagnostics
+
+
 def snap_to_localmax_near_point(Gamma, x_vis_1d, y_vis_1d, xc, yc, radius=12):
     """
     Snap a continuous point (xc, yc) to the strongest local maximum in a window.
