@@ -81,6 +81,7 @@ class PotentialBuilder:
                     thickness=barrier_thickness,
                     half_height=float(_require_attr(cfg, "simple_barrier_half_height")),
                     V_barrier=V_barrier,
+                    W_strength=float(getattr(cfg, "simple_barrier_absorption", 0.0)),
                     barrier_smooth=BARRIER_SMOOTH,
                     sharp_smooth_width=barrier_sharp_smooth,
                     edge_mode=barrier_edge_mode,

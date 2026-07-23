@@ -22,6 +22,7 @@ class SimpleBarrier:
         half_height: float,
         V_barrier: float,
         barrier_smooth: float,
+        W_strength: float = 0.0,
         sharp_smooth_width: float | None = None,
         edge_mode: str = "smooth",
         name: str = "simple_barrier",
@@ -31,6 +32,7 @@ class SimpleBarrier:
         self.thickness = float(thickness)
         self.half_height = float(half_height)
         self.V_barrier = float(V_barrier)
+        self.W_strength = float(W_strength)
         self.barrier_smooth = float(barrier_smooth)
         self.sharp_smooth_width = (
             float(sharp_smooth_width)
@@ -44,6 +46,7 @@ class SimpleBarrier:
             self.edge_mode in self.VALID_EDGE_MODES,
             f"Invalid edge_mode={self.edge_mode!r}, expected one of {self.VALID_EDGE_MODES}",
         )
+        _assert(self.W_strength >= 0.0, f"W_strength must be >= 0, got {self.W_strength}")
 
     def _build_hard(self, X: np.ndarray, wall_mask: np.ndarray) -> np.ndarray:
         V_real = np.zeros_like(X, dtype=float)
@@ -81,7 +84,17 @@ class SimpleBarrier:
         else:
             raise AssertionError(f"Unhandled edge_mode={self.edge_mode!r}")
 
-        W = np.zeros_like(X, dtype=float)
+        # Optional absorbing obstacle.  It uses the same geometry as the real
+        # barrier, so the forward -iW and backward adjoint +iW remain paired.
+        if self.edge_mode == "hard":
+            W = np.zeros_like(X, dtype=float)
+            W[wall_mask] = self.W_strength
+        else:
+            smooth_width = self.sharp_smooth_width if self.edge_mode == "sharp_smooth" else self.barrier_smooth
+            dx_edge = np.abs(X - self.center_x) - (self.thickness / 2.0)
+            dy_edge = np.abs(Y - self.center_y) - self.half_height
+            W = self.W_strength / (1.0 + np.exp(dx_edge / smooth_width))
+            W *= 1.0 / (1.0 + np.exp(dy_edge / smooth_width))
 
         _assert_finite_array(V_real, "simple.V_real")
         _assert_finite_array(W, "simple.W")

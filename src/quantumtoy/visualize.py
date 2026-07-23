@@ -53,6 +53,7 @@ RENDER_MODES = (
     "entanglement_det",
     "backward_density",
     "overlap_density",
+    "realized_trf",
     "posthoc_base_rho",
     "posthoc_selected_rho",
     "phase",
@@ -855,6 +856,7 @@ def build_render_image(
     latent_intensity_current: np.ndarray | None,
     backward_density_current: np.ndarray | None,
     overlap_density_current: np.ndarray | None,
+    realized_trf: np.ndarray | None,
     posthoc_base_rho: np.ndarray | None,
     posthoc_selected_rho: np.ndarray | None,
     state_vis_frames: np.ndarray | None,
@@ -976,6 +978,17 @@ def build_render_image(
         img = gamma_display(
             overlap_density_current[i],
             vref=_default_frame_vref(overlap_density_current),
+            gamma=cfg.GAMMA,
+            use_fixed_scale=False,
+        )
+        return img, None, "density"
+
+    if mode == "realized_trf":
+        if realized_trf is None:
+            raise RuntimeError("realized_trf render mode requires saved rho_realized")
+        img = gamma_display(
+            realized_trf[i],
+            vref=_default_frame_vref(realized_trf),
             gamma=cfg.GAMMA,
             use_fixed_scale=False,
         )
@@ -1306,6 +1319,7 @@ def main():
     latent_intensity_saved = bundle.get("latent_intensity_frames", None)
     norms = bundle["norms"]
     phi_tau_frames = bundle["phi_tau_frames"]
+    realized_trf_saved = bundle.get("rho_realized", None)
 
     x_click = bundle["x_click"]
     y_click = bundle["y_click"]
@@ -1548,6 +1562,7 @@ def main():
             latent_intensity_current=latent_intensity_init,
             backward_density_current=backward_density_init,
             overlap_density_current=overlap_density_init,
+            realized_trf=realized_trf_saved,
             posthoc_base_rho=posthoc_base_rho_saved,
             posthoc_selected_rho=posthoc_selected_rho_saved,
             state_vis_frames=state_vis_frames,
@@ -1840,6 +1855,7 @@ def main():
             latent_intensity_current=latent_intensity_current[0],
             backward_density_current=backward_density_current[0],
             overlap_density_current=overlap_density_current[0],
+            realized_trf=realized_trf_saved,
             posthoc_base_rho=posthoc_base_rho_saved,
             posthoc_selected_rho=posthoc_selected_rho_saved,
             state_vis_frames=state_vis_frames,

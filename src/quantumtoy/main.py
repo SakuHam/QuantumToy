@@ -654,11 +654,16 @@ class ClickResolution:
     y_click_a: float | None = None
     x_click_b: float | None = None
     y_click_b: float | None = None
+    conditional_bin_probability: float | None = None
+    conditional_upper_probability: float | None = None
+    conditional_lower_probability: float | None = None
+    conditional_sampling_used: bool = False
 
 
 @dataclass
 class SigmaProducts:
     rho_init: np.ndarray
+    rho_realized: np.ndarray
     Emix_init: np.ndarray
     ridge_x_init: np.ndarray
     ridge_y_init: np.ndarray
@@ -1199,8 +1204,12 @@ class QuantumSimulationApp:
             iy, ix = np.unravel_index(idx_flat, selected_density.shape)
             return float(setup.grid.X_vis[iy, ix]), float(setup.grid.Y_vis[iy, ix])
 
+        # This model has one shared 2-D coordinate, not two independent
+        # particle coordinates.  Sample one spatial part of the joint event;
+        # two independent draws here would manufacture an unphysical product
+        # of marginals and could disagree with the selected joint channel.
         x_a, y_a = sample_detector_position(2701)
-        x_b, y_b = sample_detector_position(3701)
+        x_b, y_b = x_a, y_a
 
         positions = {
             "a_sign": channel[0],
@@ -1323,6 +1332,164 @@ class QuantumSimulationApp:
             x_click_b=None if coincidence_positions is None else coincidence_positions["x_click_b"],
             y_click_b=None if coincidence_positions is None else coincidence_positions["y_click_b"],
         )
+
+    def refine_click_from_conditional_trf(
+        self,
+        setup: SimulationSetup,
+        forward: ForwardRunResult,
+        click: ClickResolution,
+        phi_tau_frames: np.ndarray,
+    ) -> ClickResolution:
+        """Sample one detector event from the obstacle-aware conditional TRF field.
+
+        The first click is only a proposal needed to construct a backward
+        effect.  This second pass samples a single (joint-channel, detector
+        cell) outcome from |psi|^2*Emix and becomes the source of truth for the
+        rebuilt backward field, markers, ridges, and saved metadata.
+        """
+        cfg, grid, theory = setup.cfg, setup.grid, setup.theory
+        if not bool(getattr(cfg, "TRF_CONDITIONAL_CLICK_SAMPLING", True)):
+            return click
+        if str(getattr(cfg, "CLICK_MODE", "born")) != "born":
+            print("[CLICK/TRF] conditional resampling skipped for forced click")
+            return click
+        if forward.state_vis_frames is None:
+            return click
+
+        sigma_t = float(getattr(cfg, "TRF_SIGMA_T", 0.25))
+        emix = build_Emix_from_phi_tau(
+            phi_tau_frames=phi_tau_frames,
+            times=forward.times,
+            t_det=click.t_det,
+            sigmaT=sigma_t,
+            tau_step=cfg.save_every * cfg.dt,
+            K_JITTER=int(cfg.K_JITTER),
+        )
+        rho_trf = make_rho(
+            frames_psi=forward.state_vis_frames,
+            Emix=emix,
+            Emix_density=None,
+            dx=grid.dx,
+            dy=grid.dy,
+            mode="amplitude_overlap",
+            blend_alpha=0.0,
+        )
+        screen = np.asarray(setup.potential.screen_mask_vis, dtype=bool)
+        w = np.where(screen, np.maximum(rho_trf[click.idx_det], 0.0), 0.0)
+        total = float(np.sum(w))
+        if not np.isfinite(total) or total <= 0.0:
+            raise RuntimeError("Conditional TRF detector distribution has zero mass")
+        p_cell = w / total
+
+        upper = float(np.sum(p_cell[screen & (grid.Y_vis >= 0.0)]))
+        lower = float(np.sum(p_cell[screen & (grid.Y_vis < 0.0)]))
+        rng = np.random.default_rng(int(cfg.CLICK_RNG_SEED) + 4701)
+
+        channel = click.coincidence_channel
+        channel_probs = click.coincidence_channel_probs
+        if hasattr(theory, "channel_densities"):
+            channels = ("++", "+-", "-+", "--")
+            dens = theory.channel_densities(forward.state_vis_frames[click.idx_det])
+            total_forward = np.maximum(sum(np.asarray(dens[ch], dtype=float) for ch in channels), 1e-300)
+            joint = np.stack(
+                [p_cell * np.maximum(np.asarray(dens[ch], dtype=float), 0.0) / total_forward for ch in channels]
+            )
+            joint_sum = float(np.sum(joint))
+            if joint_sum > 0.0:
+                joint /= joint_sum
+                flat = int(rng.choice(joint.size, p=joint.ravel()))
+                ch_i, iy, ix = np.unravel_index(flat, joint.shape)
+                channel = channels[ch_i]
+                channel_probs = {ch: float(np.sum(joint[i])) for i, ch in enumerate(channels)}
+                sampled_prob = float(joint[ch_i, iy, ix])
+            else:
+                flat = int(rng.choice(p_cell.size, p=p_cell.ravel()))
+                iy, ix = np.unravel_index(flat, p_cell.shape)
+                sampled_prob = float(p_cell[iy, ix])
+        else:
+            flat = int(rng.choice(p_cell.size, p=p_cell.ravel()))
+            iy, ix = np.unravel_index(flat, p_cell.shape)
+            sampled_prob = float(p_cell[iy, ix])
+
+        x = float(grid.X_vis[iy, ix])
+        y = float(grid.Y_vis[iy, ix])
+        tol = float(getattr(cfg, "TRF_CLICK_ZERO_PROB_TOL", 1e-12))
+        if sampled_prob <= tol:
+            print(f"[CLICK/TRF WARNING] sampled near-zero conditional bin p={sampled_prob:.3e}")
+        print(
+            f"[CLICK/TRF] joint={channel} bin_p={sampled_prob:.6e} "
+            f"P_upper={upper:.6f} P_lower={lower:.6f} click=({x:.3f}, {y:.3f})"
+        )
+        click.x_click = x
+        click.y_click = y
+        click.coincidence_channel = channel
+        click.coincidence_channel_probs = channel_probs
+        # One shared spatial coordinate: both readout markers refer to the
+        # same sampled joint detector cell, never independent marginals.
+        if channel is not None:
+            click.x_click_a = click.x_click_b = x
+            click.y_click_a = click.y_click_b = y
+        click.conditional_bin_probability = sampled_prob
+        click.conditional_upper_probability = upper
+        click.conditional_lower_probability = lower
+        click.conditional_sampling_used = True
+        return click
+
+    def print_conditioning_diagnostics(self, setup, forward, click, phi_tau_frames):
+        components = list(getattr(setup.potential, "components", ()) or ())
+        names = [str(getattr(c, "name", "unknown")) for c in components]
+        obstacles = [n for n in names if n != "downstream_double_slit"]
+        post_slit_obstacles = list(obstacles)
+        if "simple_barrier" in post_slit_obstacles and (
+            float(getattr(setup.cfg, "simple_barrier_center_x", 0.0))
+            <= float(setup.cfg.barrier_center_x)
+        ):
+            post_slit_obstacles.remove("simple_barrier")
+        print(
+            "[TRF GEOMETRY] shared forward/backward PotentialSpec=yes "
+            f"components={names} post_slit_obstacles={post_slit_obstacles}"
+        )
+        if click.conditional_sampling_used and forward.state_vis_frames is not None:
+            emix = build_Emix_from_phi_tau(
+                phi_tau_frames=phi_tau_frames, times=forward.times, t_det=click.t_det,
+                sigmaT=float(getattr(setup.cfg, "TRF_SIGMA_T", 0.25)),
+                tau_step=setup.cfg.save_every * setup.cfg.dt,
+                K_JITTER=int(setup.cfg.K_JITTER),
+            )
+            rho = make_rho(
+                frames_psi=forward.state_vis_frames, Emix=emix, Emix_density=None,
+                dx=setup.grid.dx, dy=setup.grid.dy, mode="amplitude_overlap", blend_alpha=0.0,
+            )[click.idx_det]
+            w = np.where(setup.potential.screen_mask_vis, np.maximum(rho, 0.0), 0.0)
+            total = float(np.sum(w))
+            iy, ix = np.unravel_index(
+                int(np.argmin((setup.grid.X_vis - click.x_click) ** 2 + (setup.grid.Y_vis - click.y_click) ** 2)),
+                w.shape,
+            )
+            final_p = 0.0 if total <= 0.0 else float(w[iy, ix] / total)
+            print(f"[TRF FINAL EVENT] conditional_bin_probability={final_p:.6e}")
+            if final_p <= float(getattr(setup.cfg, "TRF_CLICK_ZERO_PROB_TOL", 1e-12)):
+                print("[TRF CLICK WARNING] final event has near-zero conditional detector probability")
+        if not hasattr(setup.theory, "channel_densities"):
+            return
+        phi = phi_tau_frames[-1]
+        try:
+            dens = setup.theory.channel_densities(phi)
+            upper_mask = np.asarray(setup.potential.slit1_mask, dtype=bool)
+            lower_mask = np.asarray(setup.potential.slit2_mask, dtype=bool)
+            if upper_mask.shape != next(iter(dens.values())).shape:
+                upper_mask = crop_state_visible(upper_mask, setup.grid)
+                lower_mask = crop_state_visible(lower_mask, setup.grid)
+            values = {
+                ch: {
+                    "upper": float(np.sum(dens[ch][upper_mask]) * setup.grid.dx * setup.grid.dy),
+                    "lower": float(np.sum(dens[ch][lower_mask]) * setup.grid.dx * setup.grid.dy),
+                }
+                for ch in ("++", "+-", "-+", "--")
+            }
+            print(f"[TRF CHANNEL OVERLAP] backward/slits={values}")
+        except Exception as exc:
+            print(f"[TRF CHANNEL OVERLAP] unavailable: {exc}")
 
     # --------------------------------------------------------
     # Fast batch-only exit
@@ -1492,7 +1659,7 @@ class QuantumSimulationApp:
         v_est = estimate_group_velocity(cfg, theory)
         L_gap = cfg.screen_center_x - cfg.barrier_center_x
         t_gap = L_gap / (abs(v_est) + 1e-12)
-        sigma_init = 0.60 * t_gap
+        sigma_init = float(getattr(cfg, "TRF_SIGMA_T", 0.60 * t_gap))
 
         (
             rho_init,
@@ -1506,6 +1673,18 @@ class QuantumSimulationApp:
             uy_init,
             div_v_init,
         ) = build_all_for_sigma(sigma_init)
+
+        # Keep frames_density as the unmodified quantum wave.  This is a
+        # separate, display-only realized TRF object with stronger effect-field
+        # localization; it never feeds back into forward evolution.
+        emix_density = make_emix_density(Emix_init)
+        realized_gamma = float(getattr(cfg, "TRF_REALIZED_EMIX_GAMMA", 2.0))
+        rho_realized = np.maximum(forward.frames_density, 0.0) * np.power(
+            np.maximum(emix_density, 0.0), realized_gamma
+        )
+        masses = np.sum(rho_realized, axis=(1, 2)) * grid.dx * grid.dy
+        valid = masses > 0.0
+        rho_realized[valid] /= masses[valid, None, None]
 
         if cfg.USE_FIXED_DISPLAY_SCALE:
             vref = float(np.quantile(rho_init, cfg.DISPLAY_Q))
@@ -1522,6 +1701,7 @@ class QuantumSimulationApp:
 
         return SigmaProducts(
             rho_init=rho_init,
+            rho_realized=rho_realized,
             Emix_init=Emix_init,
             ridge_x_init=ridge_x_init,
             ridge_y_init=ridge_y_init,
@@ -1563,7 +1743,11 @@ class QuantumSimulationApp:
         sigma_init = 0.60 * t_gap
 
         sigmaT_env = os.environ.get("POSTHOC_TRF_SIGMAT", None)
-        sigmaT_value = float(sigmaT_env) if sigmaT_env is not None else sigma_init
+        sigmaT_value = (
+            float(sigmaT_env)
+            if sigmaT_env is not None
+            else float(getattr(cfg, "TRF_SIGMA_T", sigma_init))
+        )
 
         base_field_mode = str(getattr(cfg, "POSTHOC_TRF_BASE_FIELD", "density")).lower()
         rho_mode = getattr(cfg, "POSTHOC_TRF_RHO_MODE", "density_product_oldstyle")
@@ -1984,9 +2168,14 @@ class QuantumSimulationApp:
             t_det=click.t_det,
             idx_det=click.idx_det,
             detector_clicked=forward.detector_clicked,
+            rho_realized=sigma_products.rho_realized,
             coincidence_click_info={
                 "channel": click.coincidence_channel,
                 "channel_probs": click.coincidence_channel_probs,
+                "conditional_bin_probability": click.conditional_bin_probability,
+                "conditional_upper_probability": click.conditional_upper_probability,
+                "conditional_lower_probability": click.conditional_lower_probability,
+                "conditional_sampling_used": click.conditional_sampling_used,
                 "x_click_a": click.x_click_a,
                 "y_click_a": click.y_click_a,
                 "x_click_b": click.x_click_b,
@@ -2057,7 +2246,74 @@ class QuantumSimulationApp:
             print_every_frames=20,
         )
 
+        preliminary_event = (
+            click.x_click,
+            click.y_click,
+            click.coincidence_channel,
+            click.x_click_a,
+            click.y_click_a,
+            click.x_click_b,
+            click.y_click_b,
+        )
+        click = self.refine_click_from_conditional_trf(setup, forward, click, phi_tau_frames)
+        final_event = (
+            click.x_click,
+            click.y_click,
+            click.coincidence_channel,
+            click.x_click_a,
+            click.y_click_a,
+            click.x_click_b,
+            click.y_click_b,
+        )
+        if final_event != preliminary_event:
+            print("[CLICK/TRF] rebuilding backward library for the sampled conditional event")
+            phi_tau_frames = build_backward_library(
+                theory=setup.theory,
+                grid=setup.grid,
+                times=forward.times,
+                tau_step=self.cfg.save_every * self.cfg.dt,
+                x_click=click.x_click,
+                y_click=click.y_click,
+                sigma_click=self.cfg.sigma_click,
+                save_every=self.cfg.save_every,
+                click_channel=click.coincidence_channel,
+                x_click_a=click.x_click_a,
+                y_click_a=click.y_click_a,
+                x_click_b=click.x_click_b,
+                y_click_b=click.y_click_b,
+                print_every_frames=20,
+            )
+
+        # A click-conditioned effect is inherently self-consistent rather than
+        # available before any proposal exists.  A small deterministic
+        # fixed-point iteration removes stale proposal weights; every changed
+        # event is followed by an exact rebuild for that event.
+        for _pass in range(1, max(1, int(getattr(self.cfg, "TRF_CONDITIONAL_CLICK_PASSES", 2)))):
+            previous = (
+                click.x_click, click.y_click, click.coincidence_channel,
+                click.x_click_a, click.y_click_a, click.x_click_b, click.y_click_b,
+            )
+            click = self.refine_click_from_conditional_trf(setup, forward, click, phi_tau_frames)
+            current = (
+                click.x_click, click.y_click, click.coincidence_channel,
+                click.x_click_a, click.y_click_a, click.x_click_b, click.y_click_b,
+            )
+            if current == previous:
+                break
+            print(f"[CLICK/TRF] conditioning pass {_pass + 1}: rebuilding event effect")
+            phi_tau_frames = build_backward_library(
+                theory=setup.theory, grid=setup.grid, times=forward.times,
+                tau_step=self.cfg.save_every * self.cfg.dt,
+                x_click=click.x_click, y_click=click.y_click,
+                sigma_click=self.cfg.sigma_click, save_every=self.cfg.save_every,
+                click_channel=click.coincidence_channel,
+                x_click_a=click.x_click_a, y_click_a=click.y_click_a,
+                x_click_b=click.x_click_b, y_click_b=click.y_click_b,
+                print_every_frames=20,
+            )
+
         print("Backward library done.")
+        self.print_conditioning_diagnostics(setup, forward, click, phi_tau_frames)
 
         v_est_diag = estimate_group_velocity(self.cfg, setup.theory)
         L_gap_diag = self.cfg.screen_center_x - self.cfg.barrier_center_x
@@ -2095,6 +2351,14 @@ class QuantumSimulationApp:
         )
 
         self.print_posthoc_summary(posthoc)
+        if posthoc.result is not None:
+            click_side = "upper" if click.y_click >= 0.0 else "lower"
+            ridge_side = posthoc.result.chosen_side
+            print(
+                f"[TRF EVENT CONSISTENCY] joint={click.coincidence_channel} "
+                f"click_channel={click_side} ridge_channel={ridge_side} "
+                f"match={ridge_side == click_side}"
+            )
 
         if posthoc.result is not None and posthoc.base_rho is not None:
             print(

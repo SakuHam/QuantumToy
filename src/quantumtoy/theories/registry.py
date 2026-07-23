@@ -223,6 +223,8 @@ def build_theory(cfg, grid, potential):
             potential=potential,
             m_mass=m_mass,
             hbar=hbar,
+            ent_tube_sigma_px=float(getattr(cfg, "ENT_TUBE_SIGMA_PX", 5.0)),
+            ent_time_ramp_steps=int(getattr(cfg, "ENT_TIME_RAMP_STEPS", 600)),
         )
 
     elif theory_name in {

@@ -131,10 +131,11 @@ class AppConfig:
     BARRIER_SMOOTH = 0.20
     BARRIER_SHARP_SMOOTH = 0.04
 
-    USE_SIMPLE_BARRIER = False
-    simple_barrier_center_x = 2.0
-    simple_barrier_center_y = 2.0
-    simple_barrier_half_height = 1.2
+    USE_SIMPLE_BARRIER: bool = False
+    simple_barrier_center_x: float = 2.0
+    simple_barrier_center_y: float = 2.0
+    simple_barrier_half_height: float = 1.2
+    simple_barrier_absorption: float = 0.0
 
     USE_MICRO_BLACK_HOLE = False
     micro_bh_center_x = 4.0
@@ -322,9 +323,17 @@ class AppConfig:
     CLICK_Y_MIN: float | None = None
     CLICK_Y_MAX: float | None = None
 
-    sigma_click: float = 0.4
-    K_JITTER: int = 13
+    sigma_click: float = 0.25
+    K_JITTER: int = 7
     CLICK_RNG_SEED: int = 123456
+    TRF_CONDITIONAL_CLICK_SAMPLING: bool = True
+    TRF_CONDITIONAL_CLICK_PASSES: int = 2
+    TRF_CLICK_ZERO_PROB_TOL: float = 1e-12
+    TRF_SIGMA_T: float = 0.25
+    TRF_REALIZED_EMIX_GAMMA: float = 2.0
+    POSTHOC_WL_TUBE_SIGMA_PX: float = 5.0
+    ENT_TUBE_SIGMA_PX: float = 5.0
+    ENT_TIME_RAMP_STEPS: int = 600
 
     # ============================================================
     # Thick-front optimized / branch competition

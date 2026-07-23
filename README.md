@@ -145,6 +145,18 @@ config.py
 Example configuration:
 THEORY_NAME = "schrodinger_measurement"
 
+Dataclass settings can also be supplied as environment variables. For example,
+this adds a finite post-slit obstacle to the upper channel while running the
+entanglement theory:
+
+```bash
+cd src/quantumtoy && THEORY_NAME=thick_front_entanglement USE_SIMPLE_BARRIER=true SIMPLE_BARRIER_CENTER_X=2 SIMPLE_BARRIER_CENTER_Y=2 SIMPLE_BARRIER_HALF_HEIGHT=1.2 python3 main.py
+```
+
+Set `SIMPLE_BARRIER_ABSORPTION` above zero for an absorbing obstacle. TRF runs
+save the full forward density separately from `rho_realized`; visualize the
+latter with `visualize.py output.npz --render-mode realized_trf`.
+
 ---
 
 | Theory                 | Equation                 | State       | Collapse   | Relativistic |

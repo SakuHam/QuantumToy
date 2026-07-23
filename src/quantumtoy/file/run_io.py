@@ -130,6 +130,7 @@ def save_run_bundle(
     t_det,
     idx_det,
     detector_clicked,
+    rho_realized,
     sigma_init,
     ridge_x_init,
     ridge_y_init,
@@ -178,6 +179,7 @@ def save_run_bundle(
         t_det=np.array([t_det], dtype=float),
         idx_det=np.array([idx_det], dtype=int),
         detector_clicked=np.array([bool(detector_clicked)], dtype=bool),
+        rho_realized=np.asarray(rho_realized, dtype=float),
         coincidence_click_info_json=np.array([_pack_optional_json_dict(coincidence_click_info)], dtype=object),
 
         sigma_init=np.array([sigma_init], dtype=float),
@@ -303,6 +305,7 @@ def load_run_bundle(npz_path: str | Path, meta_path: str | Path | None = None) -
         "t_det": float(raw["t_det"][0]),
         "idx_det": int(raw["idx_det"][0]),
         "detector_clicked": bool(raw["detector_clicked"][0]),
+        "rho_realized": raw["rho_realized"] if "rho_realized" in raw.files else None,
         "coincidence_click_info": coincidence_click_info,
 
         "sigma_init": float(raw["sigma_init"][0]),

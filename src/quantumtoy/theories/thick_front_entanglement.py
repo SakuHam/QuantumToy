@@ -2353,6 +2353,11 @@ class ThickFrontEntanglementTheory(SchrodingerTheory):
                     dtype=float,
                 )
 
+            # Use the same startup ramp as channel selection.  At early times
+            # the analyzer outputs are not spatially distinguishable, so a
+            # full-strength winner-take-all competition is not meaningful.
+            local_strength = local_strength * self._entanglement_time_ramp()
+
             comp_dt = np.clip(
                 local_strength * competition_raw * dt,
                 0.0,
