@@ -398,6 +398,7 @@ def compute_detector_anchored_ridge(
 
     max_jump = 0.0
     branch_switches = 0
+    rejected_branch_switches = 0
     obstacle_intersections = 0
     previous_forward_step = None
     terminated_at = None
@@ -462,7 +463,7 @@ def compute_detector_anchored_ridge(
             break
         iy, ix, dpx, forward_step, direction_cos = best
         if previous_forward_step is not None and direction_cos < branch_switch_cos:
-            branch_switches += 1
+            rejected_branch_switches += 1
             terminated_at = i
             break
         if any(blocked[cy, cx] for cy, cx in _segment_cells(iy, ix, iy_next, ix_next)):
@@ -487,6 +488,7 @@ def compute_detector_anchored_ridge(
         )),
         "max_jump_px": float(max_jump),
         "branch_switches": int(branch_switches),
+        "rejected_branch_switches": int(rejected_branch_switches),
         "obstacle_intersections": int(obstacle_intersections),
         "terminated_at_frame": terminated_at,
         "frame_indices": finite_idx,

@@ -12,6 +12,9 @@ from theories.schrodinger import SchrodingerTheory
 
 
 class _Theory:
+    def initialize_channel_click_state(self, *args, **kwargs):
+        return None
+
     def channel_densities(self, state):
         # All joint weight is in +-, retaining a genuine joint outcome rather
         # than constructing it from separately sampled marginals.
@@ -21,6 +24,29 @@ class _Theory:
 
 
 class ConditionalClickTests(unittest.TestCase):
+    def test_two_arm_positions_are_separate_conditional_draws(self):
+        class BimodalTheory(_Theory):
+            def channel_densities(self, state):
+                z = np.zeros(state.shape[:2], dtype=float)
+                pm = z.copy()
+                pm[0, 0] = pm[1, 1] = 1.0
+                return {"++": z, "+-": pm, "-+": z, "--": z}
+
+        cfg = AppConfig(CLICK_RNG_SEED=0)
+        x = np.array([[10.0, 10.0], [10.0, 10.0]])
+        y = np.array([[1.0, 1.0], [-1.0, -1.0]])
+        grid = SimpleNamespace(X_vis=x, Y_vis=y, dx=1.0, dy=1.0)
+        potential = SimpleNamespace(screen_mask_vis=np.ones((2, 2), dtype=bool))
+        state = np.zeros((2, 2, 2, 2), dtype=np.complex128)
+        frames = np.stack([state])
+        forward = SimpleNamespace(state_vis_frames=frames)
+        setup = SimulationSetup(cfg, grid, potential, BimodalTheory(), None, False)
+        channel, _, positions = QuantumSimulationApp(cfg).resolve_coincidence_channel(
+            setup, forward, 0, 10.0, 0.0
+        )
+        self.assertEqual(channel, "+-")
+        self.assertNotEqual(positions["y_click_a"], positions["y_click_b"])
+
     def test_detector_anchored_track_is_local_ordered_and_obstacle_safe(self):
         nt, ny, nx = 6, 9, 9
         density = np.zeros((nt, ny, nx), dtype=float)

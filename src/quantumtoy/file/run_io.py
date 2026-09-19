@@ -125,6 +125,8 @@ def save_run_bundle(
     norms,
     screen_int,
     phi_tau_frames,
+    phi_tau_frames_a,
+    phi_tau_frames_b,
     x_click,
     y_click,
     t_det,
@@ -173,6 +175,8 @@ def save_run_bundle(
         norms=np.asarray(norms),
         screen_int=np.asarray(screen_int),
         phi_tau_frames=np.asarray(phi_tau_frames),
+        phi_tau_frames_a=pack_optional_array(phi_tau_frames_a),
+        phi_tau_frames_b=pack_optional_array(phi_tau_frames_b),
 
         x_click=np.array([x_click], dtype=float),
         y_click=np.array([y_click], dtype=float),
@@ -299,6 +303,10 @@ def load_run_bundle(npz_path: str | Path, meta_path: str | Path | None = None) -
         "norms": raw["norms"],
         "screen_int": raw["screen_int"],
         "phi_tau_frames": raw["phi_tau_frames"],
+        "phi_tau_frames_a": unpack_optional_array(raw["phi_tau_frames_a"])
+        if "phi_tau_frames_a" in raw.files else None,
+        "phi_tau_frames_b": unpack_optional_array(raw["phi_tau_frames_b"])
+        if "phi_tau_frames_b" in raw.files else None,
 
         "x_click": float(raw["x_click"][0]),
         "y_click": float(raw["y_click"][0]),

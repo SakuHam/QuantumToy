@@ -1,9 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
+import matplotlib
+
+# Matplotlib can silently select Agg in a plain Python process even when a
+# desktop display and Qt are available. Prefer an interactive backend for the
+# animation UI, while respecting explicit MPLBACKEND=Agg snapshot/CI runs.
+if (
+    "MPLBACKEND" not in os.environ
+    and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+):
+    try:
+        import PyQt6  # noqa: F401
+        matplotlib.use("qtagg", force=True)
+    except ImportError:
+        pass
+
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Slider
@@ -59,6 +75,7 @@ RENDER_MODES = (
     "backward_density",
     "overlap_density",
     "realized_trf",
+    "realized_trf_arms",
     "posthoc_base_rho",
     "posthoc_selected_rho",
     "phase",
@@ -875,6 +892,7 @@ def build_render_image(
     backward_density_current: np.ndarray | None,
     overlap_density_current: np.ndarray | None,
     realized_trf: np.ndarray | None,
+    realized_arms: dict[str, np.ndarray] | None,
     posthoc_base_rho: np.ndarray | None,
     posthoc_selected_rho: np.ndarray | None,
     state_vis_frames: np.ndarray | None,
@@ -1011,6 +1029,19 @@ def build_render_image(
             use_fixed_scale=False,
         )
         return img, None, "density"
+
+    if mode == "realized_trf_arms":
+        if not realized_arms or "A" not in realized_arms or "B" not in realized_arms:
+            raise RuntimeError("realized_trf_arms requires separate saved/rebuilt A and B effects")
+        a = np.maximum(realized_arms["A"][i], 0.0)
+        b = np.maximum(realized_arms["B"][i], 0.0)
+        an = a / max(float(np.max(a)), 1e-300)
+        bn = b / max(float(np.max(b)), 1e-300)
+        rgb = np.zeros(a.shape + (3,), dtype=float)
+        rgb[..., 0] = 0.25 * np.maximum(an, bn)
+        rgb[..., 1] = an
+        rgb[..., 2] = bn
+        return np.clip(rgb, 0.0, 1.0), np.maximum(an, bn), "rgb"
 
     if mode == "posthoc_base_rho":
         if posthoc_base_rho is None:
@@ -1349,6 +1380,8 @@ def main():
     latent_intensity_saved = bundle.get("latent_intensity_frames", None)
     norms = bundle["norms"]
     phi_tau_frames = bundle["phi_tau_frames"]
+    phi_tau_frames_a = bundle.get("phi_tau_frames_a")
+    phi_tau_frames_b = bundle.get("phi_tau_frames_b")
     realized_trf_saved = bundle.get("rho_realized", None)
 
     x_click = bundle["x_click"]
@@ -1464,6 +1497,20 @@ def main():
             tau_step=tau_step,
             K_JITTER=cfg.K_JITTER,
         )
+        Emix_a = (
+            build_Emix_from_phi_tau(
+                phi_tau_frames=phi_tau_frames_a, times=times, t_det=t_det,
+                sigmaT=sigmaT, tau_step=tau_step, K_JITTER=cfg.K_JITTER,
+            )
+            if phi_tau_frames_a is not None else None
+        )
+        Emix_b = (
+            build_Emix_from_phi_tau(
+                phi_tau_frames=phi_tau_frames_b, times=times, t_det=t_det,
+                sigmaT=sigmaT, tau_step=tau_step, K_JITTER=cfg.K_JITTER,
+            )
+            if phi_tau_frames_b is not None else None
+        )
 
         if not cfg.SAVE_COMPLEX_STATE_FRAMES or state_vis_frames is None:
             raise RuntimeError("Visualization of sigma-dependent overlap requires complex state frames")
@@ -1513,7 +1560,45 @@ def main():
         forward_density = forward_density_frames_from_state_vis(state_vis_frames)
         emix_density = make_emix_density(Emix)
         realized_gamma = float(getattr(cfg, "TRF_REALIZED_EMIX_GAMMA", 2.0))
-        realized = forward_density * np.power(np.maximum(emix_density, 0.0), realized_gamma)
+        effect_power = np.power(np.maximum(emix_density, 0.0), realized_gamma)
+        effect_power_a = (
+            np.power(np.maximum(make_emix_density(Emix_a), 0.0), realized_gamma)
+            if Emix_a is not None else effect_power
+        )
+        effect_power_b = (
+            np.power(np.maximum(make_emix_density(Emix_b), 0.0), realized_gamma)
+            if Emix_b is not None else effect_power
+        )
+        arm_realized = {}
+        selected_joint = (
+            None if coincidence_click_info is None else coincidence_click_info.get("channel")
+        )
+        if selected_joint is not None and hasattr(theory, "channel_densities"):
+            arm_a = np.zeros_like(forward_density)
+            arm_b = np.zeros_like(forward_density)
+            for fi in range(Nt):
+                channel_density = theory.channel_densities(state_vis_frames[fi])
+                arm_a[fi] = sum(
+                    np.asarray(channel_density[ch], dtype=float)
+                    for ch in ("++", "+-", "-+", "--")
+                    if ch[0] == selected_joint[0]
+                )
+                arm_b[fi] = sum(
+                    np.asarray(channel_density[ch], dtype=float)
+                    for ch in ("++", "+-", "-+", "--")
+                    if ch[1] == selected_joint[1]
+                )
+            arm_realized["A"] = arm_a * effect_power_a
+            arm_realized["B"] = arm_b * effect_power_b
+            realized = arm_realized["A"] + arm_realized["B"]
+        else:
+            realized = forward_density * effect_power
+            arm_realized["event"] = realized
+
+        for arm_field in arm_realized.values():
+            arm_mass = np.sum(arm_field, axis=(1, 2)) * grid.dx * grid.dy
+            arm_valid = arm_mass > 0.0
+            arm_field[arm_valid] /= arm_mass[arm_valid, None, None]
         realized_mass = np.sum(realized, axis=(1, 2)) * grid.dx * grid.dy
         valid_mass = realized_mass > 0.0
         realized[valid_mass] /= realized_mass[valid_mass, None, None]
@@ -1539,8 +1624,9 @@ def main():
         tracks_x, tracks_y, tracks_s, track_diags = [], [], [], []
         if click_frame_idx is not None:
             for label_name, endpoint in zip(labels, endpoints):
+                track_field = arm_realized.get(label_name, realized)
                 tx, ty, ts, diag = compute_detector_anchored_ridge(
-                    density_frames=realized,
+                    density_frames=track_field,
                     x_vis_1d=grid.x_vis_1d,
                     y_vis_1d=grid.y_vis_1d,
                     click_frame_idx=click_frame_idx,
@@ -1566,6 +1652,7 @@ def main():
                     f"endpoint_distance_px={diag['endpoint_distance_px']:.3f} "
                     f"max_jump_px={diag['max_jump_px']:.3f} "
                     f"branch_switches={diag['branch_switches']} "
+                    f"rejected_branch_switches={diag['rejected_branch_switches']} "
                     f"obstacle_intersections={diag['obstacle_intersections']} "
                     f"times_monotonic={diag['times_monotonic']}"
                 )
@@ -1603,7 +1690,7 @@ def main():
             print(f"[ALIGN] skipped in visualize: {e}")
 
         return (
-            rho, realized, Emix, rx, ry, rs,
+            rho, realized, arm_realized, Emix, rx, ry, rs,
             ridge_top_x, ridge_top_y, ridge_top_s, track_diags,
             cos_th, speed, ux, uy, div_v,
         )
@@ -1618,6 +1705,7 @@ def main():
     (
         rho_init,
         realized_init,
+        realized_arms_init,
         emix_init,
         ridge_x_init,
         ridge_y_init,
@@ -1678,6 +1766,7 @@ def main():
             backward_density_current=backward_density_init,
             overlap_density_current=overlap_density_init,
             realized_trf=realized_init,
+            realized_arms=realized_arms_init,
             posthoc_base_rho=posthoc_base_rho_saved,
             posthoc_selected_rho=posthoc_selected_rho_saved,
             state_vis_frames=state_vis_frames,
@@ -1934,6 +2023,7 @@ def main():
 
     rho_current = [rho_init]
     realized_trf_current = [realized_init]
+    realized_arms_current = [realized_arms_init]
     emix_current = [emix_init]
     ridge_complex_current = [ridge_complex_init]
 
@@ -1979,6 +2069,7 @@ def main():
             backward_density_current=backward_density_current[0],
             overlap_density_current=overlap_density_current[0],
             realized_trf=realized_trf_current[0],
+            realized_arms=realized_arms_current[0],
             posthoc_base_rho=posthoc_base_rho_saved,
             posthoc_selected_rho=posthoc_selected_rho_saved,
             state_vis_frames=state_vis_frames,
@@ -2294,6 +2385,7 @@ def main():
         (
             rho_new,
             realized_new,
+            realized_arms_new,
             emix_new,
             rx,
             ry,
@@ -2311,6 +2403,7 @@ def main():
 
         rho_current[0] = rho_new
         realized_trf_current[0] = realized_new
+        realized_arms_current[0] = realized_arms_new
         emix_current[0] = emix_new
         ridge_complex_current[0] = make_overlap_complex_frames(state_vis_frames, emix_new)
 

@@ -166,6 +166,15 @@ python3 visualize.py output.npz --split-view --left-mode density --right-mode re
 Use `--snapshot-frames 0 180 260 333 --snapshot-dir trf_snapshots` to save
 reproducible frame comparisons without joining unrelated ridge segments.
 
+Entanglement runs use a configurable low-rank two-arm approximation
+(`TRF_TWO_ARM_APPROX=true`). One joint spin outcome is sampled first; A and B
+positions then come from the corresponding conditional sign marginals. New run
+bundles store separate A/B backward effects. Display them in green/cyan with:
+
+```bash
+python3 visualize.py output.npz --render-mode realized_trf_arms
+```
+
 ---
 
 | Theory                 | Equation                 | State       | Collapse   | Relativistic |

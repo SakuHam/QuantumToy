@@ -333,6 +333,7 @@ class AppConfig:
     CLICK_RNG_SEED: int = 123456
     TRF_CONDITIONAL_CLICK_SAMPLING: bool = True
     TRF_CONDITIONAL_CLICK_PASSES: int = 2
+    TRF_TWO_ARM_APPROX: bool = True
     TRF_CLICK_ZERO_PROB_TOL: float = 1e-12
     TRF_SIGMA_T: float = 0.25
     TRF_REALIZED_EMIX_GAMMA: float = 2.0

@@ -1192,24 +1192,30 @@ class QuantumSimulationApp:
         rng = np.random.default_rng(int(getattr(setup.cfg, "CLICK_RNG_SEED", 123456)) + 1701)
         channel = str(rng.choice(np.asarray(channels), p=weights))
 
-        selected_density = np.maximum(np.asarray(dens[channel], dtype=float), 0.0) * detector_gate
+        a_channels = [ch for ch in channels if ch[0] == channel[0]]
+        b_channels = [ch for ch in channels if ch[1] == channel[1]]
+        selected_density_a = sum(
+            np.maximum(np.asarray(dens[ch], dtype=float), 0.0) for ch in a_channels
+        ) * detector_gate
+        selected_density_b = sum(
+            np.maximum(np.asarray(dens[ch], dtype=float), 0.0) for ch in b_channels
+        ) * detector_gate
 
-        def sample_detector_position(seed_offset: int) -> tuple[float, float]:
-            p = selected_density.ravel().astype(float)
+        def sample_detector_position(field: np.ndarray, seed_offset: int) -> tuple[float, float]:
+            p = field.ravel().astype(float)
             s = float(np.sum(p))
             if s <= 0.0:
                 return float(x_click), float(y_click)
             local_rng = np.random.default_rng(int(getattr(setup.cfg, "CLICK_RNG_SEED", 123456)) + seed_offset)
             idx_flat = int(local_rng.choice(p.size, p=p / s))
-            iy, ix = np.unravel_index(idx_flat, selected_density.shape)
+            iy, ix = np.unravel_index(idx_flat, field.shape)
             return float(setup.grid.X_vis[iy, ix]), float(setup.grid.Y_vis[iy, ix])
 
-        # This model has one shared 2-D coordinate, not two independent
-        # particle coordinates.  Sample one spatial part of the joint event;
-        # two independent draws here would manufacture an unphysical product
-        # of marginals and could disagree with the selected joint channel.
-        x_a, y_a = sample_detector_position(2701)
-        x_b, y_b = x_a, y_a
+        # Low-rank two-arm approximation: choose the joint spin outcome once,
+        # then sample A and B from their corresponding conditional sign
+        # marginals. These are not independently sampled unconditional fields.
+        x_a, y_a = sample_detector_position(selected_density_a, 2701)
+        x_b, y_b = sample_detector_position(selected_density_b, 3701)
 
         positions = {
             "a_sign": channel[0],
@@ -1413,6 +1419,29 @@ class QuantumSimulationApp:
 
         x = float(grid.X_vis[iy, ix])
         y = float(grid.Y_vis[iy, ix])
+        x_a = x_b = x
+        y_a = y_b = y
+        if channel is not None and hasattr(theory, "channel_densities"):
+            a_field = sum(
+                np.maximum(np.asarray(dens[ch], dtype=float), 0.0)
+                for ch in channels if ch[0] == channel[0]
+            )
+            b_field = sum(
+                np.maximum(np.asarray(dens[ch], dtype=float), 0.0)
+                for ch in channels if ch[1] == channel[1]
+            )
+
+            def sample_arm(field):
+                arm_w = p_cell * field / total_forward
+                arm_sum = float(np.sum(arm_w))
+                if arm_sum <= 0.0:
+                    return x, y
+                arm_flat = int(rng.choice(arm_w.size, p=(arm_w / arm_sum).ravel()))
+                arm_iy, arm_ix = np.unravel_index(arm_flat, arm_w.shape)
+                return float(grid.X_vis[arm_iy, arm_ix]), float(grid.Y_vis[arm_iy, arm_ix])
+
+            x_a, y_a = sample_arm(a_field)
+            x_b, y_b = sample_arm(b_field)
         tol = float(getattr(cfg, "TRF_CLICK_ZERO_PROB_TOL", 1e-12))
         if sampled_prob <= tol:
             print(f"[CLICK/TRF WARNING] sampled near-zero conditional bin p={sampled_prob:.3e}")
@@ -1424,11 +1453,11 @@ class QuantumSimulationApp:
         click.y_click = y
         click.coincidence_channel = channel
         click.coincidence_channel_probs = channel_probs
-        # One shared spatial coordinate: both readout markers refer to the
-        # same sampled joint detector cell, never independent marginals.
+        # The joint channel is shared, while A/B positions come from separate
+        # conditional sign marginals in the low-rank two-arm approximation.
         if channel is not None:
-            click.x_click_a = click.x_click_b = x
-            click.y_click_a = click.y_click_b = y
+            click.x_click_a, click.y_click_a = x_a, y_a
+            click.x_click_b, click.y_click_b = x_b, y_b
         click.conditional_bin_probability = sampled_prob
         click.conditional_upper_probability = upper
         click.conditional_lower_probability = lower
@@ -2099,6 +2128,8 @@ class QuantumSimulationApp:
         forward: ForwardRunResult,
         click: ClickResolution,
         phi_tau_frames: np.ndarray,
+        phi_tau_frames_a: np.ndarray | None,
+        phi_tau_frames_b: np.ndarray | None,
         sigma_products: SigmaProducts,
         bohm: BohmianResult,
         posthoc: PosthocProducts,
@@ -2163,6 +2194,8 @@ class QuantumSimulationApp:
             norms=forward.norms,
             screen_int=click.screen_int,
             phi_tau_frames=phi_tau_frames,
+            phi_tau_frames_a=phi_tau_frames_a,
+            phi_tau_frames_b=phi_tau_frames_b,
             x_click=click.x_click,
             y_click=click.y_click,
             t_det=click.t_det,
@@ -2313,6 +2346,29 @@ class QuantumSimulationApp:
             )
 
         print("Backward library done.")
+        phi_tau_frames_a = None
+        phi_tau_frames_b = None
+        if (
+            click.coincidence_channel is not None
+            and click.x_click_a is not None and click.y_click_a is not None
+            and click.x_click_b is not None and click.y_click_b is not None
+            and bool(getattr(self.cfg, "TRF_TWO_ARM_APPROX", True))
+        ):
+            print("[BWD/TWO-ARM] computing separate A and B conditional effects")
+            phi_tau_frames_a = build_backward_library(
+                theory=setup.theory, grid=setup.grid, times=forward.times,
+                tau_step=self.cfg.save_every * self.cfg.dt,
+                x_click=click.x_click_a, y_click=click.y_click_a,
+                sigma_click=self.cfg.sigma_click, save_every=self.cfg.save_every,
+                click_channel=click.coincidence_channel, print_every_frames=40,
+            )
+            phi_tau_frames_b = build_backward_library(
+                theory=setup.theory, grid=setup.grid, times=forward.times,
+                tau_step=self.cfg.save_every * self.cfg.dt,
+                x_click=click.x_click_b, y_click=click.y_click_b,
+                sigma_click=self.cfg.sigma_click, save_every=self.cfg.save_every,
+                click_channel=click.coincidence_channel, print_every_frames=40,
+            )
         self.print_conditioning_diagnostics(setup, forward, click, phi_tau_frames)
 
         v_est_diag = estimate_group_velocity(self.cfg, setup.theory)
@@ -2392,6 +2448,8 @@ class QuantumSimulationApp:
             forward=forward,
             click=click,
             phi_tau_frames=phi_tau_frames,
+            phi_tau_frames_a=phi_tau_frames_a,
+            phi_tau_frames_b=phi_tau_frames_b,
             sigma_products=sigma_products,
             bohm=bohm,
             posthoc=posthoc,
