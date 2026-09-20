@@ -205,6 +205,21 @@ baseline-corrected grid recovery, and per-run, fixed, and absent normalization
 rules. See
 [paper/spatial_response_study.md](paper/spatial_response_study.md).
 
+Run the separate operator-level spatial reference with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_spatial_effect_measurement.py \
+  --json-output spatial_effect_measurement.json
+```
+
+This compact benchmark represents every y-bin and no-click outcome as a full
+POVM effect, mixes the backward effects with declared half-Gaussian weights,
+and checks positivity, completeness, phase invariance, the exact `lambda=0`
+null, and numerical convergence. Its assumptions and comparison with the
+exploratory measurement-guided response are in
+[paper/spatial_effect_instrument.md](paper/spatial_effect_instrument.md).
+
 ---
 
 ## Running a simulation

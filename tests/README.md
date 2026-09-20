@@ -24,6 +24,7 @@ Front*, version 0.2, September 2026.
 | `test_trf_response.py` | Independent temporal-response width recovery, X-record versus Z-eraser ensembles, half-rise convention, universal-alpha and free-width fits, and held-out coupling predictions. |
 | `test_measurement_guided_kernel.py` | Physical-time sigma wiring into the spatial measurement-guided theory; canonical and compatibility registry names; time-step, stride, and truncation-horizon convergence. |
 | `test_spatial_response.py` | Complete pre-click detector/no-click laws, exact worldline null, fixed and absent normalization controls, baseline-corrected cross-grid width recovery, and spatial `dt`, grid, and horizon convergence. |
+| `test_spatial_effect_measurement.py` | Full spatial POVM positivity and completeness; complex operator coherences and global-phase invariance; complete no-click laws; exact `lambda=0` null; injected-width recovery; temporal quadrature, grid, and horizon convergence. |
 | `test_trf_conditioning.py` | Existing simulation sampling, trajectory geometry, and propagation regressions. |
 
 ## Reference API
@@ -36,6 +37,13 @@ instrument, channel, and final outcome set must each be complete. Missing
 outcomes are errors, not a reason to renormalize a surviving subensemble.
 The implementation supports finite square operators, including the two-state
 reference and the two-party singlet tests.
+
+`analysis.spatial_effect_measurement` extends the same operator discipline to
+a compact 2D lattice. It constructs a complete terminal detector POVM,
+unitarily propagates its full complex effects backward, and mixes unresolved
+delays arithmetically. The faster profile path evaluates the identical effects
+in the forward picture; a regression test requires both calculations to
+agree.
 
 `mix_record_effects` mixes one record's effects using declared prior weights.
 All effects must refer to the same earlier time and the weights must be
