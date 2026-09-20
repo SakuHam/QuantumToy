@@ -241,6 +241,39 @@ PYTHONPATH=src/quantumtoy python \
 The resulting likelihood surface and Fisher matrix expose the strong local
 `sigma_T`–`lambda` tradeoff that a fixed-coupling width profile hides.
 
+Select and combine a second detector location under the same total shot
+budget with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_spatial_effect_two_setting_profile.py
+```
+
+The default Fisher design retains the first detector at `x=1.5`, selects a
+second detector at `x=0`, and writes a one-versus-two-setting comparison plot
+and JSON report.
+
+Run the locked unitary double-slit robustness study with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_spatial_effect_double_slit_study.py
+```
+
+Render its interference evolution and complete detector law with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/visualize_spatial_effect_measurement.py \
+  --geometry double_slit \
+  --output-mp4 spatial_effect_double_slit.mp4 \
+  --snapshot-output spatial_effect_double_slit.png
+```
+
+The study fixes the barrier, slits, packet, propagation clock, and detector
+before profiling. It also tests the earlier free-geometry detector pair as a
+held-out design rather than retuning it after seeing the double-slit result.
+
 ---
 
 ## Running a simulation

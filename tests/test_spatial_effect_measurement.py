@@ -1,6 +1,7 @@
 """Operator-level tests for the compact spatial detector instrument."""
 
 import unittest
+from dataclasses import replace
 
 import numpy as np
 from numpy.testing import assert_allclose
@@ -8,12 +9,16 @@ from numpy.testing import assert_allclose
 from analysis.spatial_effect_measurement import (
     SpatialEffectExperiment,
     build_spatial_effect_instrument,
+    double_slit_effect_experiment,
     fit_spatial_effect_joint_response,
+    fit_spatial_effect_multi_response,
     fit_spatial_effect_response,
     initial_spatial_state,
     run_spatial_effect_measurement,
+    select_complementary_detector_setting,
     spatial_effect_evolution,
     spatial_effect_fisher_information,
+    spatial_effect_potential,
     spatial_effect_convergence,
     temporal_delays_and_weights,
     terminal_detector_effects,
@@ -136,6 +141,95 @@ class SpatialEffectMeasurementTests(unittest.TestCase):
         self.assertEqual(fisher[0, 1], 0)
         self.assertGreater(fisher[1, 1], 0)
 
+    def test_second_detector_setting_reduces_parameter_degeneracy(self):
+        design = select_complementary_detector_setting(
+            self.experiment, 0.6, 1.0, [-0.5, 0.0, 0.5, 1.0, 2.5])
+        self.assertEqual(design.best_detector_x, 0.0)
+        best = int(np.argmax(design.combined_determinant))
+        self.assertLess(design.combined_condition_number[best], 20)
+        self.assertLess(
+            abs(design.combined_parameter_correlation[best]), 0.7)
+
+        second = replace(
+            self.experiment, detector_x=design.best_detector_x)
+        sigmas = [0.4, 0.6, 0.8]
+        lambdas = [0.5, 1.0, 1.5]
+        combined = fit_spatial_effect_multi_response(
+            [self.experiment, second], 0.6, 1.0, sigmas, lambdas,
+            shots=100_000, shot_fractions=[0.5, 0.5],
+            setting_names=["far", "near"])
+        single = fit_spatial_effect_joint_response(
+            self.experiment, 0.6, 1.0, sigmas, lambdas,
+            shots=100_000)
+        self.assertEqual(combined.best_sigma_t, 0.6)
+        self.assertEqual(combined.best_lambda_strength, 1.0)
+        self.assertEqual(combined.expected_deviance[1, 1], 0)
+        self.assertEqual(combined.setting_names, ("far", "near"))
+        self.assertLess(
+            combined.fisher_condition_number,
+            single.fisher_condition_number / 20)
+        self.assertLess(
+            abs(combined.local_parameter_correlation),
+            abs(single.local_parameter_correlation))
+        self.assertTrue(np.all(
+            combined.local_standard_errors < single.local_standard_errors))
+
+    def test_double_slit_propagation_is_unitary_and_changes_detector_law(self):
+        experiment = double_slit_effect_experiment(nx=32, ny=32)
+        potential = spatial_effect_potential(experiment)
+        self.assertTrue(np.isrealobj(potential))
+        self.assertGreater(float(np.max(potential)), 20)
+        barrier_column = int(np.argmax(np.max(potential, axis=0)))
+        center_row = experiment.ny // 2
+        slit_row = int(round(
+            experiment.ny / 2
+            + experiment.slit_offset / (experiment.ly / experiment.ny)))
+        self.assertLess(
+            potential[slit_row, barrier_column],
+            0.1 * potential[center_row, barrier_column])
+
+        evolution = spatial_effect_evolution(experiment, 0.2)
+        assert_allclose(
+            np.sum(evolution.densities, axis=(1, 2)), 1, atol=2e-12)
+        slit_run = run_spatial_effect_measurement(experiment, 0.2)
+        free_run = run_spatial_effect_measurement(
+            replace(experiment, potential_mode="free"), 0.2)
+        total_variation = 0.5 * np.sum(np.abs(
+            slit_run.probabilities - free_run.probabilities))
+        self.assertGreater(total_variation, 0.1)
+        self.assertAlmostEqual(float(np.sum(slit_run.probabilities)), 1)
+
+    def test_double_slit_full_effects_match_forward_probabilities(self):
+        experiment = replace(
+            double_slit_effect_experiment(nx=8, ny=8),
+            y_bins=4, reference_time=0.1, delay_step=0.1,
+            propagation_step=0.02, horizon_sigmas=2)
+        instrument = build_spatial_effect_instrument(experiment, 0.15)
+        dimension = experiment.nx * experiment.ny
+        assert_allclose(
+            np.sum(instrument.effects, axis=0), np.eye(dimension), atol=1e-13)
+        for effect in instrument.effects:
+            self.assertGreaterEqual(np.linalg.eigvalsh(effect).min(), -2e-13)
+        state = initial_spatial_state(experiment)
+        operator_probabilities = np.einsum(
+            "i,rij,j->r", state.conj(), instrument.effects, state).real
+        run = run_spatial_effect_measurement(experiment, 0.15)
+        assert_allclose(run.probabilities, operator_probabilities, atol=3e-14)
+
+    def test_double_slit_profile_and_numerics_converge(self):
+        experiment = double_slit_effect_experiment()
+        profile = fit_spatial_effect_joint_response(
+            experiment, 0.2, 1.0, [0.15, 0.2, 0.25], [0.5, 1.0, 1.5])
+        self.assertEqual(profile.best_sigma_t, 0.2)
+        self.assertEqual(profile.best_lambda_strength, 1.0)
+        convergence = spatial_effect_convergence(experiment, 0.2)
+        self.assertLess(convergence["delay_step_half"], 5e-5)
+        self.assertLess(convergence["grid_5_over_4"], 5e-4)
+        self.assertLess(convergence["horizon_plus_one_sigma"], 5e-6)
+        self.assertLess(convergence["propagation_step_half"], 1e-4)
+        self.assertLess(convergence["slit_edge_half_sensitivity"], 0.005)
+        self.assertLess(convergence["x_box_5_over_4"], 1e-4)
+
     def test_delay_grid_spatial_grid_and_horizon_converge(self):
         convergence = spatial_effect_convergence(self.experiment, 0.6)
         self.assertLess(convergence["delay_step_half"], 5e-5)
@@ -155,6 +249,9 @@ class SpatialEffectMeasurementTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fit_spatial_effect_joint_response(
                 self.experiment, 0.6, 1, [0.4, 0.6], [1])
+        with self.assertRaises(ValueError):
+            fit_spatial_effect_multi_response(
+                [self.experiment], 0.6, 1, [0.4, 0.6], [0.5, 1])
 
 
 if __name__ == "__main__":

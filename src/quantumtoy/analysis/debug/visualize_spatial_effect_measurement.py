@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import matplotlib
@@ -22,7 +23,9 @@ if str(ROOT_DIR) not in sys.path:
 
 from analysis.spatial_effect_measurement import (
     SpatialEffectExperiment,
+    double_slit_effect_experiment,
     spatial_effect_evolution,
+    spatial_effect_potential,
 )
 
 
@@ -36,7 +39,8 @@ def build_animation(experiment, sigma_t, lambda_strength, fps):
     evolution = spatial_effect_evolution(
         experiment, sigma_t, lambda_strength=lambda_strength)
     plt.style.use("dark_background")
-    figure = plt.figure(figsize=(13.5, 7.2), constrained_layout=True)
+    figure_height = 9.0 if experiment.y_bins > 8 else 7.2
+    figure = plt.figure(figsize=(13.5, figure_height), constrained_layout=True)
     grid = figure.add_gridspec(2, 2, width_ratios=(1.42, 1), height_ratios=(1, 1))
     density_ax = figure.add_subplot(grid[:, 0])
     kernel_ax = figure.add_subplot(grid[0, 1])
@@ -56,6 +60,12 @@ def build_animation(experiment, sigma_t, lambda_strength, fps):
     )
     colorbar = figure.colorbar(density_image, ax=density_ax, fraction=0.046)
     colorbar.set_label(r"Probability density $|\psi_\tau(x,y)|^2$")
+    potential = spatial_effect_potential(experiment)
+    if np.max(potential) > 0:
+        density_ax.contour(
+            potential, levels=[0.1 * float(np.max(potential))],
+            origin="lower", extent=extent, colors=["#f8fafc"],
+            linewidths=[1.2], alpha=0.9)
     density_ax.axvspan(
         experiment.detector_x - experiment.detector_width,
         experiment.detector_x + experiment.detector_width,
@@ -108,6 +118,8 @@ def build_animation(experiment, sigma_t, lambda_strength, fps):
         xlabel="Probability", yticks=positions,
         yticklabels=[label.replace("_", " ") for label in evolution.labels],
         xlim=(0, 1.0))
+    if experiment.y_bins > 8:
+        probability_ax.tick_params(axis="y", labelsize=7)
     probability_ax.invert_yaxis()
     probability_ax.grid(axis="x", alpha=0.18)
     probability_ax.legend(
@@ -118,8 +130,10 @@ def build_animation(experiment, sigma_t, lambda_strength, fps):
         color="white", fontsize=9)
         for position in positions]
 
+    geometry_name = ("double-slit" if experiment.potential_mode == "double_slit"
+                     else "free-particle")
     figure.suptitle(
-        "Complete spatial effect instrument: temporal alternatives and detector law",
+        f"Complete {geometry_name} effect instrument: temporal alternatives and detector law",
         fontsize=16, fontweight="bold")
     figure.text(
         0.5, 0.006,
@@ -133,6 +147,7 @@ def build_animation(experiment, sigma_t, lambda_strength, fps):
         delay = evolution.delays[frame_index]
         weight = evolution.delay_weights[frame_index]
         delay_text.set_text(
+            f"$t={experiment.reference_time + delay:.2f}$, "
             f"$\\tau={delay:.2f}$\n"
             f"component norm $={np.sum(evolution.densities[frame_index]):.6f}$")
         current_weight.set_data([delay], [weight])
@@ -168,12 +183,14 @@ def build_animation(experiment, sigma_t, lambda_strength, fps):
 def main():
     parser = argparse.ArgumentParser(
         description="Animate the complete spatial effect-instrument mixture")
-    parser.add_argument("--sigma", type=float, default=0.6)
+    parser.add_argument(
+        "--geometry", choices=["free", "double_slit"], default="free")
+    parser.add_argument("--sigma", type=float)
     parser.add_argument("--lambda-strength", type=float, default=1.0)
-    parser.add_argument("--nx", type=int, default=64)
-    parser.add_argument("--ny", type=int, default=64)
-    parser.add_argument("--delay-step", type=float, default=0.1)
-    parser.add_argument("--horizon-sigmas", type=float, default=4.0)
+    parser.add_argument("--nx", type=int)
+    parser.add_argument("--ny", type=int)
+    parser.add_argument("--delay-step", type=float)
+    parser.add_argument("--horizon-sigmas", type=float)
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--dpi", type=int, default=140)
     parser.add_argument(
@@ -184,11 +201,25 @@ def main():
     if args.fps <= 0 or args.dpi <= 0:
         parser.error("--fps and --dpi must be positive")
 
-    experiment = SpatialEffectExperiment(
-        nx=args.nx, ny=args.ny, delay_step=args.delay_step,
-        horizon_sigmas=args.horizon_sigmas)
+    if args.geometry == "double_slit":
+        experiment = double_slit_effect_experiment(
+            nx=80 if args.nx is None else args.nx,
+            ny=80 if args.ny is None else args.ny)
+        sigma_t = 0.2 if args.sigma is None else args.sigma
+    else:
+        experiment = SpatialEffectExperiment(
+            nx=64 if args.nx is None else args.nx,
+            ny=64 if args.ny is None else args.ny)
+        sigma_t = 0.6 if args.sigma is None else args.sigma
+    updates = {}
+    if args.delay_step is not None:
+        updates["delay_step"] = args.delay_step
+    if args.horizon_sigmas is not None:
+        updates["horizon_sigmas"] = args.horizon_sigmas
+    if updates:
+        experiment = replace(experiment, **updates)
     figure, animation, evolution = build_animation(
-        experiment, args.sigma, args.lambda_strength, args.fps)
+        experiment, sigma_t, args.lambda_strength, args.fps)
 
     args.output_mp4.parent.mkdir(parents=True, exist_ok=True)
     print(f"[SAVE] animation -> {args.output_mp4}")
