@@ -126,6 +126,87 @@ brew install ffmpeg
 
 ---
 
+## Tests
+
+Run the reference and simulation regressions from the repository root, using
+the Python environment in which the project dependencies are installed:
+
+```bash
+PYTHONPATH=src/quantumtoy MPLBACKEND=Agg python -m unittest discover -s tests -v
+```
+
+The TRF-IT v0.2 tests cover operational quantum probabilities, effect mixtures,
+and the sampled stabilization clock. See [tests/README.md](tests/README.md)
+for their scope and interpretation.
+
+Run the declared two-path weak-probe and physical-record experiment with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_record_environment.py \
+  --g 0 0.5 1 2 --duration 8 --dt 0.02
+```
+
+Add `--json-output record_environment.json` to save the complete joint record
+tables and time series. The model and fixed record conventions are described
+in [paper/record_environment_model.md](paper/record_environment_model.md).
+
+Run the shared-threshold sensitivity, time-sampling convergence, and minimal
+TRF-candidate identifiability study with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_trf_calibration_study.py \
+  --json-output trf_calibration_study.json
+```
+
+The candidate law and parameter policy are declared in
+[paper/trf_minimal_candidate.md](paper/trf_minimal_candidate.md).
+
+Optimize the measurement allocation and run full multinomial recovery tests
+for both the quantum null and a declared TRF signal with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_trf_inference_study.py \
+  --repetitions 30 --json-output trf_inference_study.json
+```
+
+Measure the temporal response width on a separate quantum-eraser ensemble and
+test `alpha=sigma_T/tau_stab` at held-out couplings with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_trf_response_study.py \
+  --json-output trf_response_study.json
+```
+
+The measurement and held-out prediction protocol is described in
+[paper/trf_response_measurement.md](paper/trf_response_measurement.md).
+
+`TRF_SIGMA_T` is the single physical-time width used by both the post hoc TRF
+products and `THEORY_NAME=thick_front_measurement_guided`. The latter samples
+its backward half-Gaussian at
+`TRF_MEASUREMENT_BACK_STRIDE * dt` and truncates it at
+`TRF_MEASUREMENT_BACK_HORIZON_SIGMAS * TRF_SIGMA_T`. The old registry name
+`thick_front_measured_guided` remains available as a compatibility alias.
+
+Profile the same width from the full pre-click detector distribution of a
+compact spatial double-slit run with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_measurement_guided_response_study.py \
+  --json-output spatial_response_study.json
+```
+
+This also checks the exact zero-strength worldline null, raw and
+baseline-corrected grid recovery, and per-run, fixed, and absent normalization
+rules. See
+[paper/spatial_response_study.md](paper/spatial_response_study.md).
+
+---
+
 ## Running a simulation
 
 Run the main simulation:

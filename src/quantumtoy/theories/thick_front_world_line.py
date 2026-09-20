@@ -971,6 +971,7 @@ class ThickFrontWorldLineTheory(ThickFrontOptimizedTheory):
             "front_diag_weight": float(self.front_diag_weight),
             "front_phase_relax_strength": float(self.front_phase_relax_strength),
             "front_gain_blur_sigma": float(self.front_gain_blur_sigma),
+            "front_neighbor_sigma": self.front_neighbor_sigma,
 
             "front_branch_competition_strength": float(self.front_branch_competition_strength),
             "front_branch_competition_power": float(self.front_branch_competition_power),

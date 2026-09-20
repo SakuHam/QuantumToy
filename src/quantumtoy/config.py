@@ -336,6 +336,9 @@ class AppConfig:
     TRF_TWO_ARM_APPROX: bool = True
     TRF_CLICK_ZERO_PROB_TOL: float = 1e-12
     TRF_SIGMA_T: float = 0.25
+    TRF_MEASUREMENT_RESPONSE_STRENGTH: float = 1.0
+    TRF_MEASUREMENT_BACK_STRIDE: int = 2
+    TRF_MEASUREMENT_BACK_HORIZON_SIGMAS: float = 4.0
     TRF_REALIZED_EMIX_GAMMA: float = 2.0
     POSTHOC_WL_TUBE_SIGMA_PX: float = 5.0
     ENT_TUBE_SIGMA_PX: float = 5.0
@@ -436,6 +439,10 @@ class AppConfig:
             "dt",
             "n_steps",
             "save_every",
+            "TRF_SIGMA_T",
+            "TRF_MEASUREMENT_RESPONSE_STRENGTH",
+            "TRF_MEASUREMENT_BACK_STRIDE",
+            "TRF_MEASUREMENT_BACK_HORIZON_SIGMAS",
         ]
         print("[CFG] effective values:")
         for k in keys:

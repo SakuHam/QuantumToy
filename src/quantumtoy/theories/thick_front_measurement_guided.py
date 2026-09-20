@@ -65,6 +65,10 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
 
     measurement_guidance_enabled: bool = True
 
+    # Dimensionless strength of every smooth measurement-specific correction.
+    # Zero is an exact ThickFrontWorldLineTheory state-evolution null.
+    measurement_response_strength: float = 1.0
+
     # Detector gate in x where the effect seed is built
     measurement_detector_center_x: float = 10.0
     measurement_detector_width: float = 1.5
@@ -82,15 +86,17 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
     # If True, stop refreshing entirely once worldline bias is initialized
     measurement_stop_after_worldline_init: bool = True
 
-    # Backward horizon: number of stored samples in the effect mix
-    measurement_back_steps: int = 12
-
-    # Each sample is separated by this many adjoint steps.
-    # Larger stride = much cheaper, thicker/coarser backward horizon.
+    # Each stored sample is separated by this many adjoint steps. A larger
+    # stride reduces mixing work while preserving the physical horizon.
     measurement_back_stride: int = 2
 
-    # Gaussian width in backward-time *steps* of the sampled library
-    measurement_sigma_tau_steps: float = 4.0
+    # Gaussian width in the same physical time units as step_forward(dt).
+    measurement_sigma_t: float = 0.25
+
+    # Truncate the backward half-Gaussian at this many sigma_T. The effective
+    # number of samples is derived from dt and stride, so changing the
+    # integrator step does not change the physical kernel.
+    measurement_back_horizon_sigmas: float = 4.0
 
     # Optional blur of the mixed effect field itself
     measurement_effect_blur_sigma: float = 0.75
@@ -101,6 +107,12 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
     # If True, normalize effect_mix and overlap_score by frame max
     measurement_normalize_effect: bool = True
     measurement_normalize_overlap: bool = True
+
+    # Optional externally calibrated denominators. When omitted, the legacy
+    # behavior divides by the current field maximum. When supplied, the same
+    # fixed scale can be reused for every candidate sigma_T.
+    measurement_effect_normalization_scale: float | None = None
+    measurement_overlap_normalization_scale: float | None = None
 
     # Skip expensive effect refresh if detector region has almost no mass
     measurement_min_detector_mass: float = 1e-8
@@ -160,22 +172,34 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
 
         if self.measurement_detector_width <= 0.0:
             raise ValueError("measurement_detector_width must be > 0")
+        if (self.measurement_response_strength < 0.0
+                or not np.isfinite(self.measurement_response_strength)):
+            raise ValueError("measurement_response_strength must be finite and >= 0")
         if self.measurement_seed_y_sigma < 0.0:
             raise ValueError("measurement_seed_y_sigma must be >= 0")
         if self.measurement_refresh_every_n_steps_pre_init < 1:
             raise ValueError("measurement_refresh_every_n_steps_pre_init must be >= 1")
         if self.measurement_refresh_every_n_steps_post_init < 1:
             raise ValueError("measurement_refresh_every_n_steps_post_init must be >= 1")
-        if self.measurement_back_steps < 1:
-            raise ValueError("measurement_back_steps must be >= 1")
         if self.measurement_back_stride < 1:
             raise ValueError("measurement_back_stride must be >= 1")
-        if self.measurement_sigma_tau_steps <= 0.0:
-            raise ValueError("measurement_sigma_tau_steps must be > 0")
+        if self.measurement_sigma_t <= 0.0 or not np.isfinite(self.measurement_sigma_t):
+            raise ValueError("measurement_sigma_t must be finite and > 0")
+        if (self.measurement_back_horizon_sigmas <= 0.0
+                or not np.isfinite(self.measurement_back_horizon_sigmas)):
+            raise ValueError("measurement_back_horizon_sigmas must be finite and > 0")
         if self.measurement_effect_blur_sigma < 0.0:
             raise ValueError("measurement_effect_blur_sigma must be >= 0")
         if self.measurement_overlap_blur_sigma < 0.0:
             raise ValueError("measurement_overlap_blur_sigma must be >= 0")
+        for value, name in [
+            (self.measurement_effect_normalization_scale,
+             "measurement_effect_normalization_scale"),
+            (self.measurement_overlap_normalization_scale,
+             "measurement_overlap_normalization_scale"),
+        ]:
+            if value is not None and (not np.isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be None or finite and > 0")
         if self.measurement_min_detector_mass < 0.0:
             raise ValueError("measurement_min_detector_mass must be >= 0")
         if self.measurement_gain_strength < 0.0:
@@ -272,39 +296,40 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
         _assert_complex_array_2d(seed, "measurement_seed")
         return seed
 
-    def _gaussian_time_weights(
-        self,
-        n: int,
-        sigma_steps: float,
-        stride: int,
-    ) -> np.ndarray:
-        idx = np.arange(n, dtype=float) * float(stride)
-        w = np.exp(-0.5 * (idx / float(sigma_steps)) ** 2)
+    def _measurement_time_kernel(self, dt: float) -> tuple[np.ndarray, np.ndarray]:
+        """Return physical backward delays and normalized half-Gaussian weights."""
+        dt = _assert_positive_scalar(dt, "dt")
+        sample_dt = float(self.measurement_back_stride) * dt
+        horizon = float(self.measurement_back_horizon_sigmas) * float(
+            self.measurement_sigma_t
+        )
+        n = max(2, int(np.ceil(horizon / sample_dt)) + 1)
+        delays = np.arange(n, dtype=float) * sample_dt
+        w = np.exp(-0.5 * (delays / float(self.measurement_sigma_t)) ** 2)
+        # These are quadrature weights for a continuous time mixture. Endpoint
+        # half-weights remove the special extra mass that a raw discrete sum
+        # would otherwise assign to zero delay.
+        w[[0, -1]] *= 0.5
         s = float(np.sum(w))
-        if s > 0.0:
-            w /= s
-        return w.astype(float)
+        _assert(s > 0.0 and np.isfinite(s), "measurement kernel has invalid mass")
+        w /= s
+        return delays, w.astype(float)
 
     def _build_measurement_effect_mix(self, psi_ref: np.ndarray, dt: float) -> np.ndarray:
         """
         Build a mixed backward effect field from a detector-seed.
 
-        Optimized:
-          - uses only measurement_back_steps samples
-          - each sample is separated by measurement_back_stride adjoint steps
+        Each sample is separated by measurement_back_stride adjoint steps. The
+        number of samples is derived from the declared physical width and
+        truncation horizon.
         """
         _assert_complex_array_2d(psi_ref, "psi_ref")
-        _assert_finite_scalar(dt, "dt")
+        _assert_positive_scalar(dt, "dt")
 
         phi = self._build_measurement_seed_from_state(psi_ref)
-        n_back = int(self.measurement_back_steps)
         stride = int(self.measurement_back_stride)
-
-        weights = self._gaussian_time_weights(
-            n=n_back,
-            sigma_steps=float(self.measurement_sigma_tau_steps),
-            stride=stride,
-        )
+        _, weights = self._measurement_time_kernel(dt)
+        n_back = len(weights)
 
         effect_mix = np.zeros((self.grid.Ny, self.grid.Nx), dtype=float)
 
@@ -324,9 +349,11 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
             )
 
         if self.measurement_normalize_effect:
-            emax = float(np.max(effect_mix))
-            if emax > self.front_eps:
-                effect_mix = effect_mix / emax
+            effect_scale = self.measurement_effect_normalization_scale
+            if effect_scale is None:
+                effect_scale = float(np.max(effect_mix))
+            if effect_scale > self.front_eps:
+                effect_mix = effect_mix / float(effect_scale)
 
         _assert_real_array_2d(effect_mix, "effect_mix")
         return effect_mix.astype(float)
@@ -371,9 +398,11 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
             )
 
         if self.measurement_normalize_overlap:
-            omax = float(np.max(overlap))
-            if omax > self.front_eps:
-                overlap = overlap / omax
+            overlap_scale = self.measurement_overlap_normalization_scale
+            if overlap_scale is None:
+                overlap_scale = float(np.max(overlap))
+            if overlap_scale > self.front_eps:
+                overlap = overlap / float(overlap_scale)
 
         _assert_real_array_2d(overlap, "overlap_score")
         return overlap.astype(float)
@@ -692,7 +721,11 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
         # --------------------------------------------
         measurement_gain_dt = None
         if overlap_score is not None and self.measurement_gain_strength > 0.0:
-            measurement_gain = float(self.measurement_gain_strength) * overlap_score
+            measurement_gain = (
+                float(self.measurement_response_strength)
+                * float(self.measurement_gain_strength)
+                * overlap_score
+            )
             measurement_gain_dt = np.clip(
                 measurement_gain * dt,
                 -self.front_clip,
@@ -822,7 +855,11 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
             and competition_raw is not None
             and self.measurement_competition_relief_strength > 0.0
         ):
-            measurement_comp_factor = 1.0 - float(self.measurement_competition_relief_strength) * overlap_score
+            measurement_comp_factor = 1.0 - (
+                float(self.measurement_response_strength)
+                * float(self.measurement_competition_relief_strength)
+                * overlap_score
+            )
             measurement_comp_factor = np.clip(
                 measurement_comp_factor,
                 float(self.measurement_competition_factor_min),
@@ -980,6 +1017,31 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
         _assert_complex_array_2d(state, "state")
         _assert_finite_scalar(dt, "dt")
 
+        if (not self.measurement_guidance_enabled
+                or self.measurement_response_strength == 0.0):
+            base = SchrodingerTheory.step_forward(self, state, dt)
+            psi, aux_front = ThickFrontWorldLineTheory._front_sharpen(
+                self, base.state, dt
+            )
+            psi, norm_factor = normalize_unit(psi, self.grid.dx, self.grid.dy)
+            aux = dict(base.aux) if base.aux is not None else {}
+            aux["thick_front_measurement_guided"] = {
+                "measurement_guidance_enabled": bool(
+                    self.measurement_guidance_enabled
+                ),
+                "measurement_response_strength": float(
+                    self.measurement_response_strength
+                ),
+                "measurement_null_matches_worldline": True,
+                "normalize_unit_returned_norm": float(norm_factor),
+                **aux_front,
+            }
+            self._measurement_step_counter += 1
+            return TheoryStepResult(
+                state=psi.astype(np.complex128),
+                aux=aux,
+            )
+
         base = SchrodingerTheory.step_forward(self, state, dt)
         psi = base.state
         _assert_complex_array_2d(psi, "base.state")
@@ -1026,6 +1088,7 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
             "front_diag_weight": float(self.front_diag_weight),
             "front_phase_relax_strength": float(self.front_phase_relax_strength),
             "front_gain_blur_sigma": float(self.front_gain_blur_sigma),
+            "front_neighbor_sigma": self.front_neighbor_sigma,
 
             "front_branch_competition_strength": float(self.front_branch_competition_strength),
             "front_branch_competition_power": float(self.front_branch_competition_power),
@@ -1065,19 +1128,25 @@ class ThickFrontMeasurementGuidedTheory(ThickFrontWorldLineTheory):
             "worldline_forced_min_peak_separation_px": int(self.worldline_forced_min_peak_separation_px),
 
             "measurement_guidance_enabled": bool(self.measurement_guidance_enabled),
+            "measurement_response_strength": float(self.measurement_response_strength),
             "measurement_detector_center_x": float(self.measurement_detector_center_x),
             "measurement_detector_width": float(self.measurement_detector_width),
             "measurement_seed_y_sigma": float(self.measurement_seed_y_sigma),
             "measurement_refresh_every_n_steps_pre_init": int(self.measurement_refresh_every_n_steps_pre_init),
             "measurement_refresh_every_n_steps_post_init": int(self.measurement_refresh_every_n_steps_post_init),
             "measurement_stop_after_worldline_init": bool(self.measurement_stop_after_worldline_init),
-            "measurement_back_steps": int(self.measurement_back_steps),
             "measurement_back_stride": int(self.measurement_back_stride),
-            "measurement_sigma_tau_steps": float(self.measurement_sigma_tau_steps),
+            "measurement_sigma_t": float(self.measurement_sigma_t),
+            "measurement_back_horizon_sigmas": float(self.measurement_back_horizon_sigmas),
+            "measurement_back_samples_effective": int(
+                len(self._measurement_time_kernel(dt)[0])
+            ),
             "measurement_effect_blur_sigma": float(self.measurement_effect_blur_sigma),
             "measurement_overlap_blur_sigma": float(self.measurement_overlap_blur_sigma),
             "measurement_normalize_effect": bool(self.measurement_normalize_effect),
             "measurement_normalize_overlap": bool(self.measurement_normalize_overlap),
+            "measurement_effect_normalization_scale": self.measurement_effect_normalization_scale,
+            "measurement_overlap_normalization_scale": self.measurement_overlap_normalization_scale,
             "measurement_min_detector_mass": float(self.measurement_min_detector_mass),
             "measurement_use_overlap_for_forced_selection": bool(
                 self.measurement_use_overlap_for_forced_selection

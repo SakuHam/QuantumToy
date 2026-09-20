@@ -385,7 +385,10 @@ def build_theory(cfg, grid, potential):
             front_branch_normalize_gamma=front_branch_normalize_gamma,
         )
 
-    elif theory_name == "thick_front_measured_guided":
+    elif theory_name in {
+        "thick_front_measurement_guided",
+        "thick_front_measured_guided",  # compatibility alias
+    }:
         front_strength = _assert_finite_scalar(
             getattr(cfg, "THICK_FRONT_STRENGTH", 0.03),
             "cfg.THICK_FRONT_STRENGTH",
@@ -487,6 +490,29 @@ def build_theory(cfg, grid, potential):
             f"cfg.THICK_FRONT_BRANCH_NORMALIZE_GAMMA must be bool, got {type(front_branch_normalize_gamma)}",
         )
 
+        measurement_sigma_t = _assert_positive_scalar(
+            getattr(cfg, "TRF_SIGMA_T", 0.25),
+            "cfg.TRF_SIGMA_T",
+        )
+        measurement_response_strength = _assert_finite_scalar(
+            getattr(cfg, "TRF_MEASUREMENT_RESPONSE_STRENGTH", 1.0),
+            "cfg.TRF_MEASUREMENT_RESPONSE_STRENGTH",
+        )
+        _assert(
+            measurement_response_strength >= 0.0,
+            "cfg.TRF_MEASUREMENT_RESPONSE_STRENGTH must be >= 0",
+        )
+        measurement_back_stride = getattr(cfg, "TRF_MEASUREMENT_BACK_STRIDE", 2)
+        _assert(
+            isinstance(measurement_back_stride, (int, np.integer))
+            and measurement_back_stride >= 1,
+            "cfg.TRF_MEASUREMENT_BACK_STRIDE must be an integer >= 1",
+        )
+        measurement_back_horizon_sigmas = _assert_positive_scalar(
+            getattr(cfg, "TRF_MEASUREMENT_BACK_HORIZON_SIGMAS", 4.0),
+            "cfg.TRF_MEASUREMENT_BACK_HORIZON_SIGMAS",
+        )
+
         theory = ThickFrontMeasurementGuidedTheory(
             grid=grid,
             potential=potential,
@@ -507,6 +533,10 @@ def build_theory(cfg, grid, potential):
             front_branch_align_power=front_branch_align_power,
             front_branch_competition_threshold=front_branch_competition_threshold,
             front_branch_normalize_gamma=front_branch_normalize_gamma,
+            measurement_sigma_t=measurement_sigma_t,
+            measurement_response_strength=measurement_response_strength,
+            measurement_back_stride=int(measurement_back_stride),
+            measurement_back_horizon_sigmas=measurement_back_horizon_sigmas,
         )
 
     elif theory_name == "thick_front_world_line":
@@ -698,6 +728,7 @@ def build_theory(cfg, grid, potential):
             "schrodinger_measurement",
             "thick_front",
             "thick_front_optimized",
+            "thick_front_measurement_guided",
             "thick_front_measured_guided",
             "dirac",
             "dirac_thick_front",

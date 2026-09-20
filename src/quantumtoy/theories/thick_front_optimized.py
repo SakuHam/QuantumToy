@@ -86,6 +86,11 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
     front_clip: float = 0.25
     front_gain_blur_sigma: float = 1.0
 
+    # Optional physical-width phase neighborhood. None preserves the legacy
+    # nearest/diagonal pixel stencil. A positive value is converted to separate
+    # y/x pixel sigmas from grid.dy/grid.dx.
+    front_neighbor_sigma: float | None = None
+
     # --------------------------------------------------------
     # Branch competition / lateral inhibition parameters
     # --------------------------------------------------------
@@ -178,6 +183,10 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         _assert(self.front_strength >= 0.0, "front_strength must be >= 0")
         _assert(self.front_misaligned_damp >= 0.0, "front_misaligned_damp must be >= 0")
         _assert(self.front_diag_weight >= 0.0, "front_diag_weight must be >= 0")
+        if (self.front_neighbor_sigma is not None
+                and (not np.isfinite(self.front_neighbor_sigma)
+                     or self.front_neighbor_sigma <= 0.0)):
+            raise ValueError("front_neighbor_sigma must be None or finite and > 0")
         _assert(self.front_phase_relax_strength >= 0.0, "front_phase_relax_strength must be >= 0")
         _assert(self.front_gain_blur_sigma >= 0.0, "front_gain_blur_sigma must be >= 0")
 
@@ -294,6 +303,18 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
         in the project for derivatives.
         """
         _assert_complex_array_2d(z, "z")
+
+        if self.front_neighbor_sigma is not None:
+            sigma = (
+                float(self.front_neighbor_sigma) / float(self.grid.dy),
+                float(self.front_neighbor_sigma) / float(self.grid.dx),
+            )
+            out = (
+                gaussian_filter(z.real, sigma=sigma, mode="wrap")
+                + 1j * gaussian_filter(z.imag, sigma=sigma, mode="wrap")
+            )
+            _assert_complex_array_2d(out, "_neighbor_average_complex(out)")
+            return out.astype(np.complex128)
 
         z_xp = np.roll(z, -1, axis=1)
         z_xm = np.roll(z, 1, axis=1)
@@ -1146,6 +1167,7 @@ class ThickFrontOptimizedTheory(SchrodingerTheory):
             "front_diag_weight": float(self.front_diag_weight),
             "front_phase_relax_strength": float(self.front_phase_relax_strength),
             "front_gain_blur_sigma": float(self.front_gain_blur_sigma),
+            "front_neighbor_sigma": self.front_neighbor_sigma,
 
             "front_branch_competition_strength": float(self.front_branch_competition_strength),
             "front_branch_competition_power": float(self.front_branch_competition_power),
