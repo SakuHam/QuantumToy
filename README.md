@@ -220,6 +220,15 @@ null, and numerical convergence. Its assumptions and comparison with the
 exploratory measurement-guided response are in
 [paper/spatial_effect_instrument.md](paper/spatial_effect_instrument.md).
 
+Create an MP4 and a final-frame overview of the same complete measurement:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/visualize_spatial_effect_measurement.py \
+  --output-mp4 spatial_effect_measurement.mp4 \
+  --snapshot-output spatial_effect_measurement.png
+```
+
 ---
 
 ## Running a simulation

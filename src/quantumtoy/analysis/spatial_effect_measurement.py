@@ -82,6 +82,23 @@ class SpatialEffectRun:
 
 
 @dataclass(frozen=True)
+class SpatialEffectEvolution:
+    """Forward-picture components used to visualize the temporal mixture."""
+
+    sigma_t: float
+    lambda_strength: float
+    x: np.ndarray
+    y: np.ndarray
+    detector_gate: np.ndarray
+    labels: tuple[str, ...]
+    delays: np.ndarray
+    delay_weights: np.ndarray
+    densities: np.ndarray
+    component_probabilities: np.ndarray
+    cumulative_probabilities: np.ndarray
+
+
+@dataclass(frozen=True)
 class SpatialEffectProfile:
     true_sigma_t: float
     lambda_strength: float
@@ -283,6 +300,62 @@ def run_spatial_effect_measurement(
     return SpatialEffectRun(
         sigma_t, lambda_strength, labels, probabilities,
         click_probability, conditional)
+
+
+def spatial_effect_evolution(
+        experiment, sigma_t, *, lambda_strength=1.0):
+    """Return every delay component and its cumulative complete outcome law.
+
+    The frame index labels unresolved alternatives in the temporal mixture; it
+    is not a stochastic trajectory of one particle.  The last cumulative law
+    equals :func:`run_spatial_effect_measurement` for the same parameters.
+    """
+    sigma_t, lambda_strength = _validate_sigma_lambda(
+        sigma_t, lambda_strength)
+    x_grid, y_grid = _coordinates(experiment)
+    labels, diagonals = _terminal_effect_diagonals(experiment)
+    state = initial_spatial_state(experiment)
+    null_probabilities = diagonals @ np.abs(state) ** 2
+    delays, weights = temporal_delays_and_weights(
+        sigma_t, experiment.delay_step, experiment.horizon_sigmas)
+
+    densities = []
+    components = []
+    for delay in delays:
+        propagated = _propagate_states(experiment, state, delay)
+        density = np.abs(propagated.reshape(
+            experiment.ny, experiment.nx)) ** 2
+        densities.append(density)
+        components.append(diagonals @ density.reshape(-1))
+    densities = np.asarray(densities)
+    components = np.asarray(components)
+
+    weighted = np.cumsum(weights[:, None] * components, axis=0)
+    cumulative_weight = np.cumsum(weights)
+    temporal_laws = weighted / cumulative_weight[:, None]
+    response_fraction = -np.expm1(-lambda_strength)
+    cumulative = ((1.0 - response_fraction) * null_probabilities[None, :]
+                  + response_fraction * temporal_laws)
+    if (np.min(cumulative) < -1e-12
+            or np.max(np.abs(np.sum(cumulative, axis=1) - 1.0)) > 1e-12):
+        raise RuntimeError("Spatial effect frames produced an invalid outcome law")
+
+    detector_gate = np.exp(
+        -0.5 * ((x_grid[0] - experiment.detector_x)
+                / experiment.detector_width) ** 2)
+    return SpatialEffectEvolution(
+        sigma_t=sigma_t,
+        lambda_strength=lambda_strength,
+        x=x_grid[0].copy(),
+        y=y_grid[:, 0].copy(),
+        detector_gate=detector_gate,
+        labels=labels,
+        delays=delays,
+        delay_weights=weights,
+        densities=densities,
+        component_probabilities=components,
+        cumulative_probabilities=np.maximum(cumulative, 0.0),
+    )
 
 
 def _kl_divergence(observed, predicted):

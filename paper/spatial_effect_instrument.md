@@ -106,3 +106,15 @@ PYTHONPATH=src/quantumtoy python \
   --json-output spatial_effect_measurement.json
 ```
 
+Render the delay components, detector geometry, half-Gaussian weights, and
+the accumulating complete outcome law with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/visualize_spatial_effect_measurement.py \
+  --output-mp4 spatial_effect_measurement.mp4 \
+  --snapshot-output spatial_effect_measurement.png
+```
+
+The animation frames label unresolved alternatives in the operator mixture;
+they are not successive hidden positions of one detected particle.

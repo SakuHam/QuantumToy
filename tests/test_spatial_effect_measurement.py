@@ -11,6 +11,7 @@ from analysis.spatial_effect_measurement import (
     fit_spatial_effect_response,
     initial_spatial_state,
     run_spatial_effect_measurement,
+    spatial_effect_evolution,
     spatial_effect_convergence,
     temporal_delays_and_weights,
     terminal_detector_effects,
@@ -78,6 +79,21 @@ class SpatialEffectMeasurementTests(unittest.TestCase):
             self.small, 1.2, lambda_strength=0)
         self.assertTrue(np.array_equal(
             narrow_instrument.effects, wide_instrument.effects))
+
+    def test_visualization_frames_reproduce_complete_measurement(self):
+        evolution = spatial_effect_evolution(self.experiment, 0.6)
+        run = run_spatial_effect_measurement(self.experiment, 0.6)
+        self.assertEqual(
+            evolution.densities.shape,
+            (evolution.delays.size, self.experiment.ny, self.experiment.nx))
+        assert_allclose(
+            np.sum(evolution.densities, axis=(1, 2)), 1, atol=2e-15)
+        assert_allclose(
+            np.sum(evolution.cumulative_probabilities, axis=1), 1,
+            atol=2e-15)
+        assert_allclose(
+            evolution.cumulative_probabilities[-1], run.probabilities,
+            atol=2e-15)
 
     def test_complete_law_recovers_injected_width(self):
         profile = fit_spatial_effect_response(
