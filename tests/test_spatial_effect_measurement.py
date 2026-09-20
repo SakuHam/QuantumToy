@@ -16,6 +16,7 @@ from analysis.spatial_effect_measurement import (
     initial_spatial_state,
     run_spatial_effect_measurement,
     select_complementary_detector_setting,
+    select_double_slit_detector_setting,
     spatial_effect_evolution,
     spatial_effect_fisher_information,
     spatial_effect_potential,
@@ -229,6 +230,41 @@ class SpatialEffectMeasurementTests(unittest.TestCase):
         self.assertLess(convergence["propagation_step_half"], 1e-4)
         self.assertLess(convergence["slit_edge_half_sensitivity"], 0.005)
         self.assertLess(convergence["x_box_5_over_4"], 1e-4)
+
+    def test_double_slit_detector_design_improves_both_parameters(self):
+        experiment = double_slit_effect_experiment(nx=32, ny=32)
+        design = select_double_slit_detector_setting(
+            experiment, 0.2, 1.0,
+            candidate_detector_x=[0.0, 0.5],
+            candidate_detector_width=[0.35, 0.5],
+            candidate_time_offset=[-0.4, -0.2])
+        self.assertEqual(design.best_detector_x, 0.0)
+        self.assertEqual(design.best_detector_width, 0.5)
+        self.assertAlmostEqual(design.best_reference_time, 13 / 30)
+        self.assertTrue(
+            design.improves_both_standard_errors[design.best_index])
+        eligible = design.improves_both_standard_errors
+        self.assertEqual(
+            design.best_index,
+            int(np.flatnonzero(eligible)[np.argmax(
+                design.combined_determinant[eligible])]))
+
+        second = replace(
+            experiment,
+            detector_x=design.best_detector_x,
+            detector_width=design.best_detector_width,
+            reference_time=design.best_reference_time)
+        single = fit_spatial_effect_joint_response(
+            experiment, 0.2, 1.0, [0.15, 0.2, 0.25], [0.5, 1.0, 1.5],
+            shots=100_000)
+        combined = fit_spatial_effect_multi_response(
+            [experiment, second], 0.2, 1.0,
+            [0.15, 0.2, 0.25], [0.5, 1.0, 1.5], shots=100_000,
+            shot_fractions=[0.5, 0.5])
+        self.assertEqual(combined.best_sigma_t, 0.2)
+        self.assertEqual(combined.best_lambda_strength, 1.0)
+        self.assertTrue(np.all(
+            combined.local_standard_errors < single.local_standard_errors))
 
     def test_delay_grid_spatial_grid_and_horizon_converge(self):
         convergence = spatial_effect_convergence(self.experiment, 0.6)

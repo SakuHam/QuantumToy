@@ -195,6 +195,25 @@ class SpatialEffectSecondSettingDesign:
 
 
 @dataclass(frozen=True)
+class SpatialEffectDetectorDesign:
+    """Fisher design scan over a detector plane, gate width, and readout time."""
+
+    candidate_detector_x: np.ndarray
+    candidate_detector_width: np.ndarray
+    candidate_reference_time: np.ndarray
+    combined_determinant: np.ndarray
+    combined_condition_number: np.ndarray
+    combined_parameter_correlation: np.ndarray
+    combined_standard_errors: np.ndarray
+    improves_both_standard_errors: np.ndarray
+    best_index: int
+    best_detector_x: float
+    best_detector_width: float
+    best_reference_time: float
+    first_setting_fraction: float
+
+
+@dataclass(frozen=True)
 class SpatialEffectMultiProfile:
     """Joint profile from independent settings sharing sigma and lambda."""
 
@@ -792,6 +811,109 @@ def select_complementary_detector_setting(
         combined_condition_number=np.asarray(conditions),
         combined_parameter_correlation=np.asarray(correlations),
         best_detector_x=float(candidates[best_index]),
+        first_setting_fraction=first_setting_fraction,
+    )
+
+
+def select_double_slit_detector_setting(
+        experiment, sigma_t, lambda_strength, candidate_detector_x,
+        candidate_detector_width, candidate_time_offset, *,
+        first_setting_fraction=0.5):
+    """Select a complementary double-slit detector by constrained D-optimality.
+
+    Candidate readout times are specified relative to the packet's classical
+    arrival time at each detector plane.  The same total shot budget is split
+    between the original and candidate settings.  A candidate is eligible only
+    if both marginal standard errors are smaller than for the original setting
+    alone; the eligible candidate with the largest Fisher determinant wins.
+    """
+    if experiment.potential_mode != "double_slit":
+        raise ValueError("double-slit detector design requires double_slit mode")
+    sigma_t, lambda_strength = _validate_sigma_lambda(
+        sigma_t, lambda_strength)
+    positions = np.asarray(candidate_detector_x, dtype=float)
+    widths = np.asarray(candidate_detector_width, dtype=float)
+    offsets = np.asarray(candidate_time_offset, dtype=float)
+    if (positions.ndim != 1 or positions.size == 0
+            or np.any(~np.isfinite(positions))):
+        raise ValueError("candidate_detector_x must contain finite values")
+    if (widths.ndim != 1 or widths.size == 0
+            or np.any(~np.isfinite(widths)) or np.any(widths <= 0)):
+        raise ValueError(
+            "candidate_detector_width must contain positive finite values")
+    if (offsets.ndim != 1 or offsets.size == 0
+            or np.any(~np.isfinite(offsets))):
+        raise ValueError("candidate_time_offset must contain finite values")
+    first_setting_fraction = float(first_setting_fraction)
+    if (not np.isfinite(first_setting_fraction)
+            or not 0 < first_setting_fraction < 1):
+        raise ValueError("first_setting_fraction must lie strictly between 0 and 1")
+    velocity = experiment.hbar * experiment.packet_kx / experiment.mass
+    if velocity <= 0:
+        raise ValueError("double-slit detector design requires packet_kx > 0")
+
+    first_fisher = spatial_effect_fisher_information(
+        experiment, sigma_t, lambda_strength)
+    first_errors = _fisher_diagnostics(first_fisher)[4]
+    candidate_rows = []
+    determinants = []
+    conditions = []
+    correlations = []
+    standard_errors = []
+    improves_both = []
+    for detector_x in positions:
+        arrival_time = (detector_x - experiment.packet_x) / velocity
+        for detector_width in widths:
+            for offset in offsets:
+                reference_time = arrival_time + offset
+                if reference_time <= 0:
+                    continue
+                second = replace(
+                    experiment,
+                    detector_x=float(detector_x),
+                    detector_width=float(detector_width),
+                    reference_time=float(reference_time),
+                )
+                second_fisher = spatial_effect_fisher_information(
+                    second, sigma_t, lambda_strength)
+                combined = (
+                    first_setting_fraction * first_fisher
+                    + (1.0 - first_setting_fraction) * second_fisher
+                )
+                (_, condition, _, _, errors,
+                 correlation) = _fisher_diagnostics(combined)
+                candidate_rows.append(
+                    (detector_x, detector_width, reference_time))
+                determinants.append(float(np.linalg.det(combined)))
+                conditions.append(condition)
+                correlations.append(correlation)
+                standard_errors.append(errors)
+                improves_both.append(bool(np.all(errors < first_errors)))
+
+    if not candidate_rows:
+        raise ValueError("candidate grid contains no positive reference times")
+    determinants = np.asarray(determinants)
+    improves_both = np.asarray(improves_both, dtype=bool)
+    if not np.any(improves_both):
+        raise ValueError(
+            "no candidate improves both standard errors at the declared allocation")
+    eligible_objective = np.where(improves_both, determinants, -np.inf)
+    best_index = int(np.argmax(eligible_objective))
+    candidate_rows = np.asarray(candidate_rows, dtype=float)
+    best = candidate_rows[best_index]
+    return SpatialEffectDetectorDesign(
+        candidate_detector_x=candidate_rows[:, 0],
+        candidate_detector_width=candidate_rows[:, 1],
+        candidate_reference_time=candidate_rows[:, 2],
+        combined_determinant=determinants,
+        combined_condition_number=np.asarray(conditions),
+        combined_parameter_correlation=np.asarray(correlations),
+        combined_standard_errors=np.asarray(standard_errors),
+        improves_both_standard_errors=improves_both,
+        best_index=best_index,
+        best_detector_x=float(best[0]),
+        best_detector_width=float(best[1]),
+        best_reference_time=float(best[2]),
         first_setting_fraction=first_setting_fraction,
     )
 

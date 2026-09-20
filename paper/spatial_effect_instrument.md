@@ -250,6 +250,44 @@ the settings must have complementary parameter responses in the actual
 geometry. The result is retained as a failed held-out design test rather than
 being optimized away after inspection.
 
+### Double-slit detector design
+
+We therefore define a prospective scan for the locked double-slit geometry.
+It varies the second detector over `x in {0, 0.5, 1, 1.5, 2}`, Gaussian gate
+widths `{0.2, 0.35, 0.5}`, and reference-time offsets
+`{-0.4, -0.2, 0, 0.2}` from the packet's classical arrival. The original and
+candidate settings receive equal shares of the same total shot budget. A
+candidate is eligible only if the inverse combined Fisher matrix gives smaller
+marginal errors for both `sigma_T` and `lambda`; among eligible candidates the
+predeclared objective maximizes the combined per-shot Fisher determinant.
+
+The selected second setting is `x=0`, gate width `0.5`, and reference time
+`0.43333`. At 100,000 total shots the results are:
+
+| diagnostic | original detector | selected 50/50 pair |
+| --- | ---: | ---: |
+| click probability of each setting | `0.04780` | second: `0.17907` |
+| Fisher condition number | `98.61` | `33.68` |
+| parameter correlation | `-0.72545` | `-0.68220` |
+| `SE(sigma_T)` | `0.02242` | `0.01956` |
+| `SE(lambda)` | `0.15151` | `0.08074` |
+
+The injected pair `(sigma_T, lambda)=(0.2,1)` remains the exact combined
+profile minimum. For the selected detector, increasing the x box by 5/4 at
+fixed spatial resolution changes the complete outcome law by `1.12e-7`. This
+check matters because a later detector candidate initially appeared favorable
+in the smaller periodic box but failed the same boundary test. The detector
+choice is a synthetic, local design conditional on the declared parameter
+point and geometry; experimental calibration or a robust prior-averaged design
+would still be needed for data collection.
+
+Run the design study with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_spatial_effect_double_slit_detector_design.py
+```
+
 Run the study with:
 
 ```bash

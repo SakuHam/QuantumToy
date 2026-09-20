@@ -274,6 +274,26 @@ The study fixes the barrier, slits, packet, propagation clock, and detector
 before profiling. It also tests the earlier free-geometry detector pair as a
 held-out design rather than retuning it after seeing the double-slit result.
 
+Design a complementary detector specifically for the locked double-slit
+geometry with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_spatial_effect_double_slit_detector_design.py
+```
+
+The declared scan varies the downstream detector plane, Gaussian gate width,
+and readout time relative to classical arrival. It splits the same 100,000-shot
+budget equally between the original and candidate settings. Candidates must
+improve both marginal Fisher standard errors; the remaining candidate with the
+largest combined Fisher determinant is selected. The fixed scan selects
+`x=0`, width `0.5`, and reference time `0.43333`. Relative to the original
+detector alone, the pair changes the condition number from `98.61` to `33.68`,
+the `sigma_T` standard error from `0.02242` to `0.01956`, and the `lambda`
+standard error from `0.15151` to `0.08074`. The x-box check changes the complete
+law by only `1.12e-7`. These are synthetic local-design results at the declared
+injection `(sigma_T, lambda)=(0.2,1)`, not empirical detector calibration.
+
 ---
 
 ## Running a simulation
