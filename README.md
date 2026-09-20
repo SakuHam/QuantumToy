@@ -229,6 +229,18 @@ PYTHONPATH=src/quantumtoy python \
   --snapshot-output spatial_effect_measurement.png
 ```
 
+Jointly profile the unknown temporal width and response strength with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_spatial_effect_joint_profile.py \
+  --plot-output spatial_effect_joint_profile.png \
+  --json-output spatial_effect_joint_profile.json
+```
+
+The resulting likelihood surface and Fisher matrix expose the strong local
+`sigma_T`–`lambda` tradeoff that a fixed-coupling width profile hides.
+
 ---
 
 ## Running a simulation

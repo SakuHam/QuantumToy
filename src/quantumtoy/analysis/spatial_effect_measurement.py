@@ -112,6 +112,29 @@ class SpatialEffectProfile:
     lambda_zero_max_error: float
 
 
+@dataclass(frozen=True)
+class SpatialEffectJointProfile:
+    """Two-parameter expected likelihood surface and local identifiability."""
+
+    true_sigma_t: float
+    true_lambda_strength: float
+    candidate_sigmas: np.ndarray
+    candidate_lambdas: np.ndarray
+    kl_divergence: np.ndarray
+    expected_deviance: np.ndarray
+    best_sigma_t: float
+    best_lambda_strength: float
+    profiled_lambda_strength: np.ndarray
+    profiled_expected_deviance: np.ndarray
+    fisher_information: np.ndarray
+    fisher_eigenvalues: np.ndarray
+    fisher_condition_number: float
+    fisher_score_correlation: float
+    local_covariance: np.ndarray
+    local_standard_errors: np.ndarray
+    local_parameter_correlation: float
+
+
 def _validate_sigma_lambda(sigma_t, lambda_strength):
     sigma_t = float(sigma_t)
     lambda_strength = float(lambda_strength)
@@ -265,34 +288,45 @@ def build_spatial_effect_instrument(
         labels, effects, delays, weights, sigma_t, lambda_strength)
 
 
-def run_spatial_effect_measurement(
-        experiment, sigma_t, *, lambda_strength=1.0):
-    """Evaluate the complete outcome law without click postselection."""
-    sigma_t, lambda_strength = _validate_sigma_lambda(
-        sigma_t, lambda_strength)
+def _null_and_temporal_probabilities(experiment, sigma_t):
+    sigma_t, _ = _validate_sigma_lambda(sigma_t, 0)
     labels, diagonals = _terminal_effect_diagonals(experiment)
     state = initial_spatial_state(experiment)
     null_probabilities = diagonals @ np.abs(state) ** 2
-    if lambda_strength == 0:
-        probabilities = null_probabilities.copy()
-    else:
-        delays, weights = temporal_delays_and_weights(
-            sigma_t, experiment.delay_step, experiment.horizon_sigmas)
-        component_probabilities = []
-        for delay in delays:
-            propagated = _propagate_states(experiment, state, delay)
-            component_probabilities.append(diagonals @ np.abs(propagated) ** 2)
-        mixed = weights @ np.asarray(component_probabilities)
-        response_fraction = -np.expm1(-lambda_strength)
-        probabilities = ((1.0 - response_fraction) * null_probabilities
-                         + response_fraction * mixed)
+    delays, weights = temporal_delays_and_weights(
+        sigma_t, experiment.delay_step, experiment.horizon_sigmas)
+    components = []
+    for delay in delays:
+        propagated = _propagate_states(experiment, state, delay)
+        components.append(diagonals @ np.abs(propagated) ** 2)
+    temporal_probabilities = weights @ np.asarray(components)
+    return labels, null_probabilities, temporal_probabilities
+
+
+def _coupled_probabilities(null_probabilities, temporal_probabilities,
+                           lambda_strength):
+    _, lambda_strength = _validate_sigma_lambda(1, lambda_strength)
+    response_fraction = -np.expm1(-lambda_strength)
+    probabilities = ((1.0 - response_fraction) * null_probabilities
+                     + response_fraction * temporal_probabilities)
     probabilities = np.real_if_close(probabilities).real
     if (np.min(probabilities) < -1e-12
             or abs(float(np.sum(probabilities)) - 1.0) > 1e-12):
         raise RuntimeError("Complete spatial POVM produced an invalid outcome law")
     # Remove only negative floating-point dust; completeness is established
     # above rather than imposed by renormalizing the outcomes.
-    probabilities = np.maximum(probabilities, 0.0)
+    return np.maximum(probabilities, 0.0)
+
+
+def run_spatial_effect_measurement(
+        experiment, sigma_t, *, lambda_strength=1.0):
+    """Evaluate the complete outcome law without click postselection."""
+    sigma_t, lambda_strength = _validate_sigma_lambda(
+        sigma_t, lambda_strength)
+    labels, null_probabilities, temporal_probabilities = (
+        _null_and_temporal_probabilities(experiment, sigma_t))
+    probabilities = _coupled_probabilities(
+        null_probabilities, temporal_probabilities, lambda_strength)
     click_probability = float(np.sum(probabilities[:-1]))
     conditional = (probabilities[:-1] / click_probability
                    if click_probability > 0
@@ -404,6 +438,136 @@ def fit_spatial_effect_response(
             target.probabilities - null.probabilities))),
         lambda_zero_max_error=float(np.max(np.abs(
             null.probabilities - other_null.probabilities))),
+    )
+
+
+def spatial_effect_fisher_information(
+        experiment, sigma_t, lambda_strength, *, shots=1,
+        relative_step=1e-3):
+    """Return the multinomial Fisher matrix for ``(sigma_t, lambda)``.
+
+    The derivatives are evaluated symmetrically inside the positive parameter
+    domain.  At ``lambda=0`` the sigma derivative vanishes, correctly making
+    the local information singular.
+    """
+    sigma_t, lambda_strength = _validate_sigma_lambda(
+        sigma_t, lambda_strength)
+    if not isinstance(shots, (int, np.integer)) or shots <= 0:
+        raise ValueError("shots must be a positive integer")
+    relative_step = float(relative_step)
+    if not np.isfinite(relative_step) or relative_step <= 0:
+        raise ValueError("relative_step must be finite and positive")
+
+    sigma_step = min(relative_step * sigma_t, 0.25 * sigma_t)
+    lambda_step = relative_step * max(1.0, lambda_strength)
+    sigma_minus = run_spatial_effect_measurement(
+        experiment, sigma_t - sigma_step,
+        lambda_strength=lambda_strength).probabilities
+    sigma_plus = run_spatial_effect_measurement(
+        experiment, sigma_t + sigma_step,
+        lambda_strength=lambda_strength).probabilities
+    derivative_sigma = (sigma_plus - sigma_minus) / (2 * sigma_step)
+
+    if lambda_strength > lambda_step:
+        lambda_minus = run_spatial_effect_measurement(
+            experiment, sigma_t,
+            lambda_strength=lambda_strength - lambda_step).probabilities
+        lambda_plus = run_spatial_effect_measurement(
+            experiment, sigma_t,
+            lambda_strength=lambda_strength + lambda_step).probabilities
+        derivative_lambda = (lambda_plus - lambda_minus) / (2 * lambda_step)
+    else:
+        central = run_spatial_effect_measurement(
+            experiment, sigma_t,
+            lambda_strength=lambda_strength).probabilities
+        lambda_plus = run_spatial_effect_measurement(
+            experiment, sigma_t,
+            lambda_strength=lambda_strength + lambda_step).probabilities
+        derivative_lambda = (lambda_plus - central) / lambda_step
+
+    probabilities = run_spatial_effect_measurement(
+        experiment, sigma_t,
+        lambda_strength=lambda_strength).probabilities
+    derivatives = np.stack([derivative_sigma, derivative_lambda], axis=1)
+    fisher = shots * (derivatives.T / np.maximum(probabilities, 1e-300)) @ derivatives
+    return 0.5 * (fisher + fisher.T)
+
+
+def fit_spatial_effect_joint_response(
+        experiment, true_sigma_t, true_lambda_strength, candidate_sigmas,
+        candidate_lambdas, *, shots=100_000):
+    """Profile the complete law jointly over temporal width and coupling."""
+    true_sigma_t, true_lambda_strength = _validate_sigma_lambda(
+        true_sigma_t, true_lambda_strength)
+    sigmas = np.asarray(candidate_sigmas, dtype=float)
+    lambdas = np.asarray(candidate_lambdas, dtype=float)
+    if (sigmas.ndim != 1 or sigmas.size < 2
+            or np.any(~np.isfinite(sigmas)) or np.any(sigmas <= 0)):
+        raise ValueError("candidate_sigmas must contain at least two positive values")
+    if (lambdas.ndim != 1 or lambdas.size < 2
+            or np.any(~np.isfinite(lambdas)) or np.any(lambdas < 0)):
+        raise ValueError(
+            "candidate_lambdas must contain at least two nonnegative values")
+    if not isinstance(shots, (int, np.integer)) or shots <= 0:
+        raise ValueError("shots must be a positive integer")
+
+    target = run_spatial_effect_measurement(
+        experiment, true_sigma_t,
+        lambda_strength=true_lambda_strength).probabilities
+    kl = np.empty((lambdas.size, sigmas.size), dtype=float)
+    supported = target > 0
+    response_fractions = -np.expm1(-lambdas)
+    for sigma_index, sigma_t in enumerate(sigmas):
+        _, null, temporal = _null_and_temporal_probabilities(
+            experiment, sigma_t)
+        predictions = (
+            (1.0 - response_fractions[:, None]) * null[None, :]
+            + response_fractions[:, None] * temporal[None, :])
+        values = np.sum(
+            target[None, supported] * np.log(
+                target[None, supported]
+                / np.maximum(predictions[:, supported], 1e-300)),
+            axis=1)
+        kl[:, sigma_index] = np.maximum(values, 0.0)
+
+    expected_deviance = 2 * shots * kl
+    best_lambda_index, best_sigma_index = np.unravel_index(
+        int(np.argmin(expected_deviance)), expected_deviance.shape)
+    profiled_lambda_indices = np.argmin(expected_deviance, axis=0)
+    fisher = spatial_effect_fisher_information(
+        experiment, true_sigma_t, true_lambda_strength, shots=shots)
+    eigenvalues = np.linalg.eigvalsh(fisher)
+    positive = eigenvalues[eigenvalues > 1e-12 * max(1.0, eigenvalues[-1])]
+    condition = (float(eigenvalues[-1] / positive[0])
+                 if positive.size == 2 else float("inf"))
+    denominator = np.sqrt(max(0.0, fisher[0, 0] * fisher[1, 1]))
+    score_correlation = (float(fisher[0, 1] / denominator)
+                         if denominator > 0 else float("nan"))
+    covariance = np.linalg.pinv(fisher, hermitian=True)
+    standard_errors = np.sqrt(np.maximum(np.diag(covariance), 0.0))
+    covariance_denominator = standard_errors[0] * standard_errors[1]
+    parameter_correlation = (
+        float(covariance[0, 1] / covariance_denominator)
+        if covariance_denominator > 0 else float("nan"))
+    return SpatialEffectJointProfile(
+        true_sigma_t=true_sigma_t,
+        true_lambda_strength=true_lambda_strength,
+        candidate_sigmas=sigmas,
+        candidate_lambdas=lambdas,
+        kl_divergence=kl,
+        expected_deviance=expected_deviance,
+        best_sigma_t=float(sigmas[best_sigma_index]),
+        best_lambda_strength=float(lambdas[best_lambda_index]),
+        profiled_lambda_strength=lambdas[profiled_lambda_indices],
+        profiled_expected_deviance=expected_deviance[
+            profiled_lambda_indices, np.arange(sigmas.size)],
+        fisher_information=fisher,
+        fisher_eigenvalues=eigenvalues,
+        fisher_condition_number=condition,
+        fisher_score_correlation=score_correlation,
+        local_covariance=covariance,
+        local_standard_errors=standard_errors,
+        local_parameter_correlation=parameter_correlation,
     )
 
 

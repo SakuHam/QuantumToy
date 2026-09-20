@@ -8,10 +8,12 @@ from numpy.testing import assert_allclose
 from analysis.spatial_effect_measurement import (
     SpatialEffectExperiment,
     build_spatial_effect_instrument,
+    fit_spatial_effect_joint_response,
     fit_spatial_effect_response,
     initial_spatial_state,
     run_spatial_effect_measurement,
     spatial_effect_evolution,
+    spatial_effect_fisher_information,
     spatial_effect_convergence,
     temporal_delays_and_weights,
     terminal_detector_effects,
@@ -104,6 +106,36 @@ class SpatialEffectMeasurementTests(unittest.TestCase):
         self.assertGreater(profile.signal_total_variation, 0.05)
         self.assertEqual(profile.lambda_zero_max_error, 0)
 
+    def test_joint_profile_recovers_injection_and_exposes_degeneracy(self):
+        sigmas = [0.3, 0.45, 0.6, 0.8, 1.0]
+        lambdas = [0, 0.5, 1.0, 1.5, 2.0]
+        profile = fit_spatial_effect_joint_response(
+            self.experiment, 0.6, 1.0, sigmas, lambdas)
+        self.assertEqual(profile.expected_deviance.shape, (5, 5))
+        self.assertEqual(profile.best_sigma_t, 0.6)
+        self.assertEqual(profile.best_lambda_strength, 1.0)
+        self.assertEqual(profile.expected_deviance[2, 2], 0)
+        # At lambda=0 every sigma gives the same exact null law.
+        assert_allclose(
+            profile.expected_deviance[0],
+            np.full(5, profile.expected_deviance[0, 0]), atol=1e-10)
+        # The profile ridge trades a larger width for a smaller coupling.
+        self.assertGreater(
+            profile.profiled_lambda_strength[0],
+            profile.profiled_lambda_strength[-1])
+        self.assertGreater(profile.fisher_condition_number, 100)
+        self.assertGreater(profile.fisher_score_correlation, 0.9)
+        self.assertLess(profile.local_parameter_correlation, -0.9)
+        self.assertTrue(np.all(profile.local_standard_errors > 0))
+        self.assertGreaterEqual(profile.fisher_eigenvalues[0], 0)
+
+    def test_quantum_null_has_no_local_sigma_information(self):
+        fisher = spatial_effect_fisher_information(
+            self.experiment, 0.6, 0, shots=100_000)
+        self.assertEqual(fisher[0, 0], 0)
+        self.assertEqual(fisher[0, 1], 0)
+        self.assertGreater(fisher[1, 1], 0)
+
     def test_delay_grid_spatial_grid_and_horizon_converge(self):
         convergence = spatial_effect_convergence(self.experiment, 0.6)
         self.assertLess(convergence["delay_step_half"], 5e-5)
@@ -120,6 +152,9 @@ class SpatialEffectMeasurementTests(unittest.TestCase):
                 self.experiment, 0.6, lambda_strength=-1)
         with self.assertRaises(ValueError):
             fit_spatial_effect_response(self.experiment, 0.6, [0.6])
+        with self.assertRaises(ValueError):
+            fit_spatial_effect_joint_response(
+                self.experiment, 0.6, 1, [0.4, 0.6], [1])
 
 
 if __name__ == "__main__":

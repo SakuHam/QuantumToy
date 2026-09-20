@@ -118,3 +118,42 @@ PYTHONPATH=src/quantumtoy python \
 
 The animation frames label unresolved alternatives in the operator mixture;
 they are not successive hidden positions of one detected particle.
+
+## Joint width and coupling profile
+
+Because `lambda` is not fixed by the document, a one-dimensional width fit can
+overstate what the detector identifies. The joint benchmark evaluates the
+complete multinomial law on a two-dimensional `(sigma_T, lambda)` grid. At
+each width it also profiles over `lambda` and evaluates the local multinomial
+Fisher matrix at the injected point.
+
+For the default synthetic case with 100,000 nominal shots, the injected and
+recovered grid points are both `(0.6, 1.0)`. The local results are:
+
+```text
+Fisher eigenvalues       = [112.20, 50237.47]
+Fisher condition number  = 447.74
+local standard errors    = [0.0222, 0.0919]
+parameter correlation    = -0.9784
+```
+
+The strong negative correlation is the main finding: an increased temporal
+width can be compensated partly by a reduced response strength. The finite
+smaller Fisher eigenvalue shows that the default complete detector law still
+separates the parameters locally, but much more weakly along this ridge than
+across it. At `lambda=0`, the Fisher information for `sigma_T` is exactly zero,
+as required by the sigma-independent null.
+
+These standard errors use the synthetic model, its declared shot count, and
+the local asymptotic Fisher approximation. The plotted `2N KL` contours are
+likelihood-distance guides. They are not uncertainty estimates from observed
+data and do not include model or calibration error.
+
+Generate the profile, figure, and machine-readable result with:
+
+```bash
+PYTHONPATH=src/quantumtoy python \
+  src/quantumtoy/analysis/debug/run_spatial_effect_joint_profile.py \
+  --plot-output spatial_effect_joint_profile.png \
+  --json-output spatial_effect_joint_profile.json
+```
