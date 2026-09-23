@@ -27,6 +27,10 @@ PAPER = ROOT / "paper"
 VALIDATION_JSON = ROOT / "spatial_detector_validation_500.json"
 ARRIVAL_JSON = ROOT / "spatial_arrival_time_study.json"
 ARRIVAL_FIGURE = ROOT / "spatial_arrival_time_study.png"
+SCALE_JSON = ROOT / "trf_physical_scale_prediction.json"
+SCALE_FIGURE = ROOT / "trf_physical_scale_prediction.png"
+ALPHA_PROFILE_JSON = ROOT / "trf_alpha_convention_profile.json"
+ALPHA_PROFILE_FIGURE = ROOT / "trf_alpha_convention_profile.png"
 OUTPUT_PDF = PAPER / "QuantumToy_Double_Slit_Detector_Report.pdf"
 BOOTSTRAP_FIGURE = PAPER / "spatial_detector_bootstrap_validation.png"
 
@@ -262,7 +266,7 @@ def cover(pdf: PdfPages) -> None:
         "false-positive calibration criterion is not met and is reported as a validation result.", 88),
         color=TEXT, fontsize=9.2, va="top", linespacing=1.35)
 
-    fig.text(0.075, 0.075, "22 September 2026", fontsize=8.5, color=MUTED)
+    fig.text(0.075, 0.075, "23 September 2026", fontsize=8.5, color=MUTED)
     fig.text(0.925, 0.075, "QuantumToy", fontsize=8.5, color=MUTED, ha="right")
     pdf.savefig(fig)
     plt.close(fig)
@@ -273,6 +277,10 @@ def build_report() -> None:
         raise FileNotFoundError(f"Missing validation input: {VALIDATION_JSON}")
     if not ARRIVAL_JSON.exists() or not ARRIVAL_FIGURE.exists():
         raise FileNotFoundError("Missing joint arrival-time study artifacts")
+    if not SCALE_JSON.exists() or not SCALE_FIGURE.exists():
+        raise FileNotFoundError("Missing physical-scale prediction artifacts")
+    if not ALPHA_PROFILE_JSON.exists() or not ALPHA_PROFILE_FIGURE.exists():
+        raise FileNotFoundError("Missing alpha convention-profile artifacts")
     data = json.loads(VALIDATION_JSON.read_text())
     arrival = json.loads(ARRIVAL_JSON.read_text())
     make_bootstrap_figure(data)
@@ -638,7 +646,48 @@ def build_report() -> None:
                   "instrument hypothesis.", tone="amber", height=0.092)
         p.footer()
 
-        p = Page(pdf, 16, "Reproducibility map and evidence trail", "Appendix A")
+        p = Page(pdf, 16, "Physical clock scale and conditional prediction",
+                 "14 • Dimensional closure")
+        p.paragraph("The implemented Schrödinger dynamics fixes its clock once a particle mass and "
+                    "one physical length are chosen. Identifying latent tau with an additive arrival "
+                    "delay is a separate direct-delay closure.", width=94)
+        p.equation(r"$T_0=mL_0^2/\hbar,\qquad \sigma_T^{\rm spatial}=0.2T_0,\qquad \kappa_t=1$",
+                   height=0.060, size=11.4)
+        p.image(SCALE_FIGURE, 0.288,
+                "Figure 7. Physical scale implied by the locked dimensionless geometry, one worked "
+                "arrival-delay prediction, and the unresolved bridge between record and spatial clocks.")
+        p.table(["Mapping", "spatial sigma_T", "record alpha=1 sigma_T"], [
+            ["electron, 1 um slits", "674.8 ps", "9.313 ns"],
+            ["neutron, 10 um slits", "124.1 us", "1.712 ms"],
+            ["C60, 100 nm slits", "8.857 us", "122.2 us"],
+            ["electron, 1e6 m/s", "0.208 fs", "2.876 fs"],
+        ], widths=[0.44, 0.28, 0.28], height=0.132, font_size=7.2)
+        p.callout("Decisive result", "TRF-IT v0.2 Eq. (18) explicitly makes alpha a declared or "
+                  "calibrated postulate. The spatial fixture uses sigma_T=0.2T0, while the earlier "
+                  "record fixture gives tau_stab=2.76T0 and assumed alpha=1. A common width needs "
+                  "alpha=0.07246377. T0 is derived; kappa_t=1 is the direct-delay postulate; alpha "
+                  "still needs a TRF derivation or calibration.", tone="amber", height=0.098)
+        p.footer()
+
+        p = Page(pdf, 17, "Locked alpha and clock-convention profile",
+                 "15 • Convention uncertainty")
+        p.paragraph("The reference alpha=0.2/2.76 is locked to the default g=1 control. A fast "
+                    "profile evaluates all 81 shared threshold conventions, then separates a "
+                    "strict fixed-number envelope from a calibration-consistent nuisance profile.")
+        p.image(ALPHA_PROFILE_FIGURE, 0.390,
+                "Figure 8. Shared clock conventions, the broad envelope from holding numerical alpha "
+                "fixed, and the narrow held-out predictions after calibration-only nuisance profiling.")
+        p.table(["Policy", "g=0.5 sigma_T range", "g=2 sigma_T range"], [
+            ["Numerical alpha fixed", "0.25507–0.62029", "0.06377–0.15507"],
+            ["Convention profiled at g=1", "0.39813–0.40000", "0.10000–0.10099"],
+        ], widths=[0.40, 0.30, 0.30], height=0.105, font_size=7.4)
+        p.callout("Interpretation", "Alpha itself remains convention dependent "
+                  "(0.04673–0.11364). In this analytic rate model the same convention rescales all "
+                  "latencies almost proportionally, so the calibration absorbs the absolute clock "
+                  "choice and the held-out width spans stay below 1%.", tone="cyan", height=0.095)
+        p.footer()
+
+        p = Page(pdf, 18, "Reproducibility map and evidence trail", "Appendix A")
         p.paragraph("The report is generated from repository-local code and locked result artifacts. "
                     "The original TRF-IT v0.2 document provides the research context; none of its prose "
                     "is treated as an execution instruction, and the numerical response law reported "
@@ -649,15 +698,22 @@ def build_report() -> None:
             ["src/quantumtoy/analysis/spatial_effect_measurement.py", "Complete effects, propagation, profiles, design"],
             ["src/quantumtoy/analysis/spatial_detector_inference.py", "Observation channel, calibration, robust inference"],
             ["src/quantumtoy/analysis/spatial_arrival_time.py", "Finite-gate joint spatial/arrival-time law"],
+            ["src/quantumtoy/analysis/trf_physical_scale.py", "Dimensionful clock and direct-delay closure"],
             ["src/quantumtoy/analysis/debug/run_spatial_detector_inference_study.py", "Locked study and parallel Monte Carlo runner"],
             ["src/quantumtoy/analysis/debug/run_spatial_arrival_time_study.py", "Timing sensitivity and recovery study"],
+            ["src/quantumtoy/analysis/debug/run_trf_physical_scale_prediction.py", "Physical-scale prediction scenarios"],
+            ["src/quantumtoy/analysis/debug/run_trf_alpha_convention_profile.py", "Discrete convention-nuisance profile"],
             ["tests/test_spatial_detector_inference.py", "Detector, calibration, design, and validation tests"],
             ["tests/test_spatial_arrival_time.py", "Joint-law completeness and timing-identifiability tests"],
+            ["tests/test_trf_physical_scale.py", "Unit conversion and clock-bridge tests"],
             ["spatial_detector_validation_500.json", "Machine-readable 500 + 500 + 500 result"],
             ["spatial_arrival_time_study.json", "Machine-readable p(y,t) comparison"],
+            ["trf_physical_scale_prediction.json", "Machine-readable scale prediction"],
+            ["trf_alpha_convention_profile.json", "Machine-readable convention profile"],
+            ["paper/TRF_Information_Theoretic_Formulation_v0.2.pdf", "Source concept paper audited for scale claims"],
             ["spatial_detector_validation_500.png", "Validation overview used in Figure 4"],
             ["paper/build_spatial_detector_report.py", "Rebuilds this report and Figure 5"],
-        ], widths=[0.58, 0.42], height=0.340, font_size=6.4)
+        ], widths=[0.58, 0.42], height=0.360, font_size=5.2)
         p.heading("Rebuild this report")
         p.callout("Command", "MPLCONFIGDIR=/tmp/quantumtoy-matplotlib python "
                   "paper/build_spatial_detector_report.py", tone="blue", height=0.075)

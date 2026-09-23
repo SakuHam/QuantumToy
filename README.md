@@ -1,5 +1,21 @@
 # QuantumToy
 
+## Interactive thick-front clock demo
+
+Open [`demo/trf_clock_lab.html`](demo/trf_clock_lab.html) directly in a browser.
+It is a self-contained English/Finnish visualization of the conditional
+arrival-time prediction, the joint double-slit detector distribution `p(y,t)`,
+and the 81 clock-convention profiles. Its wavefront timeline can be played,
+scrubbed, or used to generate individual detector events. Rebuild it after
+updating the analysis artifacts with:
+
+```bash
+python src/quantumtoy/analysis/debug/build_trf_clock_demo.py
+```
+
+The demo labels the boundary between the clock model and the additional
+closure assumptions used by the numerical prediction.
+
 QuantumToy is a modular Python simulation environment for exploring quantum dynamics and alternative quantum interpretations.
 
 The project implements several wave equation models and allows experimentation with different theoretical extensions such as:
@@ -449,6 +465,56 @@ detector jitter enter only through their quadrature sum, producing an exact
 unidentified direction unless one is calibrated independently. All time
 values remain dimensionless until the simulation clock is mapped to a
 specific particle, length scale, and laboratory apparatus.
+
+That clock mapping is now explicit in
+`analysis.trf_physical_scale`. The implemented Schrödinger equation gives
+`T0=mL0^2/hbar`. If the latent delay in `U(t+tau)` is postulated to be an
+actual additive arrival delay, the same conversion occurs on both sides and
+the direct-delay closure predicts `kappa_t=1`. The current spatial fixture
+then predicts `sigma_T=0.2T0` and, at `lambda=1`, a full-ensemble mean extra
+delay of `0.10086T0`.
+
+This separation agrees with the source document now stored at
+`paper/TRF_Information_Theoretic_Formulation_v0.2.pdf`: section 6 defines the
+kernel without fixing its width; section 8 equation (18) labels
+`sigma_T=alpha tau_stab` a postulated map with independently declared or
+calibrated `alpha`; sections 10–11 state that v0.2 does not yet provide a
+distinct prediction or derive a TRF timescale. It does not define an
+eventwise detector-arrival map.
+
+This exposes a mismatch with the earlier record-clock fixture. Its
+`tau_stab=2.76T0` and declared `alpha=1` convention predict
+`sigma_T=2.76T0`, 13.8 times the spatial value. Matching the current fixtures
+requires `alpha=0.2/2.76=0.07246377`. This `alpha` is a consistency value, not
+a TRF derivation. Consequently the project now has a dimensionful,
+falsifiable direct-delay family but still lacks a parameter-free TRF width
+prediction.
+
+The `alpha=1` branch cannot be inserted unchanged into the current detector
+run: its one-unit delay gate contains only `0.54670` of the latent mixture and
+its four-sigma horizon reaches `11.04T0`. It needs a wider gate, a larger
+nonperiodic domain, and renewed convergence checks.
+
+The locked reference `alpha=0.0724637681` now has a fast discrete convention
+profile over all 81 shared record-clock threshold choices. If that numerical
+alpha is held fixed while the operational clock definition changes, the
+predicted widths have a broad envelope. If each candidate convention is
+calibrated only on the same `g=1`, `sigma_T=0.2` control, the held-out ranges
+shrink to `[0.39813,0.40000]` at `g=0.5` and `[0.10000,0.10099]` at `g=2`.
+Thus alpha itself remains convention dependent (`0.04673`–`0.11364`), while
+the held-out ratios are robust in this analytic rate model.
+
+```bash
+MPLCONFIGDIR=/tmp/quantumtoy-matplotlib PYTHONPATH=src/quantumtoy \
+  .venv/bin/python \
+  src/quantumtoy/analysis/debug/run_trf_alpha_convention_profile.py
+```
+
+```bash
+MPLCONFIGDIR=/tmp/quantumtoy-matplotlib PYTHONPATH=src/quantumtoy \
+  .venv/bin/python \
+  src/quantumtoy/analysis/debug/run_trf_physical_scale_prediction.py
+```
 
 ---
 

@@ -8,6 +8,7 @@ from numpy.testing import assert_allclose
 from analysis.record_environment import RecordExperiment, simulate_record_formation
 from analysis.record_sensitivity import (
     build_reference_runs,
+    profile_clock_convention_widths,
     reevaluate_stabilization,
     threshold_grid,
     time_sampling_convergence,
@@ -63,6 +64,29 @@ class RecordSensitivityTests(unittest.TestCase):
         )
         self.assertEqual(len(rows), 2 * 2 * 3 * 2 * 2)
         self.assertTrue(all(row.stabilization is not None for row in rows))
+
+    def test_shared_convention_profile_recalibrates_only_at_control(self):
+        runs = build_reference_runs(
+            self.experiment, [0.5, 1.0, 2.0], duration=12, dt=0.02)
+        rows = threshold_grid(
+            runs, information_deficits=[0.05, 0.2],
+            required_copies=[2, 4], coherence_tolerances=[0.01, 0.1],
+            hold_times=[0.5])
+        profile = profile_clock_convention_widths(
+            rows, g_values=[0.5, 1.0, 2.0],
+            locked_alpha=0.2 / 2.76, calibration_g=1.0,
+            calibration_sigma_t=0.2)
+        self.assertEqual(len(profile.rows), 8)
+        self.assertEqual(profile.unresolved_conventions, 0)
+        for row in profile.rows:
+            self.assertAlmostEqual(row.calibration_profiled_widths[1], 0.2)
+            self.assertAlmostEqual(
+                row.locked_alpha_widths[0],
+                row.locked_alpha * row.latencies[0])
+            self.assertAlmostEqual(
+                row.calibration_profiled_widths[0], 0.4, delta=0.002)
+            self.assertAlmostEqual(
+                row.calibration_profiled_widths[2], 0.1, delta=0.001)
 
     def test_time_sampling_converges_with_exact_joint_normalization(self):
         results = time_sampling_convergence(
