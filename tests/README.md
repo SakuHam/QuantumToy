@@ -14,6 +14,9 @@ Front*, version 0.2, September 2026.
 
 | File | Checks |
 | --- | --- |
+| `test_memory_banks.py` | Zero/perfect banks; explicit enumeration of copy outcomes and persistent lifetimes; independent versus shared loss; count and delay monotonicity; repeated-read success without revival; complete unique-event accounting. |
+| `test_history_dynamics.py` | Complete selection-time weights; absorbing Kraus completeness; dense-operator density cross-check; back-action on wavefunction and detector; no post-absorption selection; memory erasure without recoherence; unitary null; sampled trajectory distribution; temporal refinement. |
+| `test_temporal_history_profile.py` | Monotone selection, present-front maximum, independent fading and invalid envelope parameters. |
 | `test_quantum_reference.py` | Section 4 joint table and ensemble recovery; unread versus absent instruments; no-click and loss completeness; impossible and rare records; scalar rank-one conditioning; weak-probe back-action; dissipative propagation and adjoint effects; later-setting marginals; singlet marginals and correlations. |
 | `test_emix_reference.py` | Section 5 arithmetic versus geometric mixture; posterior component weights; full operator phase invariance; existing scalar, spinor, and entangled Emix builders; epsilon error bound and impossible-event rejection. |
 | `test_record_environment.py` | Declared two-path preparation; weak-probe back-action; controlled physical memory fragments; complete probe–memory–detector joint records; restricted accessible information and Holevo bounds; residual coherence; redundancy and cross-coupling stabilization clock. |

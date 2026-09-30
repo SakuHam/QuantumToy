@@ -13,6 +13,42 @@ updating the analysis artifacts with:
 python src/quantumtoy/analysis/debug/build_trf_clock_demo.py
 ```
 
+The coupling control includes exploratory `g=0.1` and `g=0.05` settings. They
+use the exact `g*t` time-rescaling of the implemented record dynamics; they are
+not separate calibration datasets.
+
+The future/front/past panel implements a phenomenological temporal envelope.
+It keeps history selection monotone while a separately controlled accessible
+record fades with age. The observer age, retention time, fade time, and fade
+power are interactive; the corresponding tested Python implementation is in
+`analysis/temporal_history_profile.py`.
+
+The **Wavefunction and absorbing detector** panel now uses a causal quantum
+instrument: a single upper/lower projection changes the propagated state,
+and a detector absorbs it over time. Readable records decay from their own
+creation times. Both the surviving density and the complete detector law are
+recomputed from prepropagated branches when controls change. Erased records
+and missing detections are explicitly included; classical forgetting does
+not restore interference. This is a new candidate model, separate from the
+older fixed delay benchmark. See [the equations, assumptions and limits](paper/history_dynamics_model.md).
+
+The **Reference memories and repeated delayed reads** panel controls both the
+number of classical copies (0–16 in each bank) and the reads per delayed copy
+(1–16), with adjustable read spacing and read success. It compares independent
+copy lifetimes with a shared delayed-bank lifetime. Successful reads are kept
+in an ideal external log; the last read and all recovered unique records are
+shown separately. Counts are expectations for an adjustable number of particle
+preparations, never extra detections created by copying. Reference reliability
+is adjustable and assumed stable over the delay range. This classical model is
+implemented in `analysis/memory_banks.py` and does not change the quantum state.
+
+To regenerate its propagation data and the demo:
+
+```bash
+OPENBLAS_NUM_THREADS=1 python src/quantumtoy/analysis/debug/run_history_dynamics_study.py
+python src/quantumtoy/analysis/debug/build_trf_clock_demo.py
+```
+
 The demo labels the boundary between the clock model and the additional
 closure assumptions used by the numerical prediction.
 
