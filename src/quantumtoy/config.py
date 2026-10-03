@@ -60,6 +60,35 @@ class AppConfig:
     # ============================================================
     THEORY_NAME: str = "thick_front_entanglement"
 
+    # Forward history instrument. Times use the same units as dt.
+    HISTORY_SIGMA_T: float = .2
+    HISTORY_FRONT_TIME: float = .76
+    HISTORY_SELECTION_STRENGTH: float = 1.0
+    HISTORY_POINTER_Y: float = 0.0
+    HISTORY_ABSORPTION_RATE: float = 4.0
+    HISTORY_DETECTOR_X: float = 1.5
+    HISTORY_DETECTOR_WIDTH: float = .3
+    HISTORY_Y_BINS: int = 16
+    HISTORY_PROPAGATION_STEP: float = .005
+    HISTORY_SEED: int = 731
+    HISTORY_TRAJECTORIES: int = 128
+    HISTORY_OUTPUT: str = "demo/history_instrument_theory.html"
+    HISTORY_KEEP_TIME: float = .3
+    HISTORY_FADE_TIME: float = 1.0
+    HISTORY_FADE_POWER: float = 1.5
+    HISTORY_REFERENCE_COPIES: int = 1
+    HISTORY_DELAYED_COPIES: int = 4
+    HISTORY_REFERENCE_SURVIVAL: float = .995
+    HISTORY_MEMORY_LOSS_MODE: str = "independent"
+    HISTORY_READ_COUNT: int = 4
+    HISTORY_READ_WAIT: float = 0.0
+    HISTORY_READ_SPACING: float = .2
+    HISTORY_READ_EFFICIENCY: float = .9
+    HISTORY_DETECTION_EFFICIENCY: float = .9
+    HISTORY_DARK_PROBABILITY: float = .01
+    HISTORY_BLUR_SIGMA: float = .5
+    HISTORY_TIMING_JITTER: float = 0.0
+
     # Experimental no-signalling stress-test knob for
     # THEORY_NAME="signalling_trf_entanglement" or "forbidden_signal_trf".
     # 0.0 keeps Bob's marginal no-signalling-safe; >0.0 deliberately injects

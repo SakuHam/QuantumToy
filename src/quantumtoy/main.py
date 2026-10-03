@@ -710,6 +710,8 @@ class QuantumSimulationApp:
 
     def build_setup(self) -> SimulationSetup:
         cfg = self.cfg
+        if cfg.THEORY_NAME == "history_instrument" and cfg.USE_SCREEN_CAP:
+            raise ValueError("history_instrument owns detector absorption; set USE_SCREEN_CAP=False (boundary CAP remains supported)")
         cfg.dump_selected()
 
         if os.environ.get("DT") is not None:
@@ -750,10 +752,11 @@ class QuantumSimulationApp:
             for comp in potential.components:
                 print(comp.name, comp.kind, comp.V_real.shape)
 
-        estimate_slit_separation_from_masks(grid, potential)
+        if cfg.THEORY_NAME != "history_instrument":
+            estimate_slit_separation_from_masks(grid, potential)
 
         theory = build_theory(cfg, grid, potential)
-        detector = build_detector(cfg, grid)
+        detector = None if cfg.THEORY_NAME == "history_instrument" else build_detector(cfg, grid)
 
         return SimulationSetup(
             cfg=cfg,
@@ -2243,6 +2246,9 @@ class QuantumSimulationApp:
 
     def run(self):
         setup = self.build_setup()
+        if self.cfg.THEORY_NAME == "history_instrument":
+            from core.history_runner import run_history_setup
+            return run_history_setup(setup)
         forward = self.run_forward(setup)
 
         self.print_forward_debug_checks(setup, forward)

@@ -14,6 +14,7 @@ Front*, version 0.2, September 2026.
 
 | File | Checks |
 | --- | --- |
+| `test_history_instrument_theory.py` | Streaming quantum trajectories versus the independent exact branch ensemble (12,000 preparations); unitary null; absorbing terminal state; separate CAP loss; persistent memory trajectories versus analytic law; digitizer gate and true birth times; seeded repeatability; registry and main-app forward-only export routing. |
 | `test_memory_banks.py` | Zero/perfect banks; explicit enumeration of copy outcomes and persistent lifetimes; independent versus shared loss; count and delay monotonicity; repeated-read success without revival; complete unique-event accounting. |
 | `test_history_dynamics.py` | Complete selection-time weights; absorbing Kraus completeness; dense-operator density cross-check; back-action on wavefunction and detector; no post-absorption selection; memory erasure without recoherence; unitary null; sampled trajectory distribution; temporal refinement. |
 | `test_temporal_history_profile.py` | Monotone selection, present-front maximum, independent fading and invalid envelope parameters. |

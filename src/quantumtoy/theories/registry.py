@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from theories.schrodinger import SchrodingerTheory
+from theories.history_instrument import HistoryInstrumentTheory
 from theories.schrodinger_measurement import SchrodingerMeasurementTheory
 from theories.thick_front import ThickFrontTheory
 from theories.thick_front_optimized import ThickFrontOptimizedTheory
@@ -97,7 +98,22 @@ def _validate_common_inputs(cfg, grid, potential):
 def build_theory(cfg, grid, potential):
     theory_name, m_mass, hbar = _validate_common_inputs(cfg, grid, potential)
 
-    if theory_name == "schrodinger":
+    if theory_name == "history_instrument":
+        theory = HistoryInstrumentTheory(
+            grid=grid, potential=potential, m_mass=m_mass, hbar=hbar,
+            sigma_t=getattr(cfg, 'HISTORY_SIGMA_T', .2),
+            front_time=getattr(cfg, 'HISTORY_FRONT_TIME', .76),
+            selection_strength=getattr(cfg, 'HISTORY_SELECTION_STRENGTH', 1.),
+            pointer_y=getattr(cfg, 'HISTORY_POINTER_Y', 0.),
+            absorption_rate=getattr(cfg, 'HISTORY_ABSORPTION_RATE', 4.),
+            detector_x=getattr(cfg, 'HISTORY_DETECTOR_X', 1.5),
+            detector_width=getattr(cfg, 'HISTORY_DETECTOR_WIDTH', .3),
+            y_bins=getattr(cfg, 'HISTORY_Y_BINS', 16),
+            propagation_step=getattr(cfg, 'HISTORY_PROPAGATION_STEP', .005),
+            rng_seed=getattr(cfg, 'HISTORY_SEED', 731),
+        )
+
+    elif theory_name == "schrodinger":
         theory = SchrodingerTheory(
             grid=grid,
             potential=potential,
@@ -724,6 +740,7 @@ def build_theory(cfg, grid, potential):
 
     else:
         allowed = [
+            "history_instrument",
             "schrodinger",
             "schrodinger_measurement",
             "thick_front",

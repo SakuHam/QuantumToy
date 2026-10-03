@@ -161,6 +161,79 @@ different, explicitly specified experiment.
 
 ## Parameters and numerical verification
 
+### Forward Theory integration and visual playback
+
+`theories/history_instrument.py` implements `HistoryInstrumentTheory`, registered
+as `history_instrument`. It accepts a scalar wavefunction or a batch with shape
+`(shots, Ny, Nx)` and uses the simulator's grid/potential/mass/ℏ. A live
+trajectory is conditionally normalized by `dx*dy`; an absorbed trajectory is
+exactly zero and stays zero. Ensemble density and current average over **all**
+preparations, not only survivors. Branch wavefunctions are not coherently added.
+
+At initialization, each trajectory samples the same truncated Gaussian clock
+and the never-selected probability exp(−λ) as the analytical branch model.
+Within a step, a due selection is placed at the midpoint and its upper/lower
+outcome is sampled with the Born probability. The detector channel follows
+the two unitary half steps. Its no-click result is normalized conditional on
+survival; detection terminates that trajectory. The selected historical label
+never changes even if the later wavefunction crosses the pointer boundary.
+Independent quantum and readout random streams prevent classical memory
+settings from altering quantum trajectories through random-number consumption.
+
+The simulator can also have an existing complex absorbing potential
+`V_real−iW`. The new Theory propagates `V_real` unitarily and accounts for W as
+a separate terminal boundary/environment loss with rate `2W/ℏ`. In each
+instrument step the combined hazard is `a(x,y)=ΓD(x,y)+2W(x,y)/ℏ`. The loss
+effect is `1−exp(−a Δt)`; the terminal channel is chosen in proportion to its
+local rate. These losses are not detector clicks. With W=0 this is the
+reference detector instrument; with nonzero W it is a specified splitting
+approximation requiring time refinement. The locked visual preset uses W=0.
+The app rejects `USE_SCREEN_CAP=True` for this Theory to prevent an additional
+screen absorber from duplicating the instrument's detector channel.
+
+The specialized runner saves `TheoryStepResult.aux` events, bypasses the legacy
+detector/terminal-click sampler, and continues classical readout after the
+quantum acquisition window. It does not run the old Emix/backward or Bohmian
+pipeline. A register-aware adjoint is not implemented: backward calls raise
+`NotImplementedError` rather than substituting unitary Schrödinger reversal.
+
+Electronics are the existing **window-level** response: at most one accepted
+genuine record, otherwise a possible dark record. Dark records are assigned
+after the entire acquisition and are not a continuous causal Poisson detector
+model. True creation times are retained separately from jittered timestamps;
+memory ages always use creation times. The reference memories and delayed
+copy lifetimes are sampled once, then reused at every read, so loss cannot
+randomly reverse. Successful reads are kept in the ideal external log.
+
+The supplied HTML viewer plays computed Python frames at λ=0,1,4, with 512
+preparations per case. Its scene menu does not solve new parameter settings
+in the browser. Individual and ensemble panels have separately declared colour
+scales; both compared ensembles share one scale. The display is quantized;
+NPZ densities are float32 and the initial complex state/potential are archived.
+After acquisition, the spatial panels explicitly show the final acquisition
+state while the timeline advances through readout. The simulation event log
+includes hidden selection and absorption events, not a claim of experimental
+access to that entire history. Sampling error may exceed the change in total
+click probability at this small sample count.
+Illustrative trajectories are selected after acquisition to include a detected
+particle and surviving upper/lower/unselected histories when available. They
+are reconstructed deterministically from the original selection/absorption
+records, with no fresh random draws, and checked against the original propagated
+states. Their display selection does not affect the all-preparation statistics.
+
+`run_history_instrument.py` provides the reference geometry and parameterized
+exports. Its optional reference width law σ=0.2/g is the chosen baseline
+calibration; the Theory itself accepts σ and c directly. The full app selects
+the same Theory with `THEORY_NAME="history_instrument"` but uses the app's
+geometry/packet and `HISTORY_*` parameters, so its numerical results need not
+match the reference preset.
+
+Verification includes a 12,000-trajectory comparison of unconditional clicks
+and surviving density against `build_history_dynamics_basis`, a unitary null,
+irreversible absorption, separate boundary loss, analytic versus sampled
+memory readouts, digitizer gate rejection, and app routing. These verify the
+implemented candidate; they do not establish its empirical correctness.
+
 ### Adjustable memory banks and repeated reads
 
 `analysis/memory_banks.py` acts on the classical record law **before erasure**.

@@ -1,5 +1,57 @@
 # QuantumToy
 
+## History Instrument Theory: visual simulation
+
+Open [the Theory playback](demo/history_instrument_theory.html). It contains
+actual forward simulations at λ=0, 1 and 4: ensemble densities, four individual
+trajectories, physical first detections, and delayed memory reads. Play/pause,
+the timeline, scenario selection and EN/FI work offline. Physics settings are
+computed by Python; the browser plays saved frames.
+
+Generate the locked double-slit preset:
+
+```bash
+OPENBLAS_NUM_THREADS=1 .venv/bin/python src/quantumtoy/analysis/debug/run_history_instrument.py
+```
+
+Examples of changing the model (each command creates a separate playback):
+
+```bash
+OPENBLAS_NUM_THREADS=1 .venv/bin/python src/quantumtoy/analysis/debug/run_history_instrument.py --g 0.1 --output demo/history_low_g.html
+OPENBLAS_NUM_THREADS=1 .venv/bin/python src/quantumtoy/analysis/debug/run_history_instrument.py --strengths 0 2 --delayed-copies 8 --reads 6 --spacing 0.1 --loss-mode shared --output demo/history_shared_memory.html
+```
+
+Use `--help` for clock, detector, memory, grid, seed and sample-count controls.
+The default is 512 preparations per scenario on a 48×48 periodic lattice,
+100 steps over 2 time units. The reference bridge is σ=0.2/g and
+c=clock_start+σ/α with α=0.2/2.76; `--sigma` and `--front-time` allow direct
+values. This is a declared calibration, not an independently derived constant.
+
+The registry name is `history_instrument`. Setting
+`AppConfig.THEORY_NAME = "history_instrument"` routes the main app to its own
+forward event/readout runner, using the app's configured grid, potential and
+packet. Parameters are the `HISTORY_*` fields in `config.py`; output is
+`HISTORY_OUTPUT`. The existing default geometry is different from the locked
+preset above. This runner owns absorption and bypasses the legacy detector,
+click conditioning, backward library and Bohmian postprocessing.
+For the app's large padded default grid, reduce `HISTORY_TRAJECTORIES` or use
+a smaller grid: the runner rejects batches whose state alone exceeds 512 MiB.
+Keep `USE_SCREEN_CAP=False` to avoid duplicating detector absorption; boundary
+CAP losses are supported and recorded separately.
+
+Every export includes HTML, a JSON parameter/event/readout archive, and an NPZ
+with the complex initial states, real potential, boundary absorber, frame
+times, float32 ensemble densities and four example densities. Display colours
+are quantized with fixed shared ensemble scaling. Late playback holds the
+quantum fields at acquisition end while advancing memory readouts. The event
+log includes latent simulator history, not just experimentally readable data.
+Examples are chosen after the run to include a detected preparation and
+surviving upper/lower/unselected histories when available, then reconstructed
+from their actual jump records. They illustrate possibilities, not sampling
+frequencies; the ensemble and histograms still use every preparation.
+
+See [the equations and integration limits](paper/history_dynamics_model.md).
+
 ## Interactive thick-front clock demo
 
 Open [`demo/trf_clock_lab.html`](demo/trf_clock_lab.html) directly in a browser.
